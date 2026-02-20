@@ -458,29 +458,20 @@ def visualize_animated(data, links, packets, max_frames=None, output_file=None, 
                             ))
 
         # Add packet flow arrows if available
-        if flows and current_time in flows:
-            if frame_idx == 0:
-                print(f"Frame {frame_idx}: Found {len(flows[current_time])} flows at time {current_time}")
-            for flow in flows[current_time]:
-                # Skip direct Server <-> UE flows if present
-                if {flow['src_type'], flow['dst_type']} == {'SERVER', 'UE'}:
-                    continue
+        flow_time_key = int(current_time)  # Flows are indexed by integer seconds
+        if flows and flow_time_key in flows:
+            for flow in flows[flow_time_key]:
                 # Create arrow from source to destination
                 src = flow['src_pos']
                 dst = flow['dst_pos']
-                
                 # Direction vector
                 direction = dst - src
                 length = np.linalg.norm(direction)
                 
                 # Determine flow color based on link type
                 link_type = flow.get('link_type', 'UNKNOWN')
-                if link_type == 'ISL':
-                    flow_color = 'cyan'  # ISL flows in cyan
-                elif link_type == 'GROUND':
-                    flow_color = 'magenta'  # Ground/Server flows in magenta
-                else:
-                    flow_color = 'white'  # Unknown in white
+
+                flow_color = 'cyan'  # ISL flows in cyan
                 
                 # Create arrow with cone at destination
                 # Line for the flow
@@ -518,6 +509,103 @@ def visualize_animated(data, links, packets, max_frames=None, output_file=None, 
                     showlegend=False,
                     hoverinfo='skip'
                 ))
+
+        # Add packet events if available for this time
+        # Collect all packet events within this frame's time window
+        if packets:
+            # Determine time window for this frame
+            next_time = times[frame_idx + 1] if frame_idx + 1 < len(times) else current_time + 1.0
+            
+            events = []
+            for time_key, time_events in packets.items():
+                for ev in time_events:
+                    # Include packets from current_time up to (but not including) next_time
+                    if current_time <= ev['time'] < next_time:
+                        events.append(ev)
+
+            tx_x, tx_y, tx_z, tx_hover, tx_size = [], [], [], [], []
+            rx_x, rx_y, rx_z, rx_hover, rx_size = [], [], [], [], []
+            dr_x, dr_y, dr_z, dr_hover, dr_size = [], [], [], [], []
+
+            for ev in events:
+                node_entry = node_index.get(ev['node_id'])
+                if not node_entry:
+                    continue
+                pos = get_position_at_time(node_entry, current_time)
+                if pos is None:
+                    continue
+
+                size = max(8.0, min(20.0, ev['size_bytes'] / 10.0))
+                
+                link_type = ev.get('link_type', 'UNKNOWN')
+                peer_node = ev.get('peer_node_id', -1)
+                hover = (f"{ev['event']} Node {ev['node_id']} Dev {ev['device_id']}<br>"
+                         f"Peer: {peer_node} ({link_type})<br>"
+                         f"Size: {ev['size_bytes']} bytes<br>"
+                         f"SNR: {ev['snr_db']:.2f} dB<br>"
+                         f"Doppler: {ev['doppler_hz']:.2f} Hz")
+
+                if ev['event'] == 'TX':
+                    tx_x.append(pos[0]); tx_y.append(pos[1]); tx_z.append(pos[2])
+                    tx_hover.append(hover); tx_size.append(size)
+                elif ev['event'] == 'RX':
+                    rx_x.append(pos[0]); rx_y.append(pos[1]); rx_z.append(pos[2])
+                    rx_hover.append(hover); rx_size.append(size)
+                else:
+                    dr_x.append(pos[0]); dr_y.append(pos[1]); dr_z.append(pos[2])
+                    dr_hover.append(hover); dr_size.append(size)
+
+            # Always add packet traces to maintain consistent frame structure
+            # TX packets
+            frame_data.append(go.Scatter3d(
+                x=tx_x, y=tx_y, z=tx_z,
+                mode='markers',
+                marker=dict(
+                    size=tx_size if tx_x else [10],
+                    color='orange',
+                    symbol='circle',
+                    opacity=0.9,
+                    line=dict(color='darkorange', width=2)
+                ),
+                name='TX packets',
+                hovertext=tx_hover if tx_x else [],
+                showlegend=(frame_idx == 0),
+                visible=True
+            ))
+
+            # RX packets
+            frame_data.append(go.Scatter3d(
+                x=rx_x, y=rx_y, z=rx_z,
+                mode='markers',
+                marker=dict(
+                    size=rx_size if rx_x else [10],
+                    color='lime',
+                    symbol='circle',
+                    opacity=0.9,
+                    line=dict(color='green', width=2)
+                ),
+                name='RX packets',
+                hovertext=rx_hover if rx_x else [],
+                showlegend=(frame_idx == 0),
+                visible=True
+            ))
+
+            # Dropped packets
+            frame_data.append(go.Scatter3d(
+                x=dr_x, y=dr_y, z=dr_z,
+                mode='markers',
+                marker=dict(
+                    size=dr_size if dr_x else [10],
+                    color='red',
+                    symbol='x',
+                    opacity=0.9,
+                    line=dict(color='darkred', width=3)
+                ),
+                name='Dropped packets',
+                hovertext=dr_hover if dr_x else [],
+                showlegend=(frame_idx == 0),
+                visible=True
+            ))
 
         # Add packet events if available for this time
         # Collect all packet events within this frame's time window

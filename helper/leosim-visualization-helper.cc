@@ -21,11 +21,13 @@
 #include "ns3/config.h"
 #include "ns3/mobility-model.h"
 #include "ns3/names.h"
+#include "ns3/net-device.h"
 #include "ns3/node-list.h"
 #include "ns3/node.h"
 #include "ns3/simulator.h"
 
 #include <iomanip>
+#include <sstream>
 
 namespace ns3
 {
@@ -547,6 +549,14 @@ LeoSimVisualizationHelper::OnPhyRx(std::string context,
 }
 
 void
+LeoSimVisualizationHelper::OnPhyRxBasic(std::string context, Ptr<const Packet> packet)
+{
+    // Wrapper for OnPhyRx when SNR/Doppler are not available
+    OnPhyRx(context, packet, 0.0, 0.0);
+}
+
+
+void
 LeoSimVisualizationHelper::OnPhyRxDrop(std::string context, Ptr<const Packet> packet)
 {
     if (!m_packetFileStream.is_open())
@@ -583,7 +593,9 @@ LeoSimVisualizationHelper::OnPhyRxDrop(std::string context, Ptr<const Packet> pa
 }
 
 void
-LeoSimVisualizationHelper::InstallPacketLogging()
+LeoSimVisualizationHelper::InstallPacketLogging(NodeContainer satellites,
+                                                   NodeContainer servers,
+                                                   NodeContainer ues)
 {
     if (!m_enablePacketLogging || m_packetLoggingInstalled)
     {
@@ -596,11 +608,93 @@ LeoSimVisualizationHelper::InstallPacketLogging()
         return;
     }
 
-    // Note: LeoSimNetDevice has been removed from this project.
-    // Packet logging via Config::Connect is no longer available.
-    // Use standard ns3 packet tracing if needed (e.g., via Pcap or FlowMonitor).
-    NS_LOG_WARN("LeoSimNetDevice packet logging is not supported in this version");
+    m_satellites = satellites;
+    m_servers = servers;
+    m_ues = ues;
 
+    // Install packet tracing on all nodes by connecting to device traces
+    for (uint32_t i = 0; i < satellites.GetN(); i++)
+    {
+        Ptr<Node> node = satellites.Get(i);
+        for (uint32_t j = 0; j < node->GetNDevices(); j++)
+        {
+            Ptr<NetDevice> device = node->GetDevice(j);
+            if (!device)
+                continue;
+            // Only install on PointToPointNetDevices
+            if (device->GetInstanceTypeId().GetName() != "ns3::PointToPointNetDevice")
+                continue;
+
+            std::ostringstream pathTx, pathRx, pathDrop;
+            pathTx << "/NodeList/" << node->GetId() << "/DeviceList/" << j << "/$ns3::PointToPointNetDevice/PhyTxBegin";
+            pathRx << "/NodeList/" << node->GetId() << "/DeviceList/" << j << "/$ns3::PointToPointNetDevice/PhyRxEnd";
+            pathDrop << "/NodeList/" << node->GetId() << "/DeviceList/" << j << "/$ns3::PointToPointNetDevice/PhyRxDrop";
+            
+            Config::Connect(pathTx.str(),
+                          MakeCallback(&LeoSimVisualizationHelper::OnPhyTx, this));
+            Config::Connect(pathRx.str(),
+                          MakeCallback(&LeoSimVisualizationHelper::OnPhyRxBasic, this));
+            Config::Connect(pathDrop.str(),
+                          MakeCallback(&LeoSimVisualizationHelper::OnPhyRxDrop, this));
+        }
+    }
+
+    // Install tracing on server nodes
+    for (uint32_t i = 0; i < servers.GetN(); i++)
+    {
+        Ptr<Node> node = servers.Get(i);
+        for (uint32_t j = 0; j < node->GetNDevices(); j++)
+        {
+            Ptr<NetDevice> device = node->GetDevice(j);
+            if (!device)
+                continue;
+            // Only install on PointToPointNetDevices
+            if (device->GetInstanceTypeId().GetName() != "ns3::PointToPointNetDevice")
+                continue;
+
+            std::ostringstream pathTx, pathRx, pathDrop;
+            pathTx << "/NodeList/" << node->GetId() << "/DeviceList/" << j << "/$ns3::PointToPointNetDevice/PhyTxBegin";
+            pathRx << "/NodeList/" << node->GetId() << "/DeviceList/" << j << "/$ns3::PointToPointNetDevice/PhyRxEnd";
+            pathDrop << "/NodeList/" << node->GetId() << "/DeviceList/" << j << "/$ns3::PointToPointNetDevice/PhyRxDrop";
+            
+            Config::Connect(pathTx.str(),
+                          MakeCallback(&LeoSimVisualizationHelper::OnPhyTx, this));
+            Config::Connect(pathRx.str(),
+                          MakeCallback(&LeoSimVisualizationHelper::OnPhyRxBasic, this));
+            Config::Connect(pathDrop.str(),
+                          MakeCallback(&LeoSimVisualizationHelper::OnPhyRxDrop, this));
+        }
+    }
+
+    // Install tracing on UE nodes
+    for (uint32_t i = 0; i < ues.GetN(); i++)
+    {
+        Ptr<Node> node = ues.Get(i);
+        for (uint32_t j = 0; j < node->GetNDevices(); j++)
+        {
+            Ptr<NetDevice> device = node->GetDevice(j);
+            if (!device)
+                continue;
+            // Only install on PointToPointNetDevices
+            if (device->GetInstanceTypeId().GetName() != "ns3::PointToPointNetDevice")
+                continue;
+
+            std::ostringstream pathTx, pathRx, pathDrop;
+            pathTx << "/NodeList/" << node->GetId() << "/DeviceList/" << j << "/$ns3::PointToPointNetDevice/PhyTxBegin";
+            pathRx << "/NodeList/" << node->GetId() << "/DeviceList/" << j << "/$ns3::PointToPointNetDevice/PhyRxEnd";
+            pathDrop << "/NodeList/" << node->GetId() << "/DeviceList/" << j << "/$ns3::PointToPointNetDevice/PhyRxDrop";
+            
+            Config::Connect(pathTx.str(),
+                          MakeCallback(&LeoSimVisualizationHelper::OnPhyTx, this));
+            Config::Connect(pathRx.str(),
+                          MakeCallback(&LeoSimVisualizationHelper::OnPhyRxBasic, this));
+            Config::Connect(pathDrop.str(),
+                          MakeCallback(&LeoSimVisualizationHelper::OnPhyRxDrop, this));
+        }
+    }
+
+    NS_LOG_INFO("Packet logging installed for " << (satellites.GetN() + servers.GetN() + ues.GetN())
+                                                  << " nodes");
     m_packetLoggingInstalled = true;
 }
 

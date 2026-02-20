@@ -105,8 +105,11 @@ class LeoSimVisualizationHelper
 
     /**
      * \brief Install packet logging hooks (after devices are created)
+     * \param satellites Container of satellite nodes for tracing
+     * \param servers Container of server nodes for tracing
+     * \param ues Container of UE nodes for tracing
      */
-    void InstallPacketLogging();
+    void InstallPacketLogging(NodeContainer satellites, NodeContainer servers, NodeContainer ues);
 
     /**
      * \brief Initialize output files with CSV headers
@@ -148,6 +151,7 @@ class LeoSimVisualizationHelper
 
     void OnPhyTx(std::string context, Ptr<const Packet> packet);
     void OnPhyRx(std::string context, Ptr<const Packet> packet, double snrDb, double dopplerHz);
+    void OnPhyRxBasic(std::string context, Ptr<const Packet> packet);
     void OnPhyRxDrop(std::string context, Ptr<const Packet> packet);
 
     Ptr<Node> GetDevicePeerNode(int nodeId, int deviceId) const;

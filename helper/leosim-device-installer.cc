@@ -1,0 +1,483 @@
+/*
+ * Copyright (c) 2024 Anupa De Silva
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation;
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ */
+
+#include "leosim-device-installer.h"
+
+#include "ns3/attribute.h"
+#include "ns3/internet-stack-helper.h"
+#include "ns3/log.h"
+#include "ns3/node.h"
+#include "ns3/point-to-point-helper.h"
+#include "ns3/simple-channel.h"
+#include "ns3/string.h"
+#include "ns3/uinteger.h"
+
+namespace ns3
+{
+
+NS_LOG_COMPONENT_DEFINE("LeoSimDeviceInstaller");
+
+LeoSimDeviceInstaller::LeoSimDeviceInstaller()
+    : m_dataRate("100Mbps"),
+      m_delay("1ms"),
+      m_mtu(1500),
+      m_verbose(false),
+      m_numInstalledDevices(0),
+      m_devicesPerNode(10)
+{
+    NS_LOG_FUNCTION(this);
+    // Create a shared channel for ISL devices
+    m_islChannel = CreateObject<SimpleChannel>();
+}
+
+LeoSimDeviceInstaller::~LeoSimDeviceInstaller()
+{
+    NS_LOG_FUNCTION(this);
+    Clear();
+}
+
+void
+LeoSimDeviceInstaller::SetChannelModel(Ptr<LeoSimChannelModel> channelModel)
+{
+    NS_LOG_FUNCTION(this << channelModel);
+    m_channelModel = channelModel;
+}
+
+void
+LeoSimDeviceInstaller::SetDeviceDataRate(std::string dataRate)
+{
+    NS_LOG_FUNCTION(this << dataRate);
+    m_dataRate = dataRate;
+}
+
+void
+LeoSimDeviceInstaller::SetDeviceDelay(std::string delay)
+{
+    NS_LOG_FUNCTION(this << delay);
+    m_delay = delay;
+}
+
+void
+LeoSimDeviceInstaller::SetDeviceMtu(uint32_t mtu)
+{
+    NS_LOG_FUNCTION(this << mtu);
+    m_mtu = mtu;
+}
+
+void
+LeoSimDeviceInstaller::SetVerbose(bool verbose)
+{
+    NS_LOG_FUNCTION(this << verbose);
+    m_verbose = verbose;
+}
+
+std::string
+LeoSimDeviceInstaller::GetNodePairKey(Ptr<Node> node1, Ptr<Node> node2)
+{
+    NS_LOG_FUNCTION(this);
+    // Create a canonical key where lower ID comes first
+    uint32_t id1 = node1->GetId();
+    uint32_t id2 = node2->GetId();
+
+    if (id1 > id2)
+    {
+        std::swap(id1, id2);
+    }
+
+    return std::to_string(id1) + "-" + std::to_string(id2);
+}
+
+bool
+LeoSimDeviceInstaller::IsLinkInstalled(Ptr<Node> node1, Ptr<Node> node2)
+{
+    NS_LOG_FUNCTION(this);
+    std::string key = GetNodePairKey(node1, node2);
+    return m_installedLinks.find(key) != m_installedLinks.end();
+}
+
+std::pair<Ptr<NetDevice>, Ptr<NetDevice>>
+LeoSimDeviceInstaller::InstallLink(Ptr<Node> node1, Ptr<Node> node2)
+{
+    NS_LOG_FUNCTION(this << node1 << node2);
+
+    // Check if link is already installed
+    if (IsLinkInstalled(node1, node2))
+    {
+        auto it = m_installedLinks.find(GetNodePairKey(node1, node2));
+        return it->second;
+    }
+
+    // Create point-to-point devices between the two nodes
+    PointToPointHelper p2pHelper;
+    p2pHelper.SetDeviceAttribute("DataRate", ns3::StringValue(m_dataRate));
+    p2pHelper.SetChannelAttribute("Delay", ns3::StringValue(m_delay));
+
+    NetDeviceContainer devices = p2pHelper.Install(node1, node2);
+
+    // Set MTU on devices
+    for (uint32_t i = 0; i < devices.GetN(); ++i)
+    {
+        devices.Get(i)->SetAttribute("Mtu", ns3::UintegerValue(m_mtu));
+    }
+
+    // Track the installation
+    std::pair<Ptr<NetDevice>, Ptr<NetDevice>> devPair(devices.Get(0), devices.Get(1));
+    std::string key = GetNodePairKey(node1, node2);
+    m_installedLinks[key] = devPair;
+
+    // Track devices per node
+    m_nodeDevices[node1].Add(devices.Get(0));
+    m_nodeDevices[node2].Add(devices.Get(1));
+
+    m_numInstalledDevices += 2;
+
+    if (m_verbose)
+    {
+        NS_LOG_INFO("Installed P2P devices between nodes " << node1->GetId() << " and "
+                                                           << node2->GetId());
+    }
+
+    return devPair;
+}
+
+NetDeviceContainer
+LeoSimDeviceInstaller::Install(NodeContainer satellites, NodeContainer groundNodes)
+{
+    NS_LOG_FUNCTION(this);
+
+    if (!m_channelModel)
+    {
+        NS_LOG_ERROR("Channel model not set");
+        return NetDeviceContainer();
+    }
+
+    NetDeviceContainer allDevices;
+
+    // Get ALL links from the channel model (both UP and DOWN)
+    // This creates a full pool of devices that can be reused as links change state
+    std::vector<LeoSimChannelModel::LinkSnapshot> allLinks =
+        m_channelModel->GetLinksByType(LEOSIM_LINK_SATELLITE_TO_GROUND, true);
+    std::vector<LeoSimChannelModel::LinkSnapshot> islLinks =
+        m_channelModel->GetLinksByType(LEOSIM_LINK_ISL, true);
+
+    // Combine all links
+    allLinks.insert(allLinks.end(), islLinks.begin(), islLinks.end());
+
+    if (m_verbose)
+    {
+        NS_LOG_INFO("Installing devices for " << allLinks.size() << " links");
+    }
+
+    // Install devices for each link
+    for (const auto& link : allLinks)
+    {
+        auto devPair = InstallLink(link.node1, link.node2);
+        allDevices.Add(devPair.first);
+        allDevices.Add(devPair.second);
+    }
+
+    if (m_verbose)
+    {
+        NS_LOG_INFO("Installed " << allDevices.GetN() << " total devices");
+    }
+
+    return allDevices;
+}
+
+NetDeviceContainer
+LeoSimDeviceInstaller::Install(NodeContainer satellites,
+                               NodeContainer groundNodes,
+                               LeoSimLinkType linkType)
+{
+    NS_LOG_FUNCTION(this);
+
+    if (!m_channelModel)
+    {
+        NS_LOG_ERROR("Channel model not set");
+        return NetDeviceContainer();
+    }
+
+    NetDeviceContainer allDevices;
+
+    // Get links of specific type
+    std::vector<LeoSimChannelModel::LinkSnapshot> links =
+        m_channelModel->GetLinksByType(linkType, false);
+
+    if (m_verbose)
+    {
+        NS_LOG_INFO("Installing devices for " << links.size() << " links of type " << linkType);
+    }
+
+    // Install devices for each link
+    for (const auto& link : links)
+    {
+        auto devPair = InstallLink(link.node1, link.node2);
+        allDevices.Add(devPair.first);
+        allDevices.Add(devPair.second);
+    }
+
+    if (m_verbose)
+    {
+        NS_LOG_INFO("Installed " << allDevices.GetN() << " devices for link type " << linkType);
+    }
+
+    return allDevices;
+}
+
+uint32_t
+LeoSimDeviceInstaller::InstallDynamic(NodeContainer satellites, NodeContainer groundNodes)
+{
+    NS_LOG_FUNCTION(this);
+
+    if (!m_channelModel)
+    {
+        NS_LOG_ERROR("Channel model not set");
+        return 0;
+    }
+
+    uint32_t devicesAdded = 0;
+
+    // Get all active links
+    std::vector<LeoSimChannelModel::LinkSnapshot> allLinks =
+        m_channelModel->GetLinksByType(LEOSIM_LINK_SATELLITE_TO_GROUND, false);
+    std::vector<LeoSimChannelModel::LinkSnapshot> islLinks =
+        m_channelModel->GetLinksByType(LEOSIM_LINK_ISL, false);
+
+    allLinks.insert(allLinks.end(), islLinks.begin(), islLinks.end());
+
+    // Install devices for new links
+    for (const auto& link : allLinks)
+    {
+        if (!IsLinkInstalled(link.node1, link.node2))
+        {
+            InstallLink(link.node1, link.node2);
+            devicesAdded += 2;
+        }
+    }
+
+    if (m_verbose)
+    {
+        NS_LOG_INFO("Dynamic installation added " << devicesAdded << " devices");
+    }
+
+    return devicesAdded;
+}
+
+uint32_t
+LeoSimDeviceInstaller::Update()
+{
+    NS_LOG_FUNCTION(this);
+
+    if (!m_channelModel)
+    {
+        NS_LOG_ERROR("Channel model not set");
+        return 0;
+    }
+
+    uint32_t changes = 0;
+
+    // Get all active links
+    std::vector<LeoSimChannelModel::LinkSnapshot> allLinks =
+        m_channelModel->GetLinksByType(LEOSIM_LINK_SATELLITE_TO_GROUND, false);
+    std::vector<LeoSimChannelModel::LinkSnapshot> islLinks =
+        m_channelModel->GetLinksByType(LEOSIM_LINK_ISL, false);
+
+    allLinks.insert(allLinks.end(), islLinks.begin(), islLinks.end());
+
+    // Check for new links
+    for (const auto& link : allLinks)
+    {
+        if (!IsLinkInstalled(link.node1, link.node2))
+        {
+            InstallLink(link.node1, link.node2);
+            changes += 2;
+        }
+    }
+
+    // Check for removed links (links that are not in channel model anymore)
+    std::vector<std::string> linksToRemove;
+    for (const auto& [key, devPair] : m_installedLinks)
+    {
+        // Extract node IDs from key
+        size_t dashPos = key.find('-');
+        uint32_t id1 = std::stoul(key.substr(0, dashPos));
+        uint32_t id2 = std::stoul(key.substr(dashPos + 1));
+
+        // Check if this link still exists in channel model
+        bool linkExists = false;
+        for (const auto& link : allLinks)
+        {
+            if ((link.node1->GetId() == id1 && link.node2->GetId() == id2) ||
+                (link.node1->GetId() == id2 && link.node2->GetId() == id1))
+            {
+                linkExists = true;
+                break;
+            }
+        }
+
+        if (!linkExists)
+        {
+            linksToRemove.push_back(key);
+        }
+    }
+
+    // Remove devices for non-existent links
+    for (const auto& key : linksToRemove)
+    {
+        auto it = m_installedLinks.find(key);
+        if (it != m_installedLinks.end())
+        {
+            // Note: In a real implementation, you would uninstall the devices
+            // from the nodes, but ns-3 doesn't provide a direct way to do this
+            m_installedLinks.erase(it);
+            changes += 2;
+        }
+    }
+
+    if (m_verbose)
+    {
+        NS_LOG_INFO("Update resulted in " << changes << " changes");
+    }
+
+    return changes;
+}
+
+NetDeviceContainer
+LeoSimDeviceInstaller::GetDevicesForNode(Ptr<Node> node)
+{
+    NS_LOG_FUNCTION(this << node);
+    auto it = m_nodeDevices.find(node);
+    if (it != m_nodeDevices.end())
+    {
+        return it->second;
+    }
+    return NetDeviceContainer();
+}
+
+NetDeviceContainer
+LeoSimDeviceInstaller::GetDevicesForLink(Ptr<Node> node1, Ptr<Node> node2)
+{
+    NS_LOG_FUNCTION(this << node1 << node2);
+    std::string key = GetNodePairKey(node1, node2);
+    auto it = m_installedLinks.find(key);
+    if (it != m_installedLinks.end())
+    {
+        NetDeviceContainer devices;
+        devices.Add(it->second.first);
+        devices.Add(it->second.second);
+        return devices;
+    }
+    return NetDeviceContainer();
+}
+
+NetDeviceContainer
+LeoSimDeviceInstaller::GetAllDevices() const
+{
+    NS_LOG_FUNCTION(this);
+    NetDeviceContainer allDevices;
+    for (const auto& [key, devPair] : m_installedLinks)
+    {
+        allDevices.Add(devPair.first);
+        allDevices.Add(devPair.second);
+    }
+    return allDevices;
+}
+
+uint32_t
+LeoSimDeviceInstaller::GetNumDevices() const
+{
+    NS_LOG_FUNCTION(this);
+    return m_numInstalledDevices;
+}
+
+void
+LeoSimDeviceInstaller::Clear()
+{
+    NS_LOG_FUNCTION(this);
+    m_installedLinks.clear();
+    m_nodeDevices.clear();
+    m_numInstalledDevices = 0;
+    if (m_verbose)
+    {
+        NS_LOG_INFO("Cleared all installed devices");
+    }
+}
+
+void
+LeoSimDeviceInstaller::SetDevicesPerNode(uint32_t numDevices)
+{
+    NS_LOG_FUNCTION(this << numDevices);
+    m_devicesPerNode = numDevices;
+    if (m_verbose)
+    {
+        NS_LOG_INFO("Set devices per node to " << numDevices);
+    }
+}
+
+void
+LeoSimDeviceInstaller::EnableLinkStateCallbacks(Ptr<LeoSimChannelModel> channelModel)
+{
+    NS_LOG_FUNCTION(this << channelModel);
+    if (!channelModel)
+    {
+        NS_LOG_ERROR("Channel model is null");
+        return;
+    }
+    
+    m_channelModel = channelModel;
+    
+    // Connect to the channel model's link state change trace
+    // This lets us track which devices are actually being used
+    channelModel->TraceConnectWithoutContext(
+        "LinkStateChange",
+        MakeCallback(&LeoSimDeviceInstaller::OnLinkStateChange, this));
+    
+    if (m_verbose)
+    {
+        NS_LOG_INFO("Link state callbacks enabled");
+    }
+}
+
+void
+LeoSimDeviceInstaller::OnLinkStateChange(Ptr<Node> node1, Ptr<Node> node2, LeoSimLinkState newState)
+{
+    // Early exit if not enabled
+    if (!m_channelModel)
+    {
+        return;
+    }
+    
+    // Defensive check for null parameters
+    if (!node1 || !node2)
+    {
+        return;
+    }
+    
+    NS_LOG_FUNCTION(this << node1->GetId() << node2->GetId() << newState);
+    
+    if (m_verbose)
+    {
+        std::cout << "[POOL] Link " << node1->GetId() << "<->" << node2->GetId() 
+                  << " state: " << (newState == LEOSIM_LINK_UP ? "UP" : "DOWN") << std::endl;
+    }
+    
+    // With pooled devices, all devices are already created and IP addresses assigned.
+    // This callback just logs state changes for tracking purposes.
+    // The routing layer will use available devices regardless of link state.
+}
+
+} // namespace ns3

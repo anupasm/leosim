@@ -23,19 +23,19 @@
 #include "ns3/leosim-channel-helper.h"
 #include "ns3/leosim-channel-model.h"
 #include "ns3/leosim-channel.h"
+#include "ns3/leosim-device-installer.h"
+#include "ns3/leosim-routing-calculator.h"
+#include "ns3/leosim-routing-calculator-helper.h"
 #include "ns3/leosim-isl-routing-model.h"
 #include "ns3/leosim-loader-helper.h"
 #include "ns3/leosim-loader.h"
 #include "ns3/leosim-mobility-helper.h"
+#include "ns3/leosim-traffic-generator-helper.h"
 #include "ns3/leosim-visualization-helper.h"
 #include "ns3/mobility-module.h"
 #include "ns3/network-module.h"
 #include "ns3/ipv4-routing-table-entry.h"
-#include "ns3/ipv4-global-routing.h"
-#include "ns3/ipv4-list-routing.h"
 #include "ns3/ipv4-static-routing.h"
-#include "ns3/arp-cache.h"
-#include "ns3/ipv4-l3-protocol.h"
 
 #include <fstream>
 #include <iostream>
@@ -47,7 +47,6 @@
 using namespace ns3;
 
 NS_LOG_COMPONENT_DEFINE("LeoSimTcpExample");
-
 
 
 int
@@ -119,6 +118,9 @@ main(int argc, char* argv[])
         LogComponentEnable("PacketSink", LOG_LEVEL_INFO);
         LogComponentEnable("UdpEchoServerApplication", LOG_LEVEL_INFO);
         LogComponentEnable("Ipv4GlobalRouting", LOG_LEVEL_INFO);
+        // LogComponentEnable("LeoSimRoutingCalculator", LOG_LEVEL_INFO);
+        LogComponentEnable("LeoSimRoutingCalculatorHelper", LOG_LEVEL_INFO);
+        
     }
 
     LeoSimLoaderHelper loaderHelper;
@@ -288,14 +290,197 @@ main(int argc, char* argv[])
     // Set channel model in visualization helper for ground link tracking
     vizHelper.SetChannelModel(channelModel);
 
+    // Install network devices on all nodes based on channel model links
+    std::cout << "\nInstalling network devices from channel model links..." << std::endl;
+
+    // Install devices for ground links (satellite-to-UE, satellite-to-Server)
+    LeoSimDeviceInstaller deviceInstaller;
+    deviceInstaller.SetChannelModel(channelModel);
+    deviceInstaller.SetDeviceDataRate("100Mbps");
+    deviceInstaller.SetDeviceDelay("1ms");
+    deviceInstaller.SetDeviceMtu(1500);
+    deviceInstaller.SetVerbose(verbose);
+
+    NetDeviceContainer groundDevices = deviceInstaller.Install(satelliteNodes, allGroundNodes);
+    std::cout << "Installed " << groundDevices.GetN() << " ground link devices" << std::endl;
+
+    // Install devices for ISL links if enabled
+    NetDeviceContainer islDevices;
+    if (enableIsl && islChannelModel)
+    {
+        LeoSimDeviceInstaller islDeviceInstaller;
+        islDeviceInstaller.SetChannelModel(islChannelModel);
+        islDeviceInstaller.SetDeviceDataRate("10Gbps");  // ISL uses higher data rate
+        islDeviceInstaller.SetDeviceDelay("100us");       // ISL lower latency
+        islDeviceInstaller.SetDeviceMtu(1500);
+        islDeviceInstaller.SetVerbose(verbose);
+
+        islDevices = islDeviceInstaller.Install(satelliteNodes, NodeContainer());
+        std::cout << "Installed " << islDevices.GetN() << " ISL devices" << std::endl;
+    }
+
+    //  Install Internet stack on all nodes
+    std::cout << "\nInstalling Internet stack on all nodes..." << std::endl;
+    InternetStackHelper stack;
+    stack.Install(satelliteNodes);
+    stack.Install(ueNodes);
+    stack.Install(serverNodes);
+    std::cout << "Internet stack installed" << std::endl;
+
+    // Assign IP addresses - unique per-link subnets to avoid address collisions
+    // Ground links on 10.0-99.0.0/24, ISL links on 10.100-199.0.0/24
+    // This ensures each interface has a unique address and no collisions between nodes
+    std::cout << "\nAssigning IP addresses (unique per-link subnets)..." << std::endl;
+    
+    uint32_t groundSubnetIndex = 0;
+    uint32_t islSubnetIndex = 100;
+    
+    // Assign ground devices - create proper P2P links with IP address pairs
+    std::cout << "  Assigning ground link subnets..." << std::endl;
+    
+    // For each pair of devices that form a link, assign IP address
+    uint32_t assignedLinks = 0;
+    for (uint32_t i = 0; i < groundDevices.GetN(); i += 2)
+    {
+        NetDeviceContainer linkDevices;
+        linkDevices.Add(groundDevices.Get(i));
+        
+        if (i + 1 < groundDevices.GetN())
+        {
+            linkDevices.Add(groundDevices.Get(i + 1));
+        }
+        else
+        {
+            // If we have an odd device, find its pair by checking which nodes they connect
+            // For now, just assign the single device its own subnet
+            std::cout << "    Warning: Odd number of devices, device " << i << " unpaired" << std::endl;
+        }
+        
+        Ipv4AddressHelper groundIpv4;
+        char baseAddrStr[32];
+        snprintf(baseAddrStr, sizeof(baseAddrStr), "10.%d.0.0", groundSubnetIndex);
+        groundIpv4.SetBase(Ipv4Address(baseAddrStr), Ipv4Mask("255.255.255.0"));
+        groundIpv4.Assign(linkDevices);
+        
+        groundSubnetIndex++;
+        assignedLinks++;
+    }
+    
+    // Assign ISL devices - create proper P2P links with IP address pairs
+    if (enableIsl && islDevices.GetN() > 0)
+    {
+        std::cout << "  Assigning ISL link subnets..." << std::endl;
+        for (uint32_t i = 0; i < islDevices.GetN(); i += 2)
+        {
+            NetDeviceContainer linkDevices;
+            linkDevices.Add(islDevices.Get(i));
+            
+            if (i + 1 < islDevices.GetN())
+            {
+                linkDevices.Add(islDevices.Get(i + 1));
+            }
+            else
+            {
+                std::cout << "    Warning: Odd number of ISL devices, device " << i << " unpaired" << std::endl;
+            }
+            
+            Ipv4AddressHelper islIpv4;
+            char baseAddrStr[32];
+            snprintf(baseAddrStr, sizeof(baseAddrStr), "10.%d.0.0", islSubnetIndex);
+            islIpv4.SetBase(Ipv4Address(baseAddrStr), Ipv4Mask("255.255.255.0"));
+            islIpv4.Assign(linkDevices);
+            
+            if (verbose)
+                std::cout << "    ISL " << (islSubnetIndex - 100) << ": " << baseAddrStr << "/24" << std::endl;
+            
+            islSubnetIndex++;
+        }
+    }
+    
+    std::cout << "Address assignment complete: " << assignedLinks << " ground links, " 
+              << (islSubnetIndex - 100) << " ISL links" << std::endl;
+
+    // Combine all nodes for routing
+    NodeContainer allNodes;
+    allNodes.Add(satelliteNodes);
+    allNodes.Add(ueNodes);
+    allNodes.Add(serverNodes);
+
+    // Install computed routes into static routing tables
+    std::cout << "\nSetting up dynamic routing with periodic updates..." << std::endl;
+    LeoSimRoutingCalculatorHelper routingHelper;
+    
+    // Create unified routing calculator that handles both ground and ISL links
+    Ptr<LeoSimRoutingCalculator> unifiedCalc = 
+        routingHelper.CreateUnifiedRoutingCalculator(channelModel, 
+                                                     islChannelModel, 
+                                                     verbose);
+
+    // Combine all nodes for routing (already created above)
+
+    // Enable dynamic routing with periodic updates
+    // This continuously recalculates and updates routes based on changing topology
+    routingHelper.EnableDynamicRouting(unifiedCalc, 
+                                       allNodes, 
+                                       allNodes, 
+                                       Seconds(routingUpdateInterval),
+                                       simTime,
+                                       verbose);
+    
+    if (verbose)
+    {
+        std::cout << "Dynamic routing enabled with update interval: " << routingUpdateInterval 
+                  << " seconds" << std::endl;
+    }
+    
     // Schedule position and link logging
     vizHelper.SchedulePositionLogging(satelliteNodes, serverNodes, ueNodes, logInterval, simTime);
 
-    // ========================================================================
+    // Install ping traffic from UEs to server
+    std::cout << "\nInstalling ping traffic from UEs to server..." << std::endl;
+    LeoSimTrafficGeneratorHelper trafficHelper;
+    trafficHelper.SetPingInterval(Seconds(10.0));  // Ping every 10 seconds
+    trafficHelper.SetPingDataSize(56);             // Standard ping payload size (ICMP echo)
+    trafficHelper.SetVerbose(verbose);
+
+    // Get server IP address
+    Ptr<Ipv4> serverIpv4 = serverNodes.Get(0)->GetObject<Ipv4>();
+    Ipv4Address serverAddress = Ipv4Address::GetZero();
+    
+    // Find the server's interface address (skip loopback at index 0)
+    if (serverIpv4->GetNAddresses(1) > 0)
+    {
+        serverAddress = serverIpv4->GetAddress(1, 0).GetLocal();
+    }
+
+    if (serverAddress != Ipv4Address::GetZero())
+    {
+        // Install ping from all UEs to server
+        ApplicationContainer pingApps = trafficHelper.InstallUeToServerPing(
+            ueNodes,
+            serverNodes.Get(0),
+            serverAddress,
+            Seconds(1.0),              // Start pinging at 1 second
+            Seconds(simTime - 1.0)     // Stop 1 second before end
+        );
+
+        if (verbose)
+        {
+            std::cout << "Installed " << pingApps.GetN() << " ping client applications" << std::endl;
+            std::cout << "  Target server address: " << serverAddress << std::endl;
+            std::cout << "  Start time: 1.0s, Stop time: " << (simTime - 1.0) << "s" << std::endl;
+            std::cout << "  Ping interval: 10 seconds" << std::endl;
+        }
+    }
+    else
+    {
+        std::cerr << "Warning: Could not determine server IP address for ping" << std::endl;
+    }
+
     // Install packet logging hooks for visualization (after network setup complete)
     if (logPackets)
     {
-        vizHelper.InstallPacketLogging();
+        vizHelper.InstallPacketLogging(satelliteNodes, serverNodes, ueNodes);
         std::cout << "Packet logging activated" << std::endl;
     }
 

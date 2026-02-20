@@ -1,0 +1,357 @@
+/*
+ * Copyright (c) 2024 Anupa De Silva
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation;
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ */
+
+#ifndef LEOSIM_ROUTING_CALCULATOR_H
+#define LEOSIM_ROUTING_CALCULATOR_H
+
+#include "leosim-channel-model.h"
+
+#include "ns3/object.h"
+#include "ns3/ptr.h"
+#include "ns3/node.h"
+#include "ns3/nstime.h"
+
+#include <map>
+#include <set>
+#include <vector>
+#include <queue>
+
+namespace ns3
+{
+
+/**
+ * \ingroup leosim
+ * \brief Route information containing path and metrics
+ */
+struct LeoSimRoute
+{
+    std::vector<Ptr<Node>> path;              //!< Ordered list of nodes in the path
+    uint32_t hopCount;                        //!< Number of hops
+    double totalPathLoss;                     //!< Accumulated path loss in dB
+    double totalDistance;                     //!< Total distance in meters
+    double minSignalStrength;                 //!< Minimum signal strength along path
+    double minSnr;                            //!< Minimum SNR along path
+    bool hasIslLinks;                         //!< Whether path contains ISL links
+    bool hasGroundLinks;                      //!< Whether path contains ground links
+    std::vector<LeoSimLinkType> linkTypes;    //!< Type of each link in path
+    bool valid;                               //!< Whether route is valid
+
+    LeoSimRoute() : hopCount(0), totalPathLoss(0.0), totalDistance(0.0),
+                    minSignalStrength(std::numeric_limits<double>::lowest()),
+                    minSnr(std::numeric_limits<double>::lowest()),
+                    hasIslLinks(false), hasGroundLinks(false), valid(false) {}
+};
+
+/**
+ * \ingroup leosim
+ * \brief Central routing calculator for LEO satellite networks
+ *
+ * This class provides routing calculations using the links defined in the
+ * channel model. It supports:
+ * - Routing through ISL (Inter-Satellite Links)
+ * - Routing through ground links (satellite-to-ground)
+ * - Mixed ISL and ground link paths
+ * - Path computation based on hop count, path loss, or SNR
+ * - Dynamic topology support
+ *
+ * The class uses Dijkstra's algorithm for path computation with customizable
+ * metrics (hop count, path loss, SNR, distance).
+ */
+class LeoSimRoutingCalculator : public Object
+{
+  public:
+    /**
+     * \brief Routing metric for path computation
+     */
+    enum RoutingMetric
+    {
+        LEOSIM_METRIC_HOP_COUNT,      //!< Minimize hop count
+        LEOSIM_METRIC_PATH_LOSS,      //!< Minimize path loss
+        LEOSIM_METRIC_SNR,            //!< Maximize SNR (minimize negative SNR)
+        LEOSIM_METRIC_DISTANCE,       //!< Minimize distance
+        LEOSIM_METRIC_SIGNAL_STRENGTH //!< Maximize signal strength
+    };
+
+    /**
+     * \brief Path type constraint
+     */
+    enum PathType
+    {
+        LEOSIM_PATH_ANY,         //!< Allow any combination of ISL and ground links
+        LEOSIM_PATH_ISL_ONLY,    //!< Only use ISL links
+        LEOSIM_PATH_GROUND_ONLY  //!< Only use ground links
+    };
+
+    /**
+     * \brief Get the type ID
+     * \return The TypeId
+     */
+    static TypeId GetTypeId();
+
+    /**
+     * \brief Constructor
+     */
+    LeoSimRoutingCalculator();
+
+    /**
+     * \brief Destructor
+     */
+    ~LeoSimRoutingCalculator();
+
+    /**
+     * \brief Set the channel model to use for link information (ground links)
+     * \param channelModel Pointer to the channel model
+     */
+    void SetChannelModel(Ptr<LeoSimChannelModel> channelModel);
+
+    /**
+     * \brief Get the channel model
+     * \return Pointer to the channel model
+     */
+    Ptr<LeoSimChannelModel> GetChannelModel() const;
+
+    /**
+     * \brief Set the ISL channel model for inter-satellite links
+     * \param islChannelModel Pointer to the ISL channel model
+     *
+     * When set, this enables unified routing calculations that combine
+     * both ground and ISL links in the same network.
+     */
+    void SetIslChannelModel(Ptr<LeoSimChannelModel> islChannelModel);
+
+    /**
+     * \brief Get the ISL channel model
+     * \return Pointer to the ISL channel model (null if not set)
+     */
+    Ptr<LeoSimChannelModel> GetIslChannelModel() const;
+
+    /**
+     * \brief Compute route between source and destination using specified metric
+     * \param source Source node
+     * \param destination Destination node
+     * \param metric Routing metric to optimize
+     * \param pathType Type of path allowed (ISL only, ground only, or mixed)
+     * \return Route information (valid flag indicates success)
+     */
+    LeoSimRoute ComputeRoute(Ptr<Node> source,
+                             Ptr<Node> destination,
+                             RoutingMetric metric = LEOSIM_METRIC_HOP_COUNT,
+                             PathType pathType = LEOSIM_PATH_ANY);
+
+    /**
+     * \brief Compute route with SNR constraint
+     * \param source Source node
+     * \param destination Destination node
+     * \param minSnr Minimum required SNR in dB
+     * \param metric Secondary routing metric if SNR constraint can be met
+     * \return Route information
+     */
+    LeoSimRoute ComputeRouteWithSnrConstraint(Ptr<Node> source,
+                                               Ptr<Node> destination,
+                                               double minSnr,
+                                               RoutingMetric metric = LEOSIM_METRIC_HOP_COUNT);
+
+    /**
+     * \brief Compute all available routes between source and destination
+     * \param source Source node
+     * \param destination Destination node
+     * \param numRoutes Number of alternative routes to find
+     * \param metric Routing metric
+     * \return Vector of routes sorted by metric
+     */
+    std::vector<LeoSimRoute> ComputeAlternativeRoutes(Ptr<Node> source,
+                                                       Ptr<Node> destination,
+                                                       uint32_t numRoutes,
+                                                       RoutingMetric metric = LEOSIM_METRIC_HOP_COUNT);
+
+    /**
+     * \brief Check if a direct link exists between two nodes
+     * \param source Source node
+     * \param destination Destination node
+     * \param linkType Link type filter (LEOSIM_LINK_ISL or LEOSIM_LINK_SATELLITE_TO_GROUND)
+     * \return True if link exists and is up
+     */
+    bool HasDirectLink(Ptr<Node> source,
+                       Ptr<Node> destination,
+                       LeoSimLinkType linkType = LEOSIM_LINK_ISL);
+
+    /**
+     * \brief Get all neighbors of a node using active links
+     * \param node The node
+     * \param linkType Link type filter (optional)
+     * \return Set of neighbor nodes
+     */
+    std::set<Ptr<Node>> GetNeighbors(Ptr<Node> node, LeoSimLinkType linkType = LEOSIM_LINK_ISL);
+
+    /**
+     * \brief Get all ISL neighbors of a satellite
+     * \param satellite Satellite node
+     * \return Set of ISL-connected neighbor satellites
+     */
+    std::set<Ptr<Node>> GetIslNeighbors(Ptr<Node> satellite);
+
+    /**
+     * \brief Get all ground link neighbors of a node
+     * \param node Node (can be satellite or ground)
+     * \return Set of neighbors connected via ground links
+     */
+    std::set<Ptr<Node>> GetGroundNeighbors(Ptr<Node> node);
+
+    /**
+     * \brief Get the topology as an adjacency list
+     * \param pathType Type of links to include in topology
+     * \return Map of node to set of neighbors
+     */
+    std::map<Ptr<Node>, std::set<Ptr<Node>>> GetTopology(PathType pathType = LEOSIM_PATH_ANY);
+
+    /**
+     * \brief Get channel quality for a link
+     * \param source Source node
+     * \param destination Destination node
+     * \return Channel quality metrics
+     */
+    LeoSimChannelQuality GetLinkQuality(Ptr<Node> source, Ptr<Node> destination);
+
+    /**
+     * \brief Check if link is available (UP state)
+     * \param source Source node
+     * \param destination Destination node
+     * \return True if link is up
+     */
+    bool IsLinkAvailable(Ptr<Node> source, Ptr<Node> destination);
+
+    /**
+     * \brief Get all active ISL links
+     * \return Vector of node pairs with active ISL links
+     */
+    std::vector<std::pair<Ptr<Node>, Ptr<Node>>> GetActiveIslLinks();
+
+    /**
+     * \brief Get all active ground links
+     * \return Vector of node pairs with active ground links
+     */
+    std::vector<std::pair<Ptr<Node>, Ptr<Node>>> GetActiveGroundLinks();
+
+    /**
+     * \brief Get all active links (ISL and ground)
+     * \return Vector of node pairs with active links
+     */
+    std::vector<std::pair<Ptr<Node>, Ptr<Node>>> GetActiveLinks();
+
+    /**
+     * \brief Set verbose output for debugging
+     * \param verbose True to enable verbose logging
+     */
+    void SetVerbose(bool verbose);
+
+    /**
+     * \brief Get number of active links
+     * \return Count of active links
+     */
+    uint32_t GetNumActiveLinks();
+
+    /**
+     * \brief Get number of active ISL links
+     * \return Count of active ISL links
+     */
+    uint32_t GetNumActiveIslLinks();
+
+    /**
+     * \brief Get number of active ground links
+     * \return Count of active ground links
+     */
+    uint32_t GetNumActiveGroundLinks();
+
+  private:
+    /**
+     * \brief Dijkstra's algorithm implementation for route computation
+     * \param source Source node
+     * \param destination Destination node
+     * \param metric Routing metric to use
+     * \param pathType Type of path allowed
+     * \param snrConstraint Optional SNR constraint (use -1 for no constraint)
+     * \return Computed route
+     */
+    LeoSimRoute DijkstrasAlgorithm(Ptr<Node> source,
+                                    Ptr<Node> destination,
+                                    RoutingMetric metric,
+                                    PathType pathType,
+                                    double snrConstraint = -1.0);
+
+    /**
+     * \brief Get metric value for a link based on routing metric
+     * \param source Source node
+     * \param destination Destination node
+     * \param metric Routing metric
+     * \return Metric value
+     */
+    double GetLinkMetricValue(Ptr<Node> source,
+                              Ptr<Node> destination,
+                              RoutingMetric metric);
+
+    /**
+     * \brief Reconstruct path from predecessor map
+     * \param source Source node
+     * \param destination Destination node
+     * \param previous Predecessor map
+     * \param distances Distance map
+     * \param metric Routing metric used
+     * \return Route with detailed information
+     */
+    LeoSimRoute ReconstructRoute(Ptr<Node> source,
+                                  Ptr<Node> destination,
+                                  const std::map<Ptr<Node>, Ptr<Node>>& previous,
+                                  const std::map<Ptr<Node>, double>& distances,
+                                  RoutingMetric metric,
+                                  PathType pathType);
+
+    /**
+     * \brief Check if link can be used given path type constraint
+     * \param source Source node
+     * \param destination Destination node
+     * \param pathType Path type constraint
+     * \return True if link can be used
+     */
+    bool IsLinkAllowed(Ptr<Node> source, Ptr<Node> destination, PathType pathType);
+
+    /**
+     * \brief Check if link meets SNR constraint
+     * \param source Source node
+     * \param destination Destination node
+     * \param minSnr Minimum SNR requirement
+     * \return True if link meets SNR requirement
+     */
+    bool MeetsSnrConstraint(Ptr<Node> source, Ptr<Node> destination, double minSnr);
+
+    // Pointer to the channel model for accessing link information
+    Ptr<LeoSimChannelModel> m_channelModel;
+
+    // Pointer to the ISL channel model for inter-satellite links
+    Ptr<LeoSimChannelModel> m_islChannelModel;
+
+    // Configuration
+    bool m_verbose;  //!< Enable verbose logging
+
+    // Cache for topology (optional optimization)
+    std::map<Ptr<Node>, std::set<Ptr<Node>>> m_cachedTopology;
+    Time m_lastTopologyCacheUpdate;
+    Time m_topologyCacheTTL;  //!< Time-to-live for cached topology
+};
+
+} // namespace ns3
+
+#endif /* LEOSIM_ROUTING_CALCULATOR_H */
