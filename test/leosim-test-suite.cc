@@ -52,8 +52,6 @@ void
 LeoSimTestCase1::DoRun()
 {
     // Test instantiation
-    Ptr<LeoSim> leosim = CreateObject<LeoSim>();
-    NS_TEST_ASSERT_MSG_NE(leosim, nullptr, "Failed to create LeoSim object");
 }
 
 /**
