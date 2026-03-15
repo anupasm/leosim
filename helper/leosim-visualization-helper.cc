@@ -37,12 +37,15 @@ NS_LOG_COMPONENT_DEFINE("LeoSimVisualizationHelper");
 LeoSimVisualizationHelper::LeoSimVisualizationHelper()
     : m_outputFile("leosim_positions.csv"),
       m_linkFile("leosim_links.csv"),
-    m_packetFile("leosim_packets.csv"),
+      m_packetFile("leosim_packets.csv"),
+      m_beamFile("leosim_beams.csv"),
+      m_handoverFile("leosim_handovers.csv"),
+      m_choFile("leosim_cho.csv"),
       m_loaderHelper(nullptr),
-    m_channelModel(nullptr),
-    m_islChannelModel(nullptr),
-    m_enablePacketLogging(false),
-    m_packetLoggingInstalled(false)
+      m_channelModel(nullptr),
+      m_islChannelModel(nullptr),
+      m_enablePacketLogging(false),
+      m_packetLoggingInstalled(false)
 {
 }
 
@@ -59,6 +62,18 @@ LeoSimVisualizationHelper::~LeoSimVisualizationHelper()
     if (m_packetFileStream.is_open())
     {
         m_packetFileStream.close();
+    }
+    if (m_beamFileStream.is_open())
+    {
+        m_beamFileStream.close();
+    }
+    if (m_handoverFileStream.is_open())
+    {
+        m_handoverFileStream.close();
+    }
+    if (m_choFileStream.is_open())
+    {
+        m_choFileStream.close();
     }
 }
 
@@ -698,4 +713,248 @@ LeoSimVisualizationHelper::InstallPacketLogging(NodeContainer satellites,
     m_packetLoggingInstalled = true;
 }
 
+void
+LeoSimVisualizationHelper::SetBeamFile(const std::string& filename)
+{
+    m_beamFile = filename;
+}
+
+void
+LeoSimVisualizationHelper::SetHandoverFile(const std::string& filename)
+{
+    m_handoverFile = filename;
+}
+
+void
+LeoSimVisualizationHelper::SetChoFile(const std::string& filename)
+{
+    m_choFile = filename;
+}
+
+void
+LeoSimVisualizationHelper::InitBeamLogging()
+{
+    NS_LOG_FUNCTION(this);
+
+    // Open beam state file and write header
+    m_beamFileStream.open(m_beamFile, std::ios::app);
+    if (m_beamFileStream.is_open())
+    {
+        m_beamFileStream << "time,ue_id,sat_id,rsrp_dbm,snr_db,elevation_deg,tte_sec,sat_load,"
+                         << "e2e_latency_ms,topsis_score,state\n";
+        m_beamFileStream.flush();
+        NS_LOG_INFO("Opened beam state file: " << m_beamFile);
+    }
+    else
+    {
+        NS_LOG_WARN("Could not open beam state file: " << m_beamFile);
+    }
+
+    // Open handover event file and write header
+    m_handoverFileStream.open(m_handoverFile, std::ios::app);
+    if (m_handoverFileStream.is_open())
+    {
+        m_handoverFileStream << "time_ms,ue_id,src_sat,tgt_sat,mode,type,trigger,"
+                             << "latency_ms,buff_pkts,drop_pkts,success,score_before,score_after\n";
+        m_handoverFileStream.flush();
+        NS_LOG_INFO("Opened handover event file: " << m_handoverFile);
+    }
+    else
+    {
+        NS_LOG_WARN("Could not open handover event file: " << m_handoverFile);
+    }
+
+    // Open CHO config file and write header
+    m_choFileStream.open(m_choFile, std::ios::app);
+    if (m_choFileStream.is_open())
+    {
+        m_choFileStream << "time,ue_id,serving_sat,candidate_sat,topsis_rank,topsis_score,tte_sec,config_expiry\n";
+        m_choFileStream.flush();
+        NS_LOG_INFO("Opened CHO config file: " << m_choFile);
+    }
+    else
+    {
+        NS_LOG_WARN("Could not open CHO config file: " << m_choFile);
+    }
+}
+
+void
+LeoSimVisualizationHelper::LogBeamState(uint32_t ueId, const LeoSimBeamRecord& rec, double topsisScore)
+{
+    NS_LOG_FUNCTION(this << ueId << topsisScore);
+
+    if (!m_beamFileStream.is_open())
+    {
+        return;
+    }
+
+    Time now = Simulator::Now();
+    std::string state;
+    switch (rec.state)
+    {
+        case LEOSIM_BEAM_CONNECTED:
+            state = "CONNECTED";
+            break;
+        case LEOSIM_BEAM_MEASURING:
+            state = "MEASURING";
+            break;
+        case LEOSIM_BEAM_PREPARING:
+            state = "PREPARING";
+            break;
+        case LEOSIM_BEAM_EVALUATING:
+            state = "EVALUATING";
+            break;
+        case LEOSIM_BEAM_EXECUTING:
+            state = "EXECUTING";
+            break;
+        case LEOSIM_BEAM_SEARCHING:
+            state = "SEARCHING";
+            break;
+        default:
+            state = "UNKNOWN";
+    }
+
+    m_beamFileStream << std::fixed << std::setprecision(3)
+                     << now.GetSeconds() << ","
+                     << ueId << ","
+                     << rec.satelliteNodeId << ","
+                     << rec.rsrp << ","
+                     << rec.snr << ","
+                     << rec.elevationAngle << ","
+                     << rec.remainingServiceTime << ","
+                     << rec.satelliteLoad << ","
+                     << rec.endToEndLatency << ","
+                     << topsisScore << ","
+                     << state << "\n";
+    m_beamFileStream.flush();
+}
+
+void
+LeoSimVisualizationHelper::LogHandoverEvent(const LeoSimHandoverEvent& evt)
+{
+    NS_LOG_FUNCTION(this << evt.ueNodeId);
+
+    if (!m_handoverFileStream.is_open())
+    {
+        return;
+    }
+
+    double timeMs = evt.initiatedAt.GetMilliSeconds();
+    std::string mode = (evt.mode == LEOSIM_HO_MODE_CHO) ? "CHO" : "BHO";
+    
+    std::string type;
+    switch (evt.type)
+    {
+        case LEOSIM_HO_INTRA_BEAM:
+            type = "INTRA_BEAM";
+            break;
+        case LEOSIM_HO_INTER_SATELLITE:
+            type = "INTER_SAT";
+            break;
+        case LEOSIM_HO_INTER_ORBIT:
+            type = "INTER_ORBIT";
+            break;
+        default:
+            type = "UNKNOWN";
+    }
+
+    std::string trigger;
+    switch (evt.trigger)
+    {
+        case LEOSIM_HO_A3:
+            trigger = "A3_EVENT";
+            break;
+        case LEOSIM_HO_A4:
+            trigger = "A4_EVENT";
+            break;
+        case LEOSIM_HO_TIME_BASED:
+            trigger = "TIME_BASED";
+            break;
+        case LEOSIM_HO_LOCATION_BASED:
+            trigger = "LOCATION_BASED";
+            break;
+        case LEOSIM_HO_ELEVATION:
+            trigger = "ELEVATION";
+            break;
+        case LEOSIM_HO_RLF:
+            trigger = "RLF";
+            break;
+        case LEOSIM_HO_LOAD_BALANCE:
+            trigger = "LOAD_BALANCE";
+            break;
+        default:
+            trigger = "UNKNOWN";
+    }
+
+    m_handoverFileStream << std::fixed << std::setprecision(1)
+                         << timeMs << ","
+                         << evt.ueNodeId << ","
+                         << evt.sourceSatId << ","
+                         << evt.targetSatId << ","
+                         << mode << ","
+                         << type << ","
+                         << trigger << ","
+                         << evt.handoverLatencyMs << ","
+                         << evt.packetsBuffered << ","
+                         << evt.packetsDropped << ","
+                         << (evt.success ? "1" : "0") << ","
+                         << evt.topsisScoreBefore << ","
+                         << evt.topsisScoreAfter << "\n";
+    m_handoverFileStream.flush();
+}
+
+void
+LeoSimVisualizationHelper::LogChoConfig(uint32_t ueId,
+                                        uint32_t servingSatId,
+                                        const std::vector<LeoSimTopsisCandidate>& candidates)
+{
+    NS_LOG_FUNCTION(this << ueId << servingSatId << candidates.size());
+
+    if (!m_choFileStream.is_open())
+    {
+        return;
+    }
+
+    Time now = Simulator::Now();
+    Time configExpiry = now + Seconds(30.0);  // Default 30 second CHO config validity
+
+    for (uint32_t rank = 0; rank < candidates.size(); ++rank)
+    {
+        const LeoSimTopsisCandidate& candidate = candidates[rank];
+        m_choFileStream << std::fixed << std::setprecision(3)
+                        << now.GetSeconds() << ","
+                        << ueId << ","
+                        << servingSatId << ","
+                        << candidate.beamRecord.satelliteNodeId << ","
+                        << rank << ","
+                        << candidate.topsisScore << ","
+                        << candidate.beamRecord.remainingServiceTime << ","
+                        << configExpiry.GetSeconds() << "\n";
+    }
+    m_choFileStream.flush();
+}
+
+void
+LeoSimVisualizationHelper::FinalizeBeamLogging()
+{
+    NS_LOG_FUNCTION(this);
+
+    if (m_beamFileStream.is_open())
+    {
+        m_beamFileStream.close();
+        NS_LOG_INFO("Closed beam state file");
+    }
+    if (m_handoverFileStream.is_open())
+    {
+        m_handoverFileStream.close();
+        NS_LOG_INFO("Closed handover event file");
+    }
+    if (m_choFileStream.is_open())
+    {
+        m_choFileStream.close();
+        NS_LOG_INFO("Closed CHO config file");
+    }
+}
+
 } // namespace ns3
+

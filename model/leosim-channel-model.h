@@ -375,6 +375,31 @@ class LeoSimChannelModel : public Object
      */
     std::vector<LinkSnapshot> GetLinksByType(LeoSimLinkType linkType, bool includeDown) const;
 
+    /**
+     * \brief Get all link quality records for a node with UP or DEGRADED state
+     * \param nodeId Node identifier
+     * \return Vector of LeoSimChannelQuality records for links connected to this node
+     *         where link state is UP or DEGRADED
+     */
+    std::vector<LeoSimChannelQuality> GetLinksForNode(uint32_t nodeId) const;
+
+    /**
+     * \brief Get link quality information for a specific node pair
+     * \param nodeA First node identifier
+     * \param nodeB Second node identifier
+     * \return LeoSimChannelQuality struct for this link pair, or default-constructed
+     *         quality with state=DOWN if link does not exist
+     */
+    LeoSimChannelQuality GetLinkQuality(uint32_t nodeA, uint32_t nodeB) const;
+
+    /**
+     * \brief Get link state for a specific node pair
+     * \param nodeA First node identifier
+     * \param nodeB Second node identifier
+     * \return Current LeoSimLinkState for this node pair, or LEOSIM_LINK_DOWN if not found
+     */
+    LeoSimLinkState GetLinkState(uint32_t nodeA, uint32_t nodeB) const;
+
   private:
     /**
      * \brief Calculate free space path loss

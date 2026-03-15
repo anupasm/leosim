@@ -1,6 +1,7 @@
 build_lib(
   LIBNAME leosim
   SOURCE_FILES
+    model/leosim-beam-manager.cc
     model/leosim-channel.cc
     model/leosim-loader.cc
     model/leosim-mobility-model.cc
@@ -12,12 +13,14 @@ build_lib(
     helper/leosim-mobility-helper.cc
     helper/leosim-channel-helper.cc
     helper/leosim-routing-calculator-helper.cc
+    helper/leosim-beam-manager-helper.cc
     helper/leosim-visualization-helper.cc
     helper/leosim-device-installer.cc
     helper/leosim-traffic-generator-helper.cc
     
   HEADER_FILES
     model/leosim.h
+    model/leosim-beam-manager.h
     model/leosim-channel.h
     model/leosim-loader.h
     model/leosim-mobility-model.h
@@ -29,6 +32,7 @@ build_lib(
     helper/leosim-mobility-helper.h
     helper/leosim-channel-helper.h
     helper/leosim-routing-calculator-helper.h
+    helper/leosim-beam-manager-helper.h
     helper/leosim-visualization-helper.h
     helper/leosim-device-installer.h
     helper/leosim-traffic-generator-helper.h

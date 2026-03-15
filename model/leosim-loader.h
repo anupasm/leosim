@@ -203,6 +203,35 @@ class LeoSimLoader : public Object
      */
     static Vector CartesianToGeodetic(const Vector& position);
 
+    /**
+     * \brief Get satellite position at a specific simulation time with interpolation
+     * \param satId Satellite identifier
+     * \param t Simulation time
+     * \return 3D Cartesian position at time t, interpolated from trace data.
+     *         Returns first position if t is before first entry, extrapolates linearly
+     *         if t is after last entry.
+     */
+    Vector GetSatellitePositionAt(uint32_t satId, Time t) const;
+
+    /**
+     * \brief Get orbit plane index for a satellite
+     * \param satId Satellite identifier
+     * \return Orbit plane index derived from satId / m_satellitesPerPlane
+     */
+    uint32_t GetOrbitPlane(uint32_t satId) const;
+
+    /**
+     * \brief Set the number of satellites per orbital plane
+     * \param count Number of satellites per plane (default: 20)
+     */
+    void SetSatellitesPerPlane(uint32_t count);
+
+    /**
+     * \brief Get the number of satellites per orbital plane
+     * \return Number of satellites per plane
+     */
+    uint32_t GetSatellitesPerPlane() const;
+
   private:
     /**
      * \brief Schedule position update for a satellite node
@@ -241,6 +270,7 @@ class LeoSimLoader : public Object
     std::map<uint32_t, GroundDevice> m_groundDevices;                   //!< Ground device data
     uint32_t m_numSatellites;                                           //!< Number of satellites
     uint32_t m_numGroundDevices;                                        //!< Number of ground devices
+    uint32_t m_satellitesPerPlane = 20;                                 //!< Satellites per orbital plane (default: 20)
 };
 
 } // namespace ns3

@@ -28,15 +28,18 @@ LeoSim is a sophisticated ns-3 module designed to simulate realistic LEO satelli
 - **Dynamic channel modeling** with elevation angle constraints, path loss, and line-of-sight calculations
 - **Inter-Satellite Links (ISLs)** for satellite-to-satellite communication
 - **Dynamic routing** with periodic topology updates as satellites move
+- **3GPP NTN Handover Management** with conditional handover (CHO) and basic handover (BHO) modes
+- **Beam Management** supporting multi-criteria decision making (TOPSIS) for handover optimization
 - **Traffic generation** capabilities (ping, custom applications)
 - **Position and link logging** for visualization
 - **Packet tracing** for detailed analysis
+- **Flow monitoring integration** for packet-level KPI capture
 
 **Target Scenarios:**
 - LEO constellation connectivity analysis
 - Satellite network routing protocols evaluation
 - Ground-to-satellite and satellite-to-satellite latency studies
-- Handover and beam switching impact analysis
+- Handover and beam switching impact analysis with 3GPP compliance
 - Traffic engineering in dynamic satellite networks
 
 ---
@@ -60,8 +63,9 @@ LeoSim is a sophisticated ns-3 module designed to simulate realistic LEO satelli
 │  │  │- LeoSimMobility  │        │- LeoSimMobilityHelp │ │ │
 │  │  │- LeoSimRoutingCa │        │- LeoSimDeviceInst   │ │ │
 │  │  │- LeoSimISLRouting        │- LeoSimRoutingCalcH │ │ │
-│  │  │                  │        │- LeoSimTrafficGenH  │ │ │
+│  │  │- LeoSimBeamMgr   │        │- LeoSimTrafficGenH  │ │ │
 │  │  │                  │        │- LeoSimVisualizH    │ │ │
+│  │  │                  │        │- LeoSimBeamMgrHelp  │ │ │
 │  │  └──────────────────┘        └─────────────────────┘ │ │
 │  │                                                        │ │
 │  │  ┌────────────────────────────────────────────────┐  │ │
@@ -114,7 +118,7 @@ Input Data
 ┌─────────────────────────────────────┐
 │  Routing Setup                      │
 │  - LeoSimRoutingCalculator          │
-│  - Compute paths (BFS)              │
+│  - Compute paths (Dijkstra)         │
 │  - Schedule periodic updates        │
 │  - Install static routes            │
 └──────────────┬──────────────────────┘
@@ -125,6 +129,14 @@ Input Data
 │  - Schedule starts/stops            │
 └──────────────┬──────────────────────┘
                ↓
+┌─────────────────────────────────────┐
+│  Beam Manager Setup (Optional)      │
+│  - LeoSimBeamManager                │
+│  - Configure handover parameters    │
+│  - Initialize handover logic        │
+│  - Start periodic beam updates      │
+└──────────────┬──────────────────────┘
+               ↓
         Simulation Runs
                ↓
 ┌─────────────────────────────────────┐
@@ -132,7 +144,8 @@ Input Data
 │  - Position tracking (CSV)          │
 │  - Link state (CSV)                 │
 │  - Packet traces (CSV/PCap)         │
-│  - Flow monitoring                  │
+│  - Handover events & statistics     │
+│  - Flow monitoring (if enabled)     │
 └─────────────────────────────────────┘
 ```
 
@@ -144,12 +157,14 @@ Input Data
 **Purpose:** Load satellite and ground device data
 
 **Key Features:**
-- Load satellite data from trace files (`.tcl` format)
-- Load satellite data from CSV files
-- Load ground devices from CSV files
+- Load satellite data from **trace files** (`.tcl` format)
+- Load satellite data from **CSV files** with timestep data
+- Load ground devices from **CSV files**
 - Query by device type (SERVER, UE, GATEWAY)
 - Get satellite names and ground device names
 - Ground device position retrieval
+- Support for **geodetic coordinates** (latitude, longitude, altitude) and Cartesian (x, y, z)
+- Trajectory tracking with timestep information
 
 **Data Structures:**
 ```
@@ -226,33 +241,45 @@ channelHelper.SetUpdateInterval(Seconds(1.0)); // Update frequency
 **Purpose:** Compute optimal routes through the satellite network
 
 **Key Features:**
-- Breadth-First Search (BFS) pathfinding algorithm
-- Support for unified routing (ground + ISL links)
+- **Dijkstra's algorithm** with weighted shortest path computation
+- **Multiple routing metrics** for flexible path optimization:
+  - `LEOSIM_METRIC_HOP_COUNT`: Minimize number of hops
+  - `LEOSIM_METRIC_PATH_LOSS`: Minimize accumulated path loss
+  - `LEOSIM_METRIC_SNR`: Maximize signal-to-noise ratio
+  - `LEOSIM_METRIC_DISTANCE`: Minimize total distance
+  - `LEOSIM_METRIC_SIGNAL_STRENGTH`: Maximize signal strength
+- **Path constraints** for link type filtering:
+  - `LEOSIM_PATH_ANY`: Allow mixed ISL and ground links
+  - `LEOSIM_PATH_ISL_ONLY`: Route only through ISL links
+  - `LEOSIM_PATH_GROUND_ONLY`: Route only through ground links
+- **Unified routing** supporting both ground and ISL links
 - Route quality metrics (hop count, path loss, SNR)
-- Differentiated costing for ground vs. ISL links
 - Path validation based on link availability
 
 **Route Structure:**
 ```cpp
 struct LeoSimRoute {
-    std::vector<Ptr<Node>> path;          // Nodes in path
+    std::vector<Ptr<Node>> path;          // Ordered nodes in path
     uint32_t hopCount;                    // Number of hops
-    double totalPathLoss;                 // Accumulated dB
-    double totalDistance;                 // Meters
-    double minSignalStrength;             // dBm
-    double minSnr;                        // dB
-    bool hasIslLinks;                     // Contains ISL?
-    bool hasGroundLinks;                  // Contains ground?
-    std::vector<LeoSimLinkType> linkTypes; // Link classification
+    double totalPathLoss;                 // Accumulated path loss in dB
+    double totalDistance;                 // Total distance in meters
+    double minSignalStrength;             // Minimum signal strength (dBm)
+    double minSnr;                        // Minimum SNR along path (dB)
+    bool hasIslLinks;                     // Path contains ISL links
+    bool hasGroundLinks;                  // Path contains ground links
+    std::vector<LeoSimLinkType> linkTypes;// Type of each link in path
+    bool valid;                           // Whether route is valid
 };
 ```
 
 **Algorithm:**
-1. BFS from source to all reachable nodes
-2. Track parent pointers
-3. Backtrack from destination to rebuild path
-4. Validate path exists (all links UP)
-5. Calculate route metrics
+1. Initialize distances and visited set
+2. Dijkstra iteration: expand lowest-cost unvisited node
+3. Update neighbors based on selected routing metric
+4. Respect path type constraints (ISL-only, ground-only, or mixed)
+5. Backtrack from destination to rebuild ordered path
+6. Validate all links in path are UP
+7. Calculate comprehensive route metrics
 
 ### 6. **LeoSimISLRoutingModel** (model/leosim-isl-routing-model.*)
 **Purpose:** Manage inter-satellite link topology
@@ -287,18 +314,41 @@ NetDeviceContainer devices = deviceInstaller.Install(satellites, groundNodes);
 **Purpose:** Install traffic-generating applications
 
 **Key Features:**
-- Ping (ICMP echo) application generation
+- **Ping (ICMP echo)** application generation
 - Configurable ping intervals and payload sizes
+- Flexible traffic installation methods:
+  - `InstallPingClient()`: Single source to destination
+  - `InstallPingClients()`: Multiple sources to single destination
+  - `InstallBidirectionalPing()`: Two-way ping traffic
+  - `InstallUeToServerPing()`: UEs to server topology
 - Start/stop time scheduling
-- Multiple UE-to-server connections
+- Verbose logging support
 
 **Configuration:**
 ```cpp
 LeoSimTrafficGeneratorHelper trafficHelper;
 trafficHelper.SetPingInterval(Seconds(10.0));
 trafficHelper.SetPingDataSize(56);  // ICMP payload
-ApplicationContainer pings = trafficHelper.InstallUeToServerPing(
-    ueNodes, serverNodes.Get(0), serverAddr, startTime, stopTime
+trafficHelper.SetVerbose(true);
+
+// Option 1: Single client
+ApplicationContainer ping = trafficHelper.InstallPingClient(
+    ueNode, serverAddr, Seconds(1.0), Seconds(59.0)
+);
+
+// Option 2: Multiple clients
+ApplicationContainer pings = trafficHelper.InstallPingClients(
+    ueNodes, serverAddr, Seconds(1.0), Seconds(59.0)
+);
+
+// Option 3: Bidirectional
+ApplicationContainer bidPings = trafficHelper.InstallBidirectionalPing(
+    node1, node2, addr1, addr2, Seconds(1.0), Seconds(59.0)
+);
+
+// Option 4: UE-to-server pattern
+ApplicationContainer serverPings = trafficHelper.InstallUeToServerPing(
+    ueNodes, serverNodes.Get(0), serverAddr, Seconds(1.0), Seconds(59.0)
 );
 ```
 
@@ -348,6 +398,129 @@ routingHelper.EnableDynamicRouting(calc, allNodes, allNodes,
     updateInterval, simTime, verbose);
 ```
 
+### 11. **LeoSimBeamManager** (model/leosim-beam-manager.*)
+**Purpose:** Manage beam selection, handover decisions, and handover execution using 3GPP NTN recommendations
+
+**Key Features:**
+- **3GPP-Compliant Handover Modes:**
+  - BHO (Basic Handover): Reactive handover on link failure
+  - CHO (Conditional Handover): Proactive 3GPP Rel-17 NTN handover
+- **3GPP Timer Management (TS 38.321):**
+  - TTT (Time-To-Trigger): Measurement report filtering
+  - T310: Radio Link Failure timer
+  - N310/N311: RLF counters for event-based triggering
+- **Handover Trigger Conditions:**
+  - A3 Event: Neighboring cell stronger than serving + offset
+  - A4 Event: Absolute RSRP threshold
+  - Elevation Angle: Minimum elevation constraints
+  - Time-To-Exist (TTE): Ephemeris-based handover prediction
+  - Load Balancing: Satellite load distribution
+- **TOPSIS Multi-Criteria Decision Making:**
+  - Weighted criteria: RSRP, TTE, Satellite Load, Latency, Elevation
+  - Configurable weighting coefficients
+  - Automated candidate ranking
+- **Packet Buffering During Handover:**
+  - Automatic packet buffering at source
+  - Configurable buffer size and retention
+  - Flow monitoring integration for KPI capture
+- **Advanced Features:**
+  - Ping-pong detection with rolling window
+  - Per-UE beam tracking
+  - Handover history and statistics
+  - Verbose logging for debugging
+
+**Setter Methods Available:**
+
+*Dependency Injection:*
+- `SetChannelModel(Ptr<LeoSimChannelModel>)` - Propagation channel model
+- `SetIslChannelModel(Ptr<LeoSimChannelModel>)` - Inter-satellite link model
+- `SetRoutingCalculator(Ptr<LeoSimRoutingCalculator>)` - Routing calculator
+- `SetLoader(Ptr<LeoSimLoader>)` - Satellite/beam loader
+- `SetVerbose(bool)` - Enable debug output
+
+*Handover Modes:*
+- `SetHandoverMode(LeoSimHandoverMode)` - CHO or BHO
+- `SetBeamMode(bool earthFixed)` - Earth-fixed or body-fixed beams
+
+*3GPP Timers:*
+- `SetTttDuration(Time)` - Time-To-Trigger duration
+- `SetT310Duration(Time)` - RLF timer duration
+- `SetN310Count(uint32_t)` - RLF event counter
+- `SetN311Count(uint32_t)` - RLF recovery counter
+
+*Handover Thresholds:*
+- `SetA3Offset(double)` - A3 event offset (dB)
+- `SetA4Threshold(double)` - A4 absolute threshold (dBm)
+- `SetElevationThreshold(double)` - Minimum elevation (degrees)
+- `SetTteThreshold(Time)` - Time-to-exist threshold
+
+*TOPSIS Configuration:*
+- `SetTopsisWeights(double w1-w5)` - Weighting coefficients
+- `SetMaxCandidates(uint32_t)` - Maximum candidate count
+
+*CHO Timing:*
+- `SetChoPreparationDelay(Time)` - Phase 1 preparation delay
+- `SetChoExecutionDelay(Time)` - Phase 2 execution delay
+
+*Load Balancing:*
+- `EnableLoadBalancing(bool)` - Enable/disable load balancing
+- `SetLoadImbalanceThreshold(uint32_t)` - Load difference threshold
+- `EnableHandoverBuffering(bool)` - Enable/disable packet buffering
+- `SetMaxBufferSize(uint32_t)` - Maximum buffer size (packets)
+
+*Flow Monitoring:*
+- `SetFlowMonitor(Ptr<FlowMonitor>)` - Flow monitor instance
+- `SetFlowClassifier(Ptr<Ipv4FlowClassifier>)` - IPv4 flow classifier
+
+**Configuration:**
+```cpp
+LeoSimBeamManagerHelper beamHelper;
+beamHelper.SetChannelModel(channelModel);
+beamHelper.SetIslChannelModel(islChannelModel);
+beamHelper.SetRoutingCalculator(routingCalculator);
+beamHelper.SetLoader(loader);
+
+// Handover mode
+beamHelper.SetHandoverMode(LEOSIM_HO_MODE_CHO);
+beamHelper.SetEarthFixedBeamMode(false);
+
+// 3GPP timers
+beamHelper.SetTtt(Seconds(1.0));
+beamHelper.SetT310(Seconds(1.0));
+beamHelper.SetN310(3);
+beamHelper.SetN311(3);
+
+// Thresholds
+beamHelper.SetA3Offset(3.0);
+beamHelper.SetA4Threshold(-110.0);
+beamHelper.SetElevationThreshold(10.0);
+beamHelper.SetTteThreshold(Seconds(30.0));
+
+// TOPSIS weighting
+beamHelper.SetTopsisWeights(0.30, 0.30, 0.15, 0.15, 0.10);
+beamHelper.SetMaxCandidates(3);
+
+// CHO timing
+beamHelper.SetChoPreparationDelay(MilliSeconds(100));
+beamHelper.SetChoExecutionDelay(MilliSeconds(150));
+
+// Load balancing & buffering
+beamHelper.EnableLoadBalancing(true);
+beamHelper.EnableHandoverBuffering(true);
+
+// Install and start beam manager
+Ptr<LeoSimBeamManager> beamMgr = beamHelper.Install(ueNodes, satNodes, simTime);
+```
+
+### 12. **LeoSimBeamManagerHelper** (helper/leosim-beam-manager-helper.*)
+**Purpose:** Simplify beam manager configuration and installation
+
+**Key Features:**
+- Centralized parameter configuration
+- Easy installation with preconfigured settings
+- Support for all beam manager features
+- Verbose logging support
+
 ---
 
 ## Implementation Process
@@ -395,18 +568,35 @@ routingHelper.EnableDynamicRouting(calc, allNodes, allNodes,
 2. Schedule application start/stop times
 3. Configure application parameters
 
-### Phase 7: Logging & Visualization
+### Phase 7: Beam Manager & Handover (Optional)
+1. Create LeoSimBeamManagerHelper
+2. Configure handover parameters:
+   - Handover mode (BHO or CHO)
+   - 3GPP timers and counters
+   - Trigger thresholds (A3, A4, elevation, TTE)
+   - TOPSIS weighting coefficients
+3. Enable optional features:
+   - Load balancing
+   - Packet buffering
+   - Flow monitoring integration
+4. Install and start beam manager
+5. Beam manager runs periodic update cycles for handover decisions
+
+### Phase 8: Logging & Visualization
 1. Setup visualization helper
 2. Schedule position logging
 3. Enable packet logging (optional)
 4. Setup output files
 
-### Phase 8: Execution & Analysis
+### Phase 9: Execution & Analysis
 1. Run simulator
-2. Stop channel updates
+2. Stop channel updates and beam manager
 3. Finalize visualization
 4. Destroy simulator
 5. Post-process output files
+   - Analyze handover history and statistics
+   - Process KPI captures from flow monitoring
+   - Visualize beam switching events
 
 ---
 
@@ -440,10 +630,17 @@ Time::SetResolution(Time::NS);
 // Load data
 LeoSimLoaderHelper loaderHelper;
 loaderHelper.SetVerbose(verbose);
-loaderHelper.LoadSatellitesFromTrace(satelliteFile);
+
+// Load satellites from trace file OR CSV
+if (useTrace) {
+    loaderHelper.LoadSatellitesFromTrace(satelliteFile);
+} else {
+    loaderHelper.LoadSatellitesFromCsv(satelliteFile);
+}
 loaderHelper.LoadGroundDevicesFromCsv(groundDeviceFile);
 
 // Get device lists
+Ptr<LeoSimLoader> loader = loaderHelper.GetLoader();
 auto serverDeviceIds = loader->GetGroundDeviceIdsByType("SERVER");
 auto ueDeviceIds = loader->GetGroundDeviceIdsByType("UE");
 ```
@@ -572,13 +769,16 @@ for (uint32_t i = 0; i < groundDevices.GetN(); i += 2) {
 
 **7. Routing Setup**
 ```cpp
-// Create routing calculator
+// Create routing calculator with Dijkstra algorithm
 LeoSimRoutingCalculatorHelper routingHelper;
 Ptr<LeoSimRoutingCalculator> unifiedCalc = 
     routingHelper.CreateUnifiedRoutingCalculator(
         channelModel, islChannelModel, verbose);
 
-// Enable dynamic routing
+// Set preferred routing metric (HOP_COUNT, PATH_LOSS, SNR, DISTANCE, SIGNAL_STRENGTH)
+// unifiedCalc->SetRoutingMetric(LeoSimRoutingCalculator::LEOSIM_METRIC_HOP_COUNT);
+
+// Enable dynamic routing with periodic updates
 NodeContainer allNodes;
 allNodes.Add(satelliteNodes);
 allNodes.Add(ueNodes);
@@ -672,11 +872,20 @@ cd /home/anupa/UCD/LeoSim/ns3
 
 ### Input Files
 
-**1. Satellite Mobility File** (`satellite_mobility.tcl`)
+**1. Satellite Mobility File** (Trace or CSV format)
+
+**Format 1: Trace File** (`satellite_mobility.tcl`)
 - Format: ns-3 trace file format
 - Contains satellite positions over time
 - Generated from TLE (Two-Line Element) data
 - Path: `contrib/leosim/utils/satellite_mobility.tcl`
+- Load with: `loaderHelper.LoadSatellitesFromTrace(file)`
+
+**Format 2: CSV File** (`satellite_positions.csv`)
+- CSV with headers: ID, Time, Name, X(or Lat), Y(or Lon), Z(or Alt)
+- Contains one line per satellite per timestep
+- Timestep data allows trajectory tracking
+- Load with: `loaderHelper.LoadSatellitesFromCsv(file)`
 
 **2. Ground Devices CSV** (`ground_devices.csv`)
 - Format: CSV with headers
@@ -777,10 +986,11 @@ Time(s),EventType,Direction,SourceID,DestID,Size(bytes),UID
    - Distance calculations
 
 3. **Routing Tests:**
-   - BFS pathfinding
+   - Dijkstra pathfinding with multiple metrics
    - Route validation
    - Hop count accuracy
    - Path quality metrics
+   - Path type constraints (ISL-only, ground-only, mixed)
 
 4. **Device Installer Tests:**
    - Device creation
@@ -810,28 +1020,38 @@ Time(s),EventType,Direction,SourceID,DestID,Size(bytes),UID
 **Implementation Effort:** High
 **Dependencies:** None
 
-#### 2. **Advanced Routing Algorithms** 🟠
-- [ ] Implement Dijkstra's algorithm for weighted shortest path
-- [ ] Add multiple routing metrics (latency, SNR, path loss)
-- [ ] Support k-shortest paths
+#### 2. **Advanced Routing Algorithms** ✅
+- [x] Implement Dijkstra's algorithm for weighted shortest path
+- [x] Add multiple routing metrics (hop count, SNR, path loss, distance, signal strength)
+- [ ] Support k-shortest paths (backup routes)
 - [ ] Implement dynamic routing with congestion awareness
 - [ ] Add route caching mechanisms
 - [ ] Optimize routing table updates
 
-**Current:** BFS (unweighted shortest path)
-**Improvement:** Better quality of service
-**Estimated Effort:** Medium
+**Current:** Dijkstra with multiple metrics (COMPLETED)
+**Next:** k-shortest paths and congestion awareness
+**Estimated Effort for Remaining Items:** Medium
 
-#### 3. **Handover Management** 🔴
-- [ ] Detect handover opportunities
-- [ ] Manage handover triggers and timing
-- [ ] Implement soft/hard handover strategies
-- [ ] Track handover impact on traffic
-- [ ] Log handover events
+#### 3. **Handover Management** ✅
+- [x] Detect handover opportunities (A3, A4, elevation, TTE-based triggers)
+- [x] Manage handover triggers and timing (3GPP TTT, T310 timers)
+- [x] Implement soft/hard handover strategies (BHO and CHO modes)
+- [x] Track handover impact on traffic (packet buffering, flow monitoring integration)
+- [x] Log handover events (complete history with metrics, KPI capture)
+- [x] Multi-criteria handover decision making (TOPSIS ranking)
+- [x] 3GPP NTN compliance (TS 38.321 timers and RLF procedures)
+- [x] Ping-pong detection and prevention
 
-**Current:** None
+**Current:** LeoSimBeamManager fully implemented with all features (COMPLETED)
+**Features:** 
+- 3GPP timer management (TTT, T310, N310, N311)
+- Multi-trigger handover (A3, A4, elevation, TTE, load balancing, RLF)
+- TOPSIS multi-criteria decision making
+- CHO and BHO modes
+- Packet buffering and flow monitoring
+- Detailed logging and statistics
 **Impact:** Critical for realistic LEO operation
-**Estimated Effort:** High
+**Implementation Status:** COMPLETED - see LeoSimBeamManager (Section 11)
 
 #### 4. **Link Quality Adaptation** 🟠
 - [ ] Adaptive modulation/coding based on SNR
@@ -1059,11 +1279,12 @@ published by the Free Software Foundation.
 
 ```
 General:
-  --satellites=FILE              Satellite mobility file
+  --satellites=FILE              Satellite mobility file (trace or CSV)
   --groundDevices=FILE           Ground devices CSV
   --simTime=SECONDS              Simulation duration (default: 60)
   --verbose=0|1                  Verbose logging (default: 1)
   --logPackets=0|1               Enable packet logging (default: 1)
+  --useTrace=0|1                 Use trace format for satellites (default: 1)
 
 Network:
   --numSatellites=N              Number of satellites (default: 300)
@@ -1099,8 +1320,10 @@ Logging:
 ```cpp
 // Loader
 LeoSimLoaderHelper::LoadSatellitesFromTrace(file)
+LeoSimLoaderHelper::LoadSatellitesFromCsv(file)
 LeoSimLoaderHelper::LoadGroundDevicesFromCsv(file)
 LeoSimLoader::GetGroundDeviceIdsByType(type)
+LeoSimLoader::GetNumSatellites()
 
 // Channel
 LeoSimChannelHelper::SetMinElevationAngle(degrees)
@@ -1113,10 +1336,16 @@ LeoSimMobilityHelper::InstallGateway(node, id, name, pos)
 
 // Routing
 LeoSimRoutingCalculatorHelper::CreateUnifiedRoutingCalculator(...)
+LeoSimRoutingCalculator::ComputeRoute(source, dest, metric, pathType)
+LeoSimRoutingCalculator::SetChannelModel(model)
+LeoSimRoutingCalculator::SetIslChannelModel(islModel)
 routingHelper.EnableDynamicRouting(calc, nodes, nodes, interval, ...)
 
 // Traffic
-LeoSimTrafficGeneratorHelper::InstallUeToServerPing(...)
+LeoSimTrafficGeneratorHelper::InstallPingClient(node, addr, startTime, stopTime)
+LeoSimTrafficGeneratorHelper::InstallPingClients(nodes, addr, startTime, stopTime)
+LeoSimTrafficGeneratorHelper::InstallBidirectionalPing(node1, node2, addr1, addr2, ...)
+LeoSimTrafficGeneratorHelper::InstallUeToServerPing(ueNodes, serverNode, addr, ...)
 
 // Visualization
 LeoSimVisualizationHelper::SchedulePositionLogging(...)
@@ -1131,4 +1360,5 @@ For questions, bug reports, or feature requests, please contact the development 
 
 **Project Status:** Active Development ✓  
 **Last Updated:** March 2026  
-**Compatible with:** ns-3 (version 3.36+)
+**Version:** ns-3.45  
+**Status:** Active Development with Dijkstra Routing ✓

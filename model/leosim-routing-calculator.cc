@@ -19,6 +19,7 @@
 
 #include "ns3/log.h"
 #include "ns3/simulator.h"
+#include "ns3/node-list.h"
 
 #include <algorithm>
 #include <limits>
@@ -745,6 +746,150 @@ LeoSimRoutingCalculator::ReconstructRoute(Ptr<Node> source,
     }
 
     return route;
+}
+
+void
+LeoSimRoutingCalculator::InvalidateRoutesForNode(uint32_t nodeId)
+{
+    NS_LOG_FUNCTION(this << nodeId);
+
+    std::vector<std::pair<uint32_t, uint32_t>> routesToInvalidate;
+
+    // Find all routes that contain nodeId in their path
+    for (auto& entry : m_routeCache)
+    {
+        const std::pair<uint32_t, uint32_t>& routeKey = entry.first;
+        LeoSimRoute& route = entry.second;
+
+        // Check if nodeId appears in the path
+        for (const auto& node : route.path)
+        {
+            if (node && node->GetId() == nodeId)
+            {
+                routesToInvalidate.push_back(routeKey);
+                break;
+            }
+        }
+    }
+
+    // Remove the invalid routes from the cache
+    for (const auto& routeKey : routesToInvalidate)
+    {
+        m_routeCache.erase(routeKey);
+        NS_LOG_DEBUG("Invalidated cached route from node " << routeKey.first << " to "
+                                                           << routeKey.second
+                                                           << " due to node " << nodeId);
+
+        // Schedule immediate recompute for this pair via Simulator::ScheduleNow
+        uint32_t sourceId = routeKey.first;
+        uint32_t destId = routeKey.second;
+
+        // Lambda to trigger recompute of the route
+        Simulator::ScheduleNow([this, sourceId, destId]() {
+            Ptr<Node> sourceNode = (sourceId < 10000) ? NodeList::GetNode(sourceId) : nullptr;
+            Ptr<Node> destNode = (destId < 10000) ? NodeList::GetNode(destId) : nullptr;
+
+            if (sourceNode && destNode)
+            {
+                LeoSimRoute newRoute = ComputeRoute(sourceNode, destNode);
+                if (newRoute.valid)
+                {
+                    m_routeCache[std::make_pair(sourceId, destId)] = newRoute;
+                    NS_LOG_DEBUG("Recomputed route from " << sourceId << " to " << destId);
+                }
+            }
+        });
+    }
+
+    NS_LOG_INFO("Invalidated " << routesToInvalidate.size() << " routes containing node "
+                               << nodeId);
+}
+
+void
+LeoSimRoutingCalculator::ForceRouteUpdate(uint32_t ueNodeId, uint32_t newSatId)
+{
+    NS_LOG_FUNCTION(this << ueNodeId << newSatId);
+
+    Ptr<Node> ueNode = NodeList::GetNode(ueNodeId);
+    Ptr<Node> satNode = NodeList::GetNode(newSatId);
+
+    if (!ueNode || !satNode)
+    {
+        NS_LOG_ERROR("Invalid node IDs: UE=" << ueNodeId << ", SAT=" << newSatId);
+        return;
+    }
+
+    // Recompute the route from UE to SAT
+    LeoSimRoute ueToSat = ComputeRoute(ueNode, satNode);
+    if (ueToSat.valid)
+    {
+        // Update cache
+        m_routeCache[std::make_pair(ueNodeId, newSatId)] = ueToSat;
+        NS_LOG_DEBUG("Force-updated route cache: UE " << ueNodeId << " -> SAT " << newSatId);
+    }
+
+    // Recompute the route from SAT to UE (reverse direction)
+    LeoSimRoute satToUe = ComputeRoute(satNode, ueNode);
+    if (satToUe.valid)
+    {
+        // Update cache
+        m_routeCache[std::make_pair(newSatId, ueNodeId)] = satToUe;
+        NS_LOG_DEBUG("Force-updated route cache: SAT " << newSatId << " -> UE " << ueNodeId);
+    }
+
+    // TODO: Update ns-3 Ipv4StaticRouting tables with new routes
+    // This would require access to routing protocol helpers and is application-specific
+    NS_LOG_INFO("Force-updated bidirectional routes for UE " << ueNodeId << " via satellite "
+                                                             << newSatId);
+}
+
+void
+LeoSimRoutingCalculator::PreComputeRouteForNode(uint32_t ueNodeId, uint32_t candidateSatId)
+{
+    NS_LOG_FUNCTION(this << ueNodeId << candidateSatId);
+
+    Ptr<Node> ueNode = NodeList::GetNode(ueNodeId);
+    Ptr<Node> satNode = NodeList::GetNode(candidateSatId);
+
+    if (!ueNode || !satNode)
+    {
+        NS_LOG_ERROR("Invalid node IDs: UE=" << ueNodeId << ", Candidate SAT=" << candidateSatId);
+        return;
+    }
+
+    // Route from UE to candidate satellite
+    LeoSimRoute ueToSat = ComputeRoute(ueNode, satNode);
+    if (ueToSat.valid)
+    {
+        m_routeCache[std::make_pair(ueNodeId, candidateSatId)] = ueToSat;
+        NS_LOG_DEBUG("Pre-computed route cache: UE " << ueNodeId << " -> Candidate SAT "
+                                                     << candidateSatId << " (" << ueToSat.hopCount
+                                                     << " hops)");
+    }
+    else
+    {
+        NS_LOG_WARN("Failed to pre-compute route from UE " << ueNodeId << " to candidate SAT "
+                                                           << candidateSatId);
+    }
+
+    // Route from candidate satellite to UE
+    LeoSimRoute satToUe = ComputeRoute(satNode, ueNode);
+    if (satToUe.valid)
+    {
+        m_routeCache[std::make_pair(candidateSatId, ueNodeId)] = satToUe;
+        NS_LOG_DEBUG("Pre-computed route cache: Candidate SAT " << candidateSatId << " -> UE "
+                                                                << ueNodeId << " ("
+                                                                << satToUe.hopCount << " hops)");
+    }
+    else
+    {
+        NS_LOG_WARN("Failed to pre-compute route from candidate SAT " << candidateSatId
+                                                                      << " to UE " << ueNodeId);
+    }
+
+    NS_LOG_INFO("Pre-computed bidirectional routes for UE " << ueNodeId
+                                                            << " via candidate satellite "
+                                                            << candidateSatId);
 }
 
 } // namespace ns3

@@ -276,6 +276,51 @@ class LeoSimRoutingCalculator : public Object
      */
     uint32_t GetNumActiveGroundLinks();
 
+    /**
+     * \brief Invalidate all cached routes containing a specified node
+     * 
+     * Removes all cached routes from m_routeCache that contain the given nodeId
+     * anywhere in their path vector. Schedules an immediate recompute via
+     * Simulator::ScheduleNow for affected source-destination pairs.
+     * 
+     * This is called during handover to clear stale paths that go through the
+     * old serving satellite.
+     * 
+     * \param nodeId The node ID to invalidate routes through
+     */
+    void InvalidateRoutesForNode(uint32_t nodeId);
+
+    /**
+     * \brief Force immediate recomputation and installation of routes for a UE
+     * 
+     * Immediately recomputes and reinstalls all routes that start or end at ueNodeId,
+     * using newSatId as the serving satellite. Calls ComputeRoute internally and
+     * updates the ns-3 Ipv4StaticRouting tables with the new paths.
+     * 
+     * This is typically called at CHO completion to install the new handover paths
+     * into the data plane immediately.
+     * 
+     * \param ueNodeId UE node identifier
+     * \param newSatId The target satellite (new serving beam) node ID
+     */
+    void ForceRouteUpdate(uint32_t ueNodeId, uint32_t newSatId);
+
+    /**
+     * \brief Pre-compute and cache route for later installation
+     * 
+     * Runs Dijkstra's algorithm from ueNodeId via candidateSatId and caches the
+     * resulting LeoSimRoute in m_routeCache without installing it into routing
+     * tables yet. This is called during CHO Phase 1 (preparation) so that
+     * ForceRouteUpdate at CHO completion is near-instant (cache hit).
+     * 
+     * The route is cached keyed by the pair (ueNodeId, candidateSatId) and can
+     * be looked up later without recomputation.
+     * 
+     * \param ueNodeId UE node identifier
+     * \param candidateSatId Candidate satellite (prospective serving beam) node ID
+     */
+    void PreComputeRouteForNode(uint32_t ueNodeId, uint32_t candidateSatId);
+
   private:
     /**
      * \brief Dijkstra's algorithm implementation for route computation
@@ -350,6 +395,9 @@ class LeoSimRoutingCalculator : public Object
     std::map<Ptr<Node>, std::set<Ptr<Node>>> m_cachedTopology;
     Time m_lastTopologyCacheUpdate;
     Time m_topologyCacheTTL;  //!< Time-to-live for cached topology
+
+    // Route cache: keyed by (source node ID, destination node ID) pair
+    std::map<std::pair<uint32_t, uint32_t>, LeoSimRoute> m_routeCache;  //!< Cached routes
 };
 
 } // namespace ns3

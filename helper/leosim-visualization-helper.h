@@ -21,11 +21,13 @@
 #include "leosim-loader-helper.h"
 
 #include "ns3/leosim-channel-model.h"
+#include "ns3/leosim-beam-manager.h"
 #include "ns3/node-container.h"
 
 #include <fstream>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace ns3
 {
@@ -121,6 +123,58 @@ class LeoSimVisualizationHelper
      */
     void Finalize();
 
+    /**
+     * \brief Set the output file for beam state data
+     * \param filename Path to beam CSV file
+     */
+    void SetBeamFile(const std::string& filename);
+
+    /**
+     * \brief Set the output file for handover event data
+     * \param filename Path to handover CSV file
+     */
+    void SetHandoverFile(const std::string& filename);
+
+    /**
+     * \brief Set the output file for CHO configuration data
+     * \param filename Path to CHO CSV file
+     */
+    void SetChoFile(const std::string& filename);
+
+    /**
+     * \brief Initialize beam state and handover logging with header rows
+     */
+    void InitBeamLogging();
+
+    /**
+     * \brief Log current beam state for a UE
+     * \param ueId UE node ID
+     * \param rec Beam record with RSRP, SNR, elevation, etc.
+     * \param topsisScore TOPSIS ranking score
+     */
+    void LogBeamState(uint32_t ueId, const LeoSimBeamRecord& rec, double topsisScore);
+
+    /**
+     * \brief Log handover event to file
+     * \param evt Complete handover event with timing and metrics
+     */
+    void LogHandoverEvent(const LeoSimHandoverEvent& evt);
+
+    /**
+     * \brief Log CHO configuration candidates for a UE
+     * \param ueId UE node ID
+     * \param servingSatId Current serving satellite ID
+     * \param candidates Vector of TOPSIS-ranked candidate beams
+     */
+    void LogChoConfig(uint32_t ueId, 
+                      uint32_t servingSatId,
+                      const std::vector<LeoSimTopsisCandidate>& candidates);
+
+    /**
+     * \brief Finalize beam logging by closing CSV files
+     */
+    void FinalizeBeamLogging();
+
   private:
     /**
      * \brief Log a single node position
@@ -163,9 +217,15 @@ class LeoSimVisualizationHelper
     std::string m_outputFile;
     std::string m_linkFile;
     std::string m_packetFile;
+    std::string m_beamFile;
+    std::string m_handoverFile;
+    std::string m_choFile;
     std::ofstream m_posFile;
     std::ofstream m_linkFileStream;
     std::ofstream m_packetFileStream;
+    std::ofstream m_beamFileStream;
+    std::ofstream m_handoverFileStream;
+    std::ofstream m_choFileStream;
     LeoSimLoaderHelper* m_loaderHelper;
     Ptr<LeoSimChannelModel> m_channelModel;
     Ptr<LeoSimChannelModel> m_islChannelModel;

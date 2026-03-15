@@ -1035,4 +1035,98 @@ LeoSimChannelModel::GetIslFrequency() const
     return m_islFrequency;
 }
 
+std::vector<LeoSimChannelQuality>
+LeoSimChannelModel::GetLinksForNode(uint32_t nodeId) const
+{
+    NS_LOG_FUNCTION(this << nodeId);
+    std::vector<LeoSimChannelQuality> result;
+
+    // Iterate through all links to find those connected to this node
+    for (const auto& linkEntry : m_links)
+    {
+        const LinkInfo& linkInfo = linkEntry.second;
+        uint32_t id1 = linkInfo.node1->GetId();
+        uint32_t id2 = linkInfo.node2->GetId();
+
+        // Check if this link is connected to the requested node
+        if (id1 == nodeId || id2 == nodeId)
+        {
+            // Only include links with UP or DEGRADED state
+            if (linkInfo.quality.linkState == LEOSIM_LINK_UP ||
+                linkInfo.quality.linkState == LEOSIM_LINK_DEGRADED)
+            {
+                result.push_back(linkInfo.quality);
+            }
+        }
+    }
+
+    NS_LOG_DEBUG("Found " << result.size() << " UP/DEGRADED links for node " << nodeId);
+    return result;
+}
+
+LeoSimChannelQuality
+LeoSimChannelModel::GetLinkQuality(uint32_t nodeA, uint32_t nodeB) const
+{
+    NS_LOG_FUNCTION(this << nodeA << nodeB);
+
+    // Create normalized node pair (ordered)
+    auto nodePair = std::make_pair(std::min(nodeA, nodeB), std::max(nodeA, nodeB));
+
+    // Look up the link ID for this node pair
+    auto it = m_nodePairToLink.find(nodePair);
+    if (it != m_nodePairToLink.end())
+    {
+        uint32_t linkId = it->second;
+        auto linkIt = m_links.find(linkId);
+        if (linkIt != m_links.end())
+        {
+            NS_LOG_DEBUG("Found link quality for nodes " << nodeA << " and " << nodeB);
+            return linkIt->second.quality;
+        }
+    }
+
+    // Return default-constructed quality with DOWN state if link not found
+    LeoSimChannelQuality defaultQuality;
+    defaultQuality.linkState = LEOSIM_LINK_DOWN;
+    defaultQuality.distance = 0.0;
+    defaultQuality.pathLoss = 0.0;
+    defaultQuality.elevationAngle = 0.0;
+    defaultQuality.signalStrength = -200.0;
+    defaultQuality.snr = -100.0;
+    defaultQuality.lastUpdate = Simulator::Now();
+    defaultQuality.linkType = LEOSIM_LINK_SATELLITE_TO_GROUND; // Default type
+
+    NS_LOG_DEBUG("Link not found for nodes " << nodeA << " and " << nodeB 
+                 << ", returning default DOWN quality");
+    return defaultQuality;
+}
+
+LeoSimLinkState
+LeoSimChannelModel::GetLinkState(uint32_t nodeA, uint32_t nodeB) const
+{
+    NS_LOG_FUNCTION(this << nodeA << nodeB);
+
+    // Create normalized node pair (ordered)
+    auto nodePair = std::make_pair(std::min(nodeA, nodeB), std::max(nodeA, nodeB));
+
+    // Look up the link ID for this node pair
+    auto it = m_nodePairToLink.find(nodePair);
+    if (it != m_nodePairToLink.end())
+    {
+        uint32_t linkId = it->second;
+        auto linkIt = m_links.find(linkId);
+        if (linkIt != m_links.end())
+        {
+            NS_LOG_DEBUG("Found link state for nodes " << nodeA << " and " << nodeB 
+                         << ": " << linkIt->second.quality.linkState);
+            return linkIt->second.quality.linkState;
+        }
+    }
+
+    NS_LOG_DEBUG("Link not found for nodes " << nodeA << " and " << nodeB 
+                 << ", returning DOWN state");
+    return LEOSIM_LINK_DOWN;
+}
+
 } // namespace ns3
+

@@ -734,4 +734,138 @@ LeoSimLoader::CartesianToGeodetic(const Vector& position)
     return Vector(lat, lon, alt);
 }
 
+Vector
+LeoSimLoader::GetSatellitePositionAt(uint32_t satId, Time t) const
+{
+    NS_LOG_FUNCTION(this << satId << t.GetSeconds());
+
+    // Find the satellite's position trace
+    auto satIt = m_satelliteData.find(satId);
+    if (satIt == m_satelliteData.end())
+    {
+        NS_LOG_WARN("No position data for satellite " << satId);
+        return Vector(0, 0, 0);
+    }
+
+    const std::vector<SatellitePosition>& positions = satIt->second;
+    if (positions.empty())
+    {
+        NS_LOG_WARN("Empty position vector for satellite " << satId);
+        return Vector(0, 0, 0);
+    }
+
+    double targetTime = t.GetSeconds();
+
+    // If time is before first entry, return first position
+    if (targetTime <= positions[0].time)
+    {
+        NS_LOG_DEBUG("Target time " << targetTime << "s is before first entry " << positions[0].time
+                                    << "s, returning first position");
+        return positions[0].position;
+    }
+
+    // If time is after last entry, extrapolate linearly using last two entries
+    if (targetTime >= positions.back().time)
+    {
+        if (positions.size() >= 2)
+        {
+            const SatellitePosition& last = positions.back();
+            const SatellitePosition& secondLast = positions[positions.size() - 2];
+
+            double timeDiff = last.time - secondLast.time;
+            if (timeDiff > 0)
+            {
+                // Calculate velocity
+                Vector velocity((last.position.x - secondLast.position.x) / timeDiff,
+                                (last.position.y - secondLast.position.y) / timeDiff,
+                                (last.position.z - secondLast.position.z) / timeDiff);
+
+                // Extrapolate
+                double timeAfterLast = targetTime - last.time;
+                Vector extrapolatedPos(last.position.x + velocity.x * timeAfterLast,
+                                      last.position.y + velocity.y * timeAfterLast,
+                                      last.position.z + velocity.z * timeAfterLast);
+
+                NS_LOG_DEBUG("Target time " << targetTime << "s is after last entry " << last.time
+                                            << "s, extrapolating linearly");
+                return extrapolatedPos;
+            }
+            else
+            {
+                // Same time, return last position
+                return last.position;
+            }
+        }
+        else
+        {
+            // Only one entry, return it
+            NS_LOG_DEBUG("Only one position entry for satellite " << satId
+                        << ", returning last position");
+            return positions.back().position;
+        }
+    }
+
+    // Find bracketing entries for interpolation
+    for (size_t i = 0; i < positions.size() - 1; ++i)
+    {
+        if (targetTime >= positions[i].time && targetTime <= positions[i + 1].time)
+        {
+            const SatellitePosition& before = positions[i];
+            const SatellitePosition& after = positions[i + 1];
+
+            // Linear interpolation
+            double timeDiff = after.time - before.time;
+            double alpha = (targetTime - before.time) / timeDiff;
+
+            Vector interpolatedPos(before.position.x + alpha * (after.position.x - before.position.x),
+                                  before.position.y + alpha * (after.position.y - before.position.y),
+                                  before.position.z + alpha * (after.position.z - before.position.z));
+
+            NS_LOG_DEBUG("Interpolating satellite " << satId << " position at " << targetTime
+                                                     << "s between " << before.time << "s and "
+                                                     << after.time << "s (alpha=" << alpha << ")");
+            return interpolatedPos;
+        }
+    }
+
+    // Should not reach here, return last position as fallback
+    NS_LOG_WARN("Could not find bracketing entries for satellite " << satId << " at time "
+                                                                    << targetTime);
+    return positions.back().position;
+}
+
+uint32_t
+LeoSimLoader::GetOrbitPlane(uint32_t satId) const
+{
+    NS_LOG_FUNCTION(this << satId);
+
+    uint32_t plane = satId / m_satellitesPerPlane;
+
+    NS_LOG_DEBUG("Satellite " << satId << " is in orbit plane " << plane
+                              << " (m_satellitesPerPlane=" << m_satellitesPerPlane << ")");
+    return plane;
+}
+
+void
+LeoSimLoader::SetSatellitesPerPlane(uint32_t count)
+{
+    NS_LOG_FUNCTION(this << count);
+
+    if (count == 0)
+    {
+        NS_LOG_WARN("Satellites per plane cannot be 0, ignoring");
+        return;
+    }
+
+    m_satellitesPerPlane = count;
+    NS_LOG_INFO("Set satellites per plane to " << m_satellitesPerPlane);
+}
+
+uint32_t
+LeoSimLoader::GetSatellitesPerPlane() const
+{
+    return m_satellitesPerPlane;
+}
+
 } // namespace ns3
+

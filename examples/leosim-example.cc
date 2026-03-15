@@ -32,6 +32,7 @@
 #include "ns3/leosim-mobility-helper.h"
 #include "ns3/leosim-traffic-generator-helper.h"
 #include "ns3/leosim-visualization-helper.h"
+#include "ns3/leosim-beam-manager-helper.h"
 #include "ns3/mobility-module.h"
 #include "ns3/network-module.h"
 #include "ns3/ipv4-routing-table-entry.h"
@@ -76,6 +77,27 @@ main(int argc, char* argv[])
     double islTransmitPower = 30.0;
     double islAntennaGain = 35.0;
 
+    // === Beam Manager & Handover Configuration (3GPP NTN CHO) ===
+    std::string hoMode = "CHO";
+    bool earthFixedBeam = false;
+    double tttSeconds = 1.0;
+    double t310Seconds = 1.0;
+    uint32_t n310 = 3;
+    uint32_t n311 = 3;
+    double a3OffsetDb = 3.0;
+    double a4ThresholdDbm = -110.0;
+    double tteTriggerSeconds = 30.0;
+    double wRsrp = 0.30;
+    double wTte = 0.30;
+    double wLoad = 0.15;
+    double wLatency = 0.15;
+    double wElevation = 0.10;
+    uint32_t maxCandidates = 3;
+    double choPrep = 100.0;
+    double choExec = 150.0;
+    bool enableLoadBalancing = true;
+    bool enableHoBuffering = true;
+
     CommandLine cmd;
     cmd.AddValue("satellites", "Path to satellite position file", satelliteFile);
     cmd.AddValue("groundDevices", "Path to ground device CSV file", groundDeviceFile);
@@ -104,6 +126,27 @@ main(int argc, char* argv[])
     cmd.AddValue("islMaxDistance", "Maximum ISL distance (meters)", islMaxDistance);
     cmd.AddValue("islTransmitPower", "ISL transmit power (dBm)", islTransmitPower);
     cmd.AddValue("islAntennaGain", "ISL antenna gain (dB)", islAntennaGain);
+
+    // === Beam Manager & Handover Parameters (3GPP NTN CHO) ===
+    cmd.AddValue("hoMode", "Handover mode: CHO (Conditional, 3GPP Rel-17) or BHO (reactive)", hoMode);
+    cmd.AddValue("earthFixedBeam", "Use earth-fixed beam footprint instead of satellite-fixed", earthFixedBeam);
+    cmd.AddValue("ttt", "Time-to-Trigger duration in seconds (default 1.0)", tttSeconds);
+    cmd.AddValue("t310", "T310 RLF detection timer in seconds (default 1.0)", t310Seconds);
+    cmd.AddValue("n310", "N310: consecutive out-of-sync detections before RLF", n310);
+    cmd.AddValue("n311", "N311: consecutive in-sync recoveries to cancel T310", n311);
+    cmd.AddValue("a3Offset", "A3 event RSRP offset in dB (default 3.0)", a3OffsetDb);
+    cmd.AddValue("a4Threshold", "A4 absolute RSRP threshold in dBm (default -110.0)", a4ThresholdDbm);
+    cmd.AddValue("tteTrigger", "Ephemeris handover lead time before TTE expires, seconds", tteTriggerSeconds);
+    cmd.AddValue("maxCandidates", "Maximum CHO candidate satellites pre-positioned", maxCandidates);
+    cmd.AddValue("choPrep", "CHO preparation phase delay in milliseconds (default 100)", choPrep);
+    cmd.AddValue("choExec", "CHO execution phase delay in milliseconds (default 150)", choExec);
+    cmd.AddValue("wRsrp", "TOPSIS weight for RSRP", wRsrp);
+    cmd.AddValue("wTte", "TOPSIS weight for propagation delay", wTte);
+    cmd.AddValue("wLoad", "TOPSIS weight for link load", wLoad);
+    cmd.AddValue("wLatency", "TOPSIS weight for latency", wLatency);
+    cmd.AddValue("wElevation", "TOPSIS weight for elevation", wElevation);
+    cmd.AddValue("enableLoadBalancing", "Enable load-balancing handovers", enableLoadBalancing);
+    cmd.AddValue("enableHoBuffering", "Enable packet buffering during handover", enableHoBuffering);
     cmd.Parse(argc, argv);
 
     Time::SetResolution(Time::NS);
@@ -433,6 +476,75 @@ main(int argc, char* argv[])
                   << " seconds" << std::endl;
     }
     
+    // === Beam Management & Handover (3GPP NTN CHO) ===
+    std::cout << "\nSetting up beam manager with conditional handover support..." << std::endl;
+    
+    LeoSimBeamManagerHelper beamHelper;
+    beamHelper.SetChannelModel(channelModel);
+    if (enableIsl && islChannelModel)
+    {
+        beamHelper.SetIslChannelModel(islChannelModel);
+    }
+    beamHelper.SetRoutingCalculator(unifiedCalc);
+    beamHelper.SetLoader(loader);
+    
+    // Set handover mode and earth-fixed beam configuration
+    if (hoMode == "BHO")
+    {
+        beamHelper.SetHandoverMode(LEOSIM_HO_MODE_BHO);
+    }
+    else
+    {
+        beamHelper.SetHandoverMode(LEOSIM_HO_MODE_CHO);
+    }
+    
+    if (earthFixedBeam)
+    {
+        beamHelper.SetEarthFixedBeamMode(true);
+    }
+    
+    // Set 3GPP timers and counters
+    beamHelper.SetTtt(Seconds(tttSeconds));
+    beamHelper.SetT310(Seconds(t310Seconds));
+    beamHelper.SetN310(n310);
+    beamHelper.SetN311(n311);
+    
+    // Set handover decision thresholds
+    beamHelper.SetA3Offset(a3OffsetDb);
+    beamHelper.SetA4Threshold(a4ThresholdDbm);
+    beamHelper.SetTteThreshold(Seconds(tteTriggerSeconds));
+    
+    // Set CHO timing (convert from milliseconds to seconds)
+    beamHelper.SetChoPreparationDelay(Seconds(choPrep / 1000.0));
+    beamHelper.SetChoExecutionDelay(Seconds(choExec / 1000.0));
+    
+    // Set TOPSIS prioritization weights (must sum to 1.0)
+    beamHelper.SetTopsisWeights(wRsrp, wTte, wLoad, wLatency, wElevation);
+    beamHelper.SetMaxCandidates(maxCandidates);
+    
+    // Set features
+    beamHelper.EnableLoadBalancing(enableLoadBalancing);
+    beamHelper.EnableHandoverBuffering(enableHoBuffering);
+    
+    // Install beam manager on all UEs
+    Ptr<LeoSimBeamManager> beamManager = 
+        beamHelper.Install(ueNodes, satelliteNodes, Seconds(simTime));
+    
+    if (verbose)
+    {
+        std::cout << "Beam manager installed:" << std::endl;
+        std::cout << "  Mode: " << hoMode << std::endl;
+        std::cout << "  Earth-fixed beam: " << (earthFixedBeam ? "enabled" : "disabled") << std::endl;
+        std::cout << "  TTT: " << tttSeconds << "s, T310: " << t310Seconds << "s" << std::endl;
+        std::cout << "  N310: " << n310 << ", N311: " << n311 << std::endl;
+        std::cout << "  A3 offset: " << a3OffsetDb << " dB, A4 threshold: " << a4ThresholdDbm << " dBm" << std::endl;
+        std::cout << "  TTE trigger: " << tteTriggerSeconds << "s" << std::endl;
+        std::cout << "  CHO prep: " << choPrep << "ms, exec: " << choExec << "ms" << std::endl;
+        std::cout << "  Load balancing: " << (enableLoadBalancing ? "enabled" : "disabled") << std::endl;
+        std::cout << "  Handover buffering: " << (enableHoBuffering ? "enabled" : "disabled") << std::endl;
+    }
+    
+
     // Schedule position and link logging
     vizHelper.SchedulePositionLogging(satelliteNodes, serverNodes, ueNodes, logInterval, simTime);
 
