@@ -548,12 +548,8 @@ main(int argc, char* argv[])
     // Schedule position and link logging
     vizHelper.SchedulePositionLogging(satelliteNodes, serverNodes, ueNodes, logInterval, simTime);
 
-    // Install ping traffic from UEs to server
-    std::cout << "\nInstalling ping traffic from UEs to server..." << std::endl;
-    LeoSimTrafficGeneratorHelper trafficHelper;
-    trafficHelper.SetPingInterval(Seconds(10.0));  // Ping every 10 seconds
-    trafficHelper.SetPingDataSize(56);             // Standard ping payload size (ICMP echo)
-    trafficHelper.SetVerbose(verbose);
+    // Install TCP traffic from UEs to server
+    std::cout << "\nInstalling TCP traffic from UEs to server..." << std::endl;
 
     // Get server IP address
     Ptr<Ipv4> serverIpv4 = serverNodes.Get(0)->GetObject<Ipv4>();
@@ -567,26 +563,42 @@ main(int argc, char* argv[])
 
     if (serverAddress != Ipv4Address::GetZero())
     {
-        // Install ping from all UEs to server
-        ApplicationContainer pingApps = trafficHelper.InstallUeToServerPing(
-            ueNodes,
-            serverNodes.Get(0),
-            serverAddress,
-            Seconds(1.0),              // Start pinging at 1 second
-            Seconds(simTime - 1.0)     // Stop 1 second before end
-        );
+        // Install PacketSink on server to receive TCP traffic
+        PacketSinkHelper sinkHelper("ns3::TcpSocketFactory",
+                                    InetSocketAddress(Ipv4Address::GetAny(), 9));
+        ApplicationContainer sinkApps = sinkHelper.Install(serverNodes.Get(0));
+        sinkApps.Start(Seconds(0.0));
+        sinkApps.Stop(Seconds(simTime));
+
+        // Install OnOffApplication (TCP bulk send) on each UE
+        OnOffHelper onOffHelper("ns3::TcpSocketFactory",
+                                InetSocketAddress(serverAddress, 9));
+        onOffHelper.SetAttribute("DataRate", StringValue("10Mbps"));
+        onOffHelper.SetAttribute("PacketSize", UintegerValue(1024));
+        onOffHelper.SetAttribute("OnTime", StringValue("ns3::UniformRandomVariable[Min=0.5|Max=1.5]"));
+        onOffHelper.SetAttribute("OffTime", StringValue("ns3::UniformRandomVariable[Min=0.5|Max=1.5]"));
+
+        ApplicationContainer tcpApps;
+        for (uint32_t i = 0; i < ueNodes.GetN(); i++)
+        {
+            ApplicationContainer ueApp = onOffHelper.Install(ueNodes.Get(i));
+            ueApp.Start(Seconds(1.0));
+            ueApp.Stop(Seconds(simTime - 1.0));
+            tcpApps.Add(ueApp);
+        }
 
         if (verbose)
         {
-            std::cout << "Installed " << pingApps.GetN() << " ping client applications" << std::endl;
-            std::cout << "  Target server address: " << serverAddress << std::endl;
+            std::cout << "Installed " << tcpApps.GetN() << " TCP client applications" << std::endl;
+            std::cout << "  Target server address: " << serverAddress << ":9" << std::endl;
             std::cout << "  Start time: 1.0s, Stop time: " << (simTime - 1.0) << "s" << std::endl;
-            std::cout << "  Ping interval: 10 seconds" << std::endl;
+            std::cout << "  Data rate: 10 Mbps, Packet size: 1024 bytes" << std::endl;
+            std::cout << "  On/Off pattern: random between 0.5-1.5 seconds" << std::endl;
         }
     }
     else
     {
-        std::cerr << "Warning: Could not determine server IP address for ping" << std::endl;
+        std::cerr << "Warning: Could not determine server IP address for TCP traffic" << std::endl;
     }
 
     // Install packet logging hooks for visualization (after network setup complete)
@@ -596,9 +608,33 @@ main(int argc, char* argv[])
         std::cout << "Packet logging activated" << std::endl;
     }
 
+    // === Add Flow Monitor for Packet Loss Analysis ===
+    std::cout << "\n=== Installing Flow Monitor for Diagnostics ===" << std::endl;
+    Ptr<FlowMonitor> flowMonitor;
+    FlowMonitorHelper flowmonHelper;
+    flowMonitor = flowmonHelper.InstallAll();
+
     // Run the simulation for the specified duration
     Simulator::Stop(Seconds(simTime));
     Simulator::Run();
+
+    // Print flow monitor statistics
+    flowMonitor->CheckForLostPackets();
+    Ptr<Ipv4FlowClassifier> classifier = DynamicCast<Ipv4FlowClassifier>(flowmonHelper.GetClassifier());
+    FlowMonitor::FlowStatsContainer stats = flowMonitor->GetFlowStats();
+
+    std::cout << "\n=== PACKET LOSS ANALYSIS ===" << std::endl;
+    for (std::map<FlowId, FlowMonitor::FlowStats>::const_iterator i = stats.begin(); i != stats.end(); ++i)
+    {
+        Ipv4FlowClassifier::FiveTuple t = classifier->FindFlow(i->first);
+        std::cout << "\nFlow " << i->first << " (" << t.sourceAddress << " -> " << t.destinationAddress << ")" << std::endl;
+        std::cout << "  Tx Packets: " << i->second.txPackets << std::endl;
+        std::cout << "  Rx Packets: " << i->second.rxPackets << std::endl;
+        std::cout << "  Lost Packets: " << (i->second.txPackets - i->second.rxPackets) << std::endl;
+        std::cout << "  Loss Rate: " << (100.0 * (i->second.txPackets - i->second.rxPackets) / i->second.txPackets) << "%" << std::endl;
+        std::cout << "  Delay (ms): " << (i->second.delaySum.GetMilliSeconds() / i->second.rxPackets) << std::endl;
+    }
+    std::cout << "=======================================" << std::endl;
 
     // Channel updates and visualization finalize
     channelModel->StopUpdates();
