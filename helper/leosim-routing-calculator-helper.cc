@@ -197,26 +197,30 @@ LeoSimRoutingCalculatorHelper::SetStaticRoutes(Ptr<LeoSimRoutingCalculator> calc
                 continue;
             }
 
-            // Use a destination address that is reachable (prefer ground address)
-            // Try interfaces in order and pick the first address found
-            Ipv4Address dstIpAddr = Ipv4Address::GetZero();
-            bool foundDstAddr = false;
-            
-            // Try interfaces starting from 1 (skip loopback at 0)  
-            for (uint32_t dstIfIdx = 1; dstIfIdx < dstIpv4->GetNInterfaces() && !foundDstAddr; ++dstIfIdx)
+            // Collect all destination IPv4 addresses (excluding loopback).
+            // Nodes are multi-homed in LeoSim (multiple satellite links), and TCP may
+            // pick a source address that isn't the first interface. If we only install
+            // routes to one address per node, return traffic can fail.
+            std::vector<Ipv4Address> dstIpAddrs;
+            for (uint32_t dstIfIdx = 1; dstIfIdx < dstIpv4->GetNInterfaces(); ++dstIfIdx)
             {
-                if (dstIpv4->GetNAddresses(dstIfIdx) > 0)
+                for (uint32_t dstAddrIdx = 0; dstAddrIdx < dstIpv4->GetNAddresses(dstIfIdx); ++dstAddrIdx)
                 {
-                    Ipv4InterfaceAddress dstAddr = dstIpv4->GetAddress(dstIfIdx, 0);
-                    dstIpAddr = dstAddr.GetLocal();
-                    foundDstAddr = true;
+                    Ipv4InterfaceAddress dstAddr = dstIpv4->GetAddress(dstIfIdx, dstAddrIdx);
+                    Ipv4Address addr = dstAddr.GetLocal();
+                    if (addr != Ipv4Address::GetZero() && addr != Ipv4Address("127.0.0.1"))
+                    {
+                        dstIpAddrs.push_back(addr);
+                    }
                 }
             }
-            
-            if (!foundDstAddr || dstIpAddr == Ipv4Address::GetZero())
+
+            if (dstIpAddrs.empty())
             {
                 if (verbose)
+                {
                     std::cout << "    Could not find any address for destination node " << dstNode->GetId() << std::endl;
+                }
                 routesFailed++;
                 continue;
             }
@@ -228,17 +232,20 @@ LeoSimRoutingCalculatorHelper::SetStaticRoutes(Ptr<LeoSimRoutingCalculator> calc
             if (!nextHopIpv4)
             {
                 if (verbose)
+                {
                     std::cout << "      Error: NextHop node " << nextHopNode->GetId() << " has no IPv4" << std::endl;
-                    continue;
                 }
+                routesFailed++;
+                continue;
+            }
 
-                // Find the best address on the next hop node to use as gateway
-                // Strategy: 
-                // 1. First try to find an address on the same subnet as source's interface (direct link)
-                // 2. If that fails, use any available address on next hop
-                Ipv4Address nextHopAddr = Ipv4Address::GetZero();
-                uint32_t srcInterface = 1;
-                bool foundRoute = false;
+            // Find the best address on the next hop node to use as gateway
+            // Strategy:
+            // 1. First try to find an address on the same subnet as source's interface (direct link)
+            // 2. If that fails, use any available address on next hop
+            Ipv4Address nextHopAddr = Ipv4Address::GetZero();
+            uint32_t srcInterface = 1;
+            bool foundRoute = false;
 
                 // For each interface on source, try to find a matching downstream neighbor
                 for (uint32_t srcIfIdx = 1; (srcIfIdx < srcIpv4->GetNInterfaces()) && !foundRoute; ++srcIfIdx)
@@ -321,19 +328,21 @@ LeoSimRoutingCalculatorHelper::SetStaticRoutes(Ptr<LeoSimRoutingCalculator> calc
 
                 if (foundRoute && nextHopAddr != Ipv4Address::GetZero())
                 {
-                    // Add destination-specific HOST route (using /32 mask)
-                    Ipv4Mask hostMask = Ipv4Mask("255.255.255.255");  // /32 host route
-                    srcStaticRouting->AddNetworkRouteTo(dstIpAddr, hostMask,
-                                                        nextHopAddr, srcInterface, 100);
+                    Ipv4Mask hostMask = Ipv4Mask("255.255.255.255"); // /32 host route
 
-                    if (verbose && isUpdate)
+                    for (const auto& dstIpAddr : dstIpAddrs)
                     {
-                        std::cout << "    [UPDATE] Installing route on Node " << srcNode->GetId() 
-                                  << ": Dest=" << dstIpAddr << " via " << nextHopAddr 
-                                  << " (iface=" << srcInterface << ")" << std::endl;
-                    }
+                        srcStaticRouting->AddNetworkRouteTo(dstIpAddr, hostMask,
+                                                            nextHopAddr, srcInterface, 100);
 
-                    routesInstalled++;
+                        if (verbose && isUpdate)
+                        {
+                            std::cout << "    [UPDATE] Installing route on Node " << srcNode->GetId()
+                                      << ": Dest=" << dstIpAddr << " via " << nextHopAddr
+                                      << " (iface=" << srcInterface << ")" << std::endl;
+                        }
+                        routesInstalled++;
+                    }
                 }
                 else
                 {
@@ -342,7 +351,7 @@ LeoSimRoutingCalculatorHelper::SetStaticRoutes(Ptr<LeoSimRoutingCalculator> calc
                         std::cout << "ERROR: Could not find reachable next-hop address! Source Node: " << srcNode->GetId() 
                                   << ", Destination Node: " << dstNode->GetId() 
                                   << " (NextHop=" << nextHopNode->GetId() 
-                                  << ", DstAddr=" << dstIpAddr << ")" << std::endl;
+                                  << ", DstAddr=" << dstIpAddrs.front() << ")" << std::endl;
                     }
                     routesFailed++;
                 }

@@ -30,7 +30,12 @@ Requirements:
 import argparse
 import sys
 import numpy as np
-import plotly.graph_objects as go
+try:
+    import plotly.graph_objects as go
+except ModuleNotFoundError as e:
+    raise SystemExit(
+        "Missing dependency: plotly. Install it with: pip install plotly"
+    ) from e
 
 # Earth radius in meters
 EARTH_RADIUS = 6371000.0
@@ -93,7 +98,7 @@ def load_position_data(filename):
 
 def load_link_data(filename):
     """Load link/channel data from CSV file."""
-    links = {}  # time -> list of (sat_id, ground_id, ground_type)
+    links = {}  # time_key -> list of (sat_id, ground_id, ground_type)
     
     try:
         with open(filename, 'r') as f:
@@ -109,11 +114,13 @@ def load_link_data(filename):
                 sat_id = int(parts[1])
                 ground_id = int(parts[2])
                 ground_type = parts[3]
+
+                time_key = f"{time:.3f}"
                 
-                if time not in links:
-                    links[time] = []
+                if time_key not in links:
+                    links[time_key] = []
                 
-                links[time].append((sat_id, ground_id, ground_type))
+                links[time_key].append((sat_id, ground_id, ground_type))
         
         return links
     
@@ -173,6 +180,118 @@ def load_packet_data(filename):
     except FileNotFoundError:
         print(f"Packet file '{filename}' not found, skipping packet visualization.")
         return {}
+
+
+def load_beam_data(filename):
+    """Load beam state data from CSV file.
+
+    Expected header includes: time,ue_id,sat_id,...
+    Returns: Dict[time_key -> Dict[ue_id -> sat_id]]
+    """
+    beams = {}
+    try:
+        with open(filename, 'r') as f:
+            header = next(f, '').strip().lower().split(',')
+            if not header:
+                return {}
+            try:
+                time_idx = header.index('time')
+                ue_idx = header.index('ue_id')
+                sat_idx = header.index('sat_id')
+            except ValueError:
+                print(f"Beam file '{filename}' has unexpected header, skipping beam visualization.")
+                return {}
+
+            for line in f:
+                parts = line.strip().split(',')
+                if len(parts) <= max(time_idx, ue_idx, sat_idx):
+                    continue
+                try:
+                    t = float(parts[time_idx])
+                    ue_id = int(parts[ue_idx])
+                    sat_id = int(parts[sat_idx])
+                except ValueError:
+                    continue
+
+                time_key = f"{t:.3f}"
+                beams.setdefault(time_key, {})[ue_id] = sat_id
+
+        return beams
+
+    except FileNotFoundError:
+        print(f"Beam file '{filename}' not found, skipping beam visualization.")
+        return {}
+    except Exception as e:
+        print(f"Error loading beam file: {e}")
+        return {}
+
+
+def load_handover_data(filename):
+    """Load handover events from CSV file.
+
+    Expected header includes: time_ms,ue_id,src_sat,tgt_sat,mode,type,trigger,...,success,...
+    Returns: List[dict] with time_s float and event metadata.
+    """
+    events = []
+    try:
+        with open(filename, 'r') as f:
+            header = next(f, '').strip().lower().split(',')
+            if not header:
+                return []
+
+            def idx(name):
+                try:
+                    return header.index(name)
+                except ValueError:
+                    return None
+
+            time_idx = idx('time_ms')
+            ue_idx = idx('ue_id')
+            src_idx = idx('src_sat')
+            tgt_idx = idx('tgt_sat')
+            mode_idx = idx('mode')
+            type_idx = idx('type')
+            trig_idx = idx('trigger')
+            succ_idx = idx('success')
+
+            required = [time_idx, ue_idx, src_idx, tgt_idx]
+            if any(v is None for v in required):
+                print(f"Handover file '{filename}' has unexpected header, skipping handover visualization.")
+                return []
+
+            for line in f:
+                parts = line.strip().split(',')
+                if len(parts) <= max(v for v in required if v is not None):
+                    continue
+                try:
+                    time_ms = float(parts[time_idx])
+                    time_s = time_ms / 1000.0
+                    ue_id = int(parts[ue_idx])
+                    src_sat = int(parts[src_idx])
+                    tgt_sat = int(parts[tgt_idx])
+                except ValueError:
+                    continue
+
+                evt = {
+                    'time_s': time_s,
+                    'ue_id': ue_id,
+                    'src_sat': src_sat,
+                    'tgt_sat': tgt_sat,
+                    'mode': parts[mode_idx] if mode_idx is not None and mode_idx < len(parts) else '',
+                    'type': parts[type_idx] if type_idx is not None and type_idx < len(parts) else '',
+                    'trigger': parts[trig_idx] if trig_idx is not None and trig_idx < len(parts) else '',
+                    'success': parts[succ_idx] if succ_idx is not None and succ_idx < len(parts) else '',
+                }
+                events.append(evt)
+
+        return events
+
+    except FileNotFoundError:
+        print(f"Handover file '{filename}' not found, skipping handover visualization.")
+        return []
+    except Exception as e:
+        print(f"Error loading handover file: {e}")
+        return []
     except Exception as e:
         print(f"Error loading packet file: {e}")
         return {}
@@ -324,7 +443,18 @@ def get_position_at_time(node_entry, current_time):
         idx = len(positions) - 1
     return positions[idx]
 
-def visualize_animated(data, links, packets, max_frames=None, output_file=None, show_flows=True):
+def visualize_animated(
+    data,
+    links,
+    packets,
+    beams,
+    handovers,
+    max_frames=None,
+    output_file=None,
+    show_flows=True,
+    show_beams=True,
+    show_handovers=True,
+):
     """Create animated 3D visualization with interactive globe and channel links."""
     # Get all unique timestamps
     all_times = set()
@@ -342,6 +472,10 @@ def visualize_animated(data, links, packets, max_frames=None, output_file=None, 
     print(f"UEs: {sorted(data['UE'].keys())}")
     if links:
         print(f"Links available for {len(links)} time steps")
+    if beams:
+        print(f"Beams available for {len(beams)} time steps")
+    if handovers:
+        print(f"Handovers loaded: {len(handovers)} events")
     
     node_index = build_node_index(data)
     
@@ -357,6 +491,8 @@ def visualize_animated(data, links, packets, max_frames=None, output_file=None, 
     
     for frame_idx, current_time in enumerate(times):
         frame_data = []
+
+        time_key = f"{current_time:.3f}"
         
         # Add Earth to every frame
         frame_data.append(create_earth_sphere())
@@ -417,8 +553,8 @@ def visualize_animated(data, links, packets, max_frames=None, output_file=None, 
                 ))
         
         # Add channel links if available for this time
-        if links and current_time in links:
-            for sat_id, ground_id, ground_type in links[current_time]:
+        if links and time_key in links:
+            for sat_id, ground_id, ground_type in links[time_key]:
                 # Get satellite position
                 if sat_id in data['SATELLITE']:
                     sat_data = data['SATELLITE'][sat_id]
@@ -456,6 +592,68 @@ def visualize_animated(data, links, packets, max_frames=None, output_file=None, 
                                 name=link_name,
                                 hoverinfo='skip'
                             ))
+
+        # Add beam links (UE -> serving satellite) if available
+        if show_beams and beams and time_key in beams:
+            beam_x, beam_y, beam_z = [], [], []
+            for ue_id, sat_id in beams[time_key].items():
+                ue_entry = node_index.get(ue_id)
+                sat_entry = node_index.get(sat_id)
+                if not ue_entry or not sat_entry:
+                    continue
+                ue_pos = get_position_at_time(ue_entry, current_time)
+                sat_pos = get_position_at_time(sat_entry, current_time)
+                if ue_pos is None or sat_pos is None:
+                    continue
+                beam_x.extend([ue_pos[0], sat_pos[0], None])
+                beam_y.extend([ue_pos[1], sat_pos[1], None])
+                beam_z.extend([ue_pos[2], sat_pos[2], None])
+
+            if beam_x:
+                frame_data.append(go.Scatter3d(
+                    x=beam_x, y=beam_y, z=beam_z,
+                    mode='lines',
+                    line=dict(color='gray', width=3, dash='dot'),
+                    opacity=0.7,
+                    showlegend=(frame_idx == 0),
+                    name='Beams (UE→SAT)',
+                    hoverinfo='skip'
+                ))
+
+        # Add handover event markers within this frame window
+        if show_handovers and handovers:
+            next_time = times[frame_idx + 1] if frame_idx + 1 < len(times) else current_time + 1.0
+            ho_events = [e for e in handovers if current_time <= e['time_s'] < next_time]
+
+            ho_x, ho_y, ho_z, ho_text = [], [], [], []
+            for e in ho_events:
+                ue_entry = node_index.get(e['ue_id'])
+                if not ue_entry:
+                    continue
+                ue_pos = get_position_at_time(ue_entry, current_time)
+                if ue_pos is None:
+                    continue
+
+                ho_x.append(ue_pos[0]); ho_y.append(ue_pos[1]); ho_z.append(ue_pos[2])
+                ho_text.append(
+                    f"Handover @ {e['time_s']:.3f}s<br>"
+                    f"UE {e['ue_id']}<br>"
+                    f"{e['src_sat']} → {e['tgt_sat']}<br>"
+                    f"{e.get('mode','')} / {e.get('type','')} / {e.get('trigger','')}<br>"
+                    f"success={e.get('success','')}"
+                )
+
+            if ho_x:
+                frame_data.append(go.Scatter3d(
+                    x=ho_x, y=ho_y, z=ho_z,
+                    mode='markers',
+                    marker=dict(size=8, color='red', symbol='x', line=dict(color='darkred', width=2)),
+                    name='Handovers',
+                    hovertext=ho_text,
+                    hoverinfo='text',
+                    showlegend=(frame_idx == 0),
+                    visible=True
+                ))
 
         # Add packet flow arrows if available
         flow_time_key = int(current_time)  # Flows are indexed by integer seconds
@@ -509,103 +707,6 @@ def visualize_animated(data, links, packets, max_frames=None, output_file=None, 
                     showlegend=False,
                     hoverinfo='skip'
                 ))
-
-        # Add packet events if available for this time
-        # Collect all packet events within this frame's time window
-        if packets:
-            # Determine time window for this frame
-            next_time = times[frame_idx + 1] if frame_idx + 1 < len(times) else current_time + 1.0
-            
-            events = []
-            for time_key, time_events in packets.items():
-                for ev in time_events:
-                    # Include packets from current_time up to (but not including) next_time
-                    if current_time <= ev['time'] < next_time:
-                        events.append(ev)
-
-            tx_x, tx_y, tx_z, tx_hover, tx_size = [], [], [], [], []
-            rx_x, rx_y, rx_z, rx_hover, rx_size = [], [], [], [], []
-            dr_x, dr_y, dr_z, dr_hover, dr_size = [], [], [], [], []
-
-            for ev in events:
-                node_entry = node_index.get(ev['node_id'])
-                if not node_entry:
-                    continue
-                pos = get_position_at_time(node_entry, current_time)
-                if pos is None:
-                    continue
-
-                size = max(8.0, min(20.0, ev['size_bytes'] / 10.0))
-                
-                link_type = ev.get('link_type', 'UNKNOWN')
-                peer_node = ev.get('peer_node_id', -1)
-                hover = (f"{ev['event']} Node {ev['node_id']} Dev {ev['device_id']}<br>"
-                         f"Peer: {peer_node} ({link_type})<br>"
-                         f"Size: {ev['size_bytes']} bytes<br>"
-                         f"SNR: {ev['snr_db']:.2f} dB<br>"
-                         f"Doppler: {ev['doppler_hz']:.2f} Hz")
-
-                if ev['event'] == 'TX':
-                    tx_x.append(pos[0]); tx_y.append(pos[1]); tx_z.append(pos[2])
-                    tx_hover.append(hover); tx_size.append(size)
-                elif ev['event'] == 'RX':
-                    rx_x.append(pos[0]); rx_y.append(pos[1]); rx_z.append(pos[2])
-                    rx_hover.append(hover); rx_size.append(size)
-                else:
-                    dr_x.append(pos[0]); dr_y.append(pos[1]); dr_z.append(pos[2])
-                    dr_hover.append(hover); dr_size.append(size)
-
-            # Always add packet traces to maintain consistent frame structure
-            # TX packets
-            frame_data.append(go.Scatter3d(
-                x=tx_x, y=tx_y, z=tx_z,
-                mode='markers',
-                marker=dict(
-                    size=tx_size if tx_x else [10],
-                    color='orange',
-                    symbol='circle',
-                    opacity=0.9,
-                    line=dict(color='darkorange', width=2)
-                ),
-                name='TX packets',
-                hovertext=tx_hover if tx_x else [],
-                showlegend=(frame_idx == 0),
-                visible=True
-            ))
-
-            # RX packets
-            frame_data.append(go.Scatter3d(
-                x=rx_x, y=rx_y, z=rx_z,
-                mode='markers',
-                marker=dict(
-                    size=rx_size if rx_x else [10],
-                    color='lime',
-                    symbol='circle',
-                    opacity=0.9,
-                    line=dict(color='green', width=2)
-                ),
-                name='RX packets',
-                hovertext=rx_hover if rx_x else [],
-                showlegend=(frame_idx == 0),
-                visible=True
-            ))
-
-            # Dropped packets
-            frame_data.append(go.Scatter3d(
-                x=dr_x, y=dr_y, z=dr_z,
-                mode='markers',
-                marker=dict(
-                    size=dr_size if dr_x else [10],
-                    color='red',
-                    symbol='x',
-                    opacity=0.9,
-                    line=dict(color='darkred', width=3)
-                ),
-                name='Dropped packets',
-                hovertext=dr_hover if dr_x else [],
-                showlegend=(frame_idx == 0),
-                visible=True
-            ))
 
         # Add packet events if available for this time
         # Collect all packet events within this frame's time window
@@ -851,6 +952,10 @@ def main():
                        help='CSV file with channel/link data')
     parser.add_argument('--packets', type=str, default="leosim_packets.csv",
                        help='CSV file with packet data')
+    parser.add_argument('--beams', type=str, default="leosim_beams.csv",
+                       help='CSV file with beam state data (UE→SAT associations)')
+    parser.add_argument('--handovers', type=str, default="leosim_handovers.csv",
+                       help='CSV file with handover events')
     parser.add_argument('--output', type=str, default="visualization.html",
                        help='Output HTML file (if not specified, opens in browser)')
     parser.add_argument('--show-flows', action='store_true', default=True,
@@ -876,6 +981,14 @@ def main():
     packets = {}
     if args.packets:
         packets = load_packet_data(args.packets)
+
+    beams = {}
+    if args.beams:
+        beams = load_beam_data(args.beams)
+
+    handovers = []
+    if args.handovers:
+        handovers = load_handover_data(args.handovers)
     
     # Print summary
     print(f"\nData loaded successfully!")
@@ -893,10 +1006,24 @@ def main():
 
     if packets:
         print(f"Packets loaded for {len(packets)} time steps")
+
+    if beams:
+        print(f"Beams loaded for {len(beams)} time steps")
+
+    if handovers:
+        print(f"Handovers loaded: {len(handovers)} events")
     
 
-    visualize_animated(data, links, packets, max_frames=args.max_frames, 
-                      output_file=args.output, show_flows=args.show_flows)
+    visualize_animated(
+        data,
+        links,
+        packets,
+        beams,
+        handovers,
+        max_frames=args.max_frames,
+        output_file=args.output,
+        show_flows=args.show_flows,
+    )
 
 if __name__ == '__main__':
     main()

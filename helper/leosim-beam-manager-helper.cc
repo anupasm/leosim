@@ -35,7 +35,7 @@ LeoSimBeamManagerHelper::LeoSimBeamManagerHelper()
       m_a4Threshold(-110.0),
       m_elevationThreshold(10.0),
       m_tteThreshold(Seconds(30.0)),
-      m_topsisWeights({0.30, 0.30, 0.15, 0.15, 0.10}),
+    m_topsisWeights({0.20, 0.25, 0.20, 0.15, 0.10, 0.05, 0.05}),
       m_maxCandidates(3),
       m_choPreparationDelay(MilliSeconds(100)),
       m_choExecutionDelay(MilliSeconds(150)),
@@ -156,14 +156,18 @@ LeoSimBeamManagerHelper::SetTopsisWeights(double w1,
                                           double w2,
                                           double w3,
                                           double w4,
-                                          double w5)
+                                          double w5,
+                                          double w6,
+                                          double w7)
 {
-    NS_LOG_FUNCTION(this << w1 << w2 << w3 << w4 << w5);
+    NS_LOG_FUNCTION(this << w1 << w2 << w3 << w4 << w5 << w6 << w7);
     m_topsisWeights[0] = w1;
     m_topsisWeights[1] = w2;
     m_topsisWeights[2] = w3;
     m_topsisWeights[3] = w4;
     m_topsisWeights[4] = w5;
+    m_topsisWeights[5] = w6;
+    m_topsisWeights[6] = w7;
 }
 
 void
@@ -236,11 +240,12 @@ LeoSimBeamManagerHelper::SetVerbose(bool verbose)
 }
 
 Ptr<LeoSimBeamManager>
-LeoSimBeamManagerHelper::Install(NodeContainer ueNodes,
+LeoSimBeamManagerHelper::Install(NodeContainer groundNodes,
                                   NodeContainer satNodes,
                                   Time simTime)
 {
-    NS_LOG_FUNCTION(this << ueNodes.GetN() << " UEs, " << satNodes.GetN() << " satellites");
+    NS_LOG_FUNCTION(this << groundNodes.GetN() << " ground nodes, " << satNodes.GetN()
+                         << " satellites");
 
     // Create a fresh beam manager instance
     m_manager = CreateObject<LeoSimBeamManager>();
@@ -283,7 +288,9 @@ LeoSimBeamManagerHelper::Install(NodeContainer ueNodes,
                                  m_topsisWeights[1],
                                  m_topsisWeights[2],
                                  m_topsisWeights[3],
-                                 m_topsisWeights[4]);
+                                 m_topsisWeights[4],
+                                 m_topsisWeights[5],
+                                 m_topsisWeights[6]);
     m_manager->SetMaxCandidates(m_maxCandidates);
 
     m_manager->SetChoPreparationDelay(m_choPreparationDelay);
@@ -302,10 +309,11 @@ LeoSimBeamManagerHelper::Install(NodeContainer ueNodes,
     m_manager->SetVerbose(m_verbose);
 
     // Start the beam manager with the provided nodes and simulation time
-    m_manager->Start(ueNodes, satNodes, Seconds(0.0), simTime);
+    m_manager->Start(groundNodes, satNodes, Seconds(0.0), simTime);
 
     NS_LOG_INFO("LeoSimBeamManager installed with "
-                << ueNodes.GetN() << " UEs and " << satNodes.GetN() << " satellites, "
+                << groundNodes.GetN() << " ground nodes and " << satNodes.GetN()
+                << " satellites, "
                 << "simulation duration: " << simTime.GetSeconds() << "s");
 
     return m_manager;

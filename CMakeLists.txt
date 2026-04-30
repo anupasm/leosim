@@ -2,6 +2,11 @@ build_lib(
   LIBNAME leosim
   SOURCE_FILES
     model/leosim-beam-manager.cc
+    model/leosim-multi-beam-model.cc
+    model/leosim-beam-layout-engine.cc
+    model/leosim-beam-hopping-manager.cc
+    model/leosim-beam-load-balancer.cc
+    model/leosim-sinr-engine.cc
     model/leosim-channel.cc
     model/leosim-loader.cc
     model/leosim-mobility-model.cc
@@ -21,9 +26,14 @@ build_lib(
   HEADER_FILES
     model/leosim.h
     model/leosim-beam-manager.h
+    model/leosim-beam-layout-engine.h
+    model/leosim-beam-hopping-manager.h
+    model/leosim-beam-load-balancer.h
+    model/leosim-sinr-engine.h
     model/leosim-channel.h
     model/leosim-loader.h
     model/leosim-mobility-model.h
+    model/leosim-multi-beam-model.h
     model/leosim-channel-model.h
     model/leosim-isl-routing-model.h
     model/leosim-routing-calculator.h

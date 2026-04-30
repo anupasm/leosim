@@ -49,7 +49,7 @@ namespace ns3
  * beamHelper.SetChannelModel(channelModel);
  * beamHelper.SetRoutingCalculator(routingCalculator);
  * beamHelper.SetVerbose(true);
- * Ptr<LeoSimBeamManager> beamManager = beamHelper.Install(ueNodes, satNodes, simTime);
+ * Ptr<LeoSimBeamManager> beamManager = beamHelper.Install(groundNodes, satNodes, simTime);
  * \endcode
  */
 class LeoSimBeamManagerHelper
@@ -185,16 +185,25 @@ class LeoSimBeamManagerHelper
     /**
      * \brief Set TOPSIS weighting coefficients
      * 
-     * Coefficients for: RSRP, TTE, Satellite Load (inverted), Latency (inverted), Elevation Angle.
-     * Should sum to approximately 1.0. Default: [0.30, 0.30, 0.15, 0.15, 0.10]
+    * Coefficients for: RSRP, SINR, TTE, Satellite Load (inverted), Latency (inverted),
+    * Elevation Angle, Active Beam indicator.
+    * Should sum to approximately 1.0. Default: [0.20, 0.25, 0.20, 0.15, 0.10, 0.05, 0.05]
      * 
      * \param w1 RSRP weight
-     * \param w2 TTE weight
-     * \param w3 Load weight (inverted)
-     * \param w4 Latency weight (inverted)
-     * \param w5 Elevation angle weight
+    * \\param w2 SINR weight
+    * \\param w3 TTE weight
+    * \\param w4 Load weight (inverted)
+    * \\param w5 Latency weight (inverted)
+    * \\param w6 Elevation angle weight
+    * \\param w7 Active beam weight
      */
-    void SetTopsisWeights(double w1, double w2, double w3, double w4, double w5);
+      void SetTopsisWeights(double w1,
+             double w2,
+             double w3,
+             double w4,
+             double w5,
+             double w6,
+             double w7);
 
     /**
      * \brief Set the maximum number of CHO candidates
@@ -268,6 +277,31 @@ class LeoSimBeamManagerHelper
     /** @} */
 
     /**
+     * \name Multi-Beam Configuration
+     * @{
+     */
+
+    /**
+     * \brief Set global multi-beam model configuration
+     * \param beamConfig Beam configuration with spot-beam parameters
+     */
+    void SetBeamConfig(const LeoSimBeamConfig& beamConfig);
+
+    /**
+     * \brief Set the intra-satellite beam handover delay
+     * \param delay Handover delay for beam switching on same satellite (default: 10 ms)
+     */
+    void SetIntraBeamHoDelay(Time delay);
+
+    /**
+     * \brief Set the SINR handover threshold
+     * \param sinrDb SINR threshold in dB for beam switching (default: 3.0 dB)
+     */
+    void SetSinrThreshold(double sinrDb);
+
+    /** @} */
+
+    /**
      * \name Output Tracing and Logging
      * @{
      */
@@ -308,12 +342,12 @@ class LeoSimBeamManagerHelper
      * configured parameters, starts the manager with the provided nodes
      * and simulation duration, and returns the configured manager.
      * 
-     * \param ueNodes Container of UE nodes
+    * \param groundNodes Container of ground nodes (for example UEs and servers)
      * \param satNodes Container of satellite nodes
      * \param simTime Total simulation duration
      * \return Pointer to configured and started LeoSimBeamManager
      */
-    Ptr<LeoSimBeamManager> Install(NodeContainer ueNodes,
+      Ptr<LeoSimBeamManager> Install(NodeContainer groundNodes,
                                     NodeContainer satNodes,
                                     Time simTime);
 
@@ -346,7 +380,7 @@ class LeoSimBeamManagerHelper
     Time m_tteThreshold;
 
     // TOPSIS weights
-    std::array<double, 5> m_topsisWeights;
+    std::array<double, 7> m_topsisWeights;
     uint32_t m_maxCandidates;
 
     // CHO timing
@@ -366,6 +400,11 @@ class LeoSimBeamManagerHelper
     std::string m_beamFile;
     std::string m_handoverFile;
     std::string m_choFile;
+
+    // Multi-beam configuration
+    LeoSimBeamConfig m_beamConfig;
+    Time m_intraBeamHoDelay;
+    double m_sinrThresholdDb;
 
     // Debug
     bool m_verbose;

@@ -644,6 +644,14 @@ LeoSimLoader::GetGroundDevicePosition(uint32_t deviceId) const
     return Vector(0, 0, 0);
 }
 
+std::pair<double, double>
+LeoSimLoader::GetGroundDeviceLatLon(uint32_t deviceId) const
+{
+    Vector pos = GetGroundDevicePosition(deviceId);
+    Vector lla = CartesianToGeodetic(pos);
+    return {lla.x, lla.y};
+}
+
 void
 LeoSimLoader::ScheduleSatellitePositions(Ptr<Node> node, uint32_t satId)
 {

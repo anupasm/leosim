@@ -34,11 +34,16 @@
 #ifndef LEOSIM_H
 #define LEOSIM_H
 
+#include "leosim-beam-hopping-manager.h"
+#include "leosim-beam-layout-engine.h"
+#include "leosim-beam-load-balancer.h"
 #include "leosim-channel.h"
 #include "leosim-channel-model.h"
 #include "leosim-isl-routing-model.h"
 #include "leosim-loader.h"
 #include "leosim-mobility-model.h"
+#include "leosim-multi-beam-model.h"
 #include "leosim-routing-calculator.h"
+#include "leosim-sinr-engine.h"
 
 #endif /* LEOSIM_H */

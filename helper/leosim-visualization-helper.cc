@@ -27,6 +27,7 @@
 #include "ns3/simulator.h"
 
 #include <iomanip>
+#include <limits>
 #include <sstream>
 
 namespace ns3
@@ -38,14 +39,19 @@ LeoSimVisualizationHelper::LeoSimVisualizationHelper()
     : m_outputFile("leosim_positions.csv"),
       m_linkFile("leosim_links.csv"),
       m_packetFile("leosim_packets.csv"),
-      m_beamFile("leosim_beams.csv"),
+      m_beamFile("leosim_beams_multibeam.csv"),
       m_handoverFile("leosim_handovers.csv"),
       m_choFile("leosim_cho.csv"),
       m_loaderHelper(nullptr),
       m_channelModel(nullptr),
       m_islChannelModel(nullptr),
+      m_beamManager(nullptr),
       m_enablePacketLogging(false),
-      m_packetLoggingInstalled(false)
+      m_packetLoggingInstalled(false),
+      m_enableBeamLogging(false),
+      m_beamLoggingInitialized(false),
+      m_beamCallbacksInstalled(false),
+      m_maxUesPerBeam(20)
 {
 }
 
@@ -102,6 +108,12 @@ LeoSimVisualizationHelper::EnablePacketLogging(bool enable)
 }
 
 void
+LeoSimVisualizationHelper::EnableBeamLogging(bool enable)
+{
+    m_enableBeamLogging = enable;
+}
+
+void
 LeoSimVisualizationHelper::SetLoaderHelper(LeoSimLoaderHelper& loaderHelper)
 {
     m_loaderHelper = &loaderHelper;
@@ -117,6 +129,13 @@ void
 LeoSimVisualizationHelper::SetIslChannelModel(Ptr<LeoSimChannelModel> islChannelModel)
 {
     m_islChannelModel = islChannelModel;
+}
+
+void
+LeoSimVisualizationHelper::SetBeamManager(Ptr<LeoSimBeamManager> beamManager)
+{
+    m_beamManager = beamManager;
+    InstallBeamManagerCallbacks();
 }
 
 void
@@ -156,6 +175,13 @@ LeoSimVisualizationHelper::Initialize()
                                << std::endl;
         }
     }
+
+    if (m_enableBeamLogging && !m_beamLoggingInitialized)
+    {
+        InitBeamLogging();
+        m_beamLoggingInitialized = true;
+        InstallBeamManagerCallbacks();
+    }
 }
 
 void
@@ -173,6 +199,54 @@ LeoSimVisualizationHelper::Finalize()
     {
         m_packetFileStream.close();
     }
+
+    FinalizeBeamLogging();
+}
+
+void
+LeoSimVisualizationHelper::InstallBeamManagerCallbacks()
+{
+    if (!m_enableBeamLogging)
+    {
+        return;
+    }
+    if (m_beamCallbacksInstalled)
+    {
+        return;
+    }
+    if (!m_beamManager)
+    {
+        return;
+    }
+
+    // Beam manager fires these callbacks during the simulation.
+    m_beamManager->SetHandoverCallback(MakeCallback(&LeoSimVisualizationHelper::OnHandoverEvent,
+                                                    this));
+    m_beamManager->SetBeamStateCallback(MakeCallback(&LeoSimVisualizationHelper::OnBeamState, this));
+    m_beamManager->SetChoConfigCallback(MakeCallback(&LeoSimVisualizationHelper::OnChoConfig, this));
+
+    m_beamCallbacksInstalled = true;
+    NS_LOG_INFO("Beam manager callbacks installed for visualization logging");
+}
+
+void
+LeoSimVisualizationHelper::OnBeamState(uint32_t ueId, LeoSimBeamRecord rec, double topsisScore)
+{
+    LogBeamState(ueId, rec, topsisScore);
+}
+
+void
+LeoSimVisualizationHelper::OnHandoverEvent(LeoSimHandoverEvent evt)
+{
+    LogHandoverEvent(evt);
+}
+
+void
+LeoSimVisualizationHelper::OnChoConfig(uint32_t ueId,
+                                       uint32_t servingSatId,
+                                       std::vector<LeoSimTopsisCandidate> candidates)
+{
+    LogChoConfig(ueId, servingSatId, candidates);
 }
 
 void
@@ -378,6 +452,41 @@ LeoSimVisualizationHelper::SchedulePositionLogging(NodeContainer satellites,
                                 &LeoSimVisualizationHelper::LogIslConnections,
                                 this);
         }
+
+        // Log serving beam state snapshot (if beam logging is enabled and a beam manager is set)
+        if (m_enableBeamLogging && m_beamManager)
+        {
+            Simulator::Schedule(Seconds(t),
+                                &LeoSimVisualizationHelper::LogServingBeamSnapshot,
+                                this);
+        }
+    }
+}
+
+void
+LeoSimVisualizationHelper::LogServingBeamSnapshot()
+{
+    if (!m_enableBeamLogging || !m_beamManager)
+    {
+        return;
+    }
+
+    for (uint32_t i = 0; i < m_ues.GetN(); ++i)
+    {
+        Ptr<Node> ueNode = m_ues.Get(i);
+        if (!ueNode)
+        {
+            continue;
+        }
+
+        uint32_t ueId = ueNode->GetId();
+        LeoSimBeamRecord rec = m_beamManager->GetCurrentBeam(ueId);
+        if (rec.satelliteNodeId == std::numeric_limits<uint32_t>::max())
+        {
+            continue;
+        }
+
+        LogBeamState(ueId, rec, 0.0);
     }
 }
 
@@ -732,16 +841,23 @@ LeoSimVisualizationHelper::SetChoFile(const std::string& filename)
 }
 
 void
+LeoSimVisualizationHelper::SetMaxUesPerBeam(uint32_t maxUes)
+{
+    m_maxUesPerBeam = maxUes;
+}
+
+void
 LeoSimVisualizationHelper::InitBeamLogging()
 {
     NS_LOG_FUNCTION(this);
 
     // Open beam state file and write header
-    m_beamFileStream.open(m_beamFile, std::ios::app);
+    m_beamFileStream.open(m_beamFile, std::ios::out | std::ios::trunc);
     if (m_beamFileStream.is_open())
     {
-        m_beamFileStream << "time,ue_id,sat_id,rsrp_dbm,snr_db,elevation_deg,tte_sec,sat_load,"
-                         << "e2e_latency_ms,topsis_score,state\n";
+        m_beamFileStream << "time,ue_id,sat_id,beam_id,cell_id,color_group,rsrp_dbm,sinr_db,"
+                         << "intra_ici_dbm,inter_ici_dbm,elevation_deg,tte_sec,beam_load,"
+                         << "beam_util,beam_active,topsis_score,state\n";
         m_beamFileStream.flush();
         NS_LOG_INFO("Opened beam state file: " << m_beamFile);
     }
@@ -751,11 +867,12 @@ LeoSimVisualizationHelper::InitBeamLogging()
     }
 
     // Open handover event file and write header
-    m_handoverFileStream.open(m_handoverFile, std::ios::app);
+    m_handoverFileStream.open(m_handoverFile, std::ios::out | std::ios::trunc);
     if (m_handoverFileStream.is_open())
     {
-        m_handoverFileStream << "time_ms,ue_id,src_sat,tgt_sat,mode,type,trigger,"
-                             << "latency_ms,buff_pkts,drop_pkts,success,score_before,score_after\n";
+        m_handoverFileStream << "time_ms,ue_id,src_sat,tgt_sat,src_beam,src_cell,tgt_beam,tgt_cell,"
+                             << "mode,type,trigger,latency_ms,buff_pkts,drop_pkts,success,"
+                             << "route_change,sinr_before,sinr_after\n";
         m_handoverFileStream.flush();
         NS_LOG_INFO("Opened handover event file: " << m_handoverFile);
     }
@@ -765,7 +882,7 @@ LeoSimVisualizationHelper::InitBeamLogging()
     }
 
     // Open CHO config file and write header
-    m_choFileStream.open(m_choFile, std::ios::app);
+    m_choFileStream.open(m_choFile, std::ios::out | std::ios::trunc);
     if (m_choFileStream.is_open())
     {
         m_choFileStream << "time,ue_id,serving_sat,candidate_sat,topsis_rank,topsis_score,tte_sec,config_expiry\n";
@@ -814,16 +931,25 @@ LeoSimVisualizationHelper::LogBeamState(uint32_t ueId, const LeoSimBeamRecord& r
             state = "UNKNOWN";
     }
 
+    // Compute beam utilization
+    double beamUtil = (m_maxUesPerBeam > 0) ? (rec.beamLoad / (double)m_maxUesPerBeam) : 0.0;
+
     m_beamFileStream << std::fixed << std::setprecision(3)
                      << now.GetSeconds() << ","
                      << ueId << ","
                      << rec.satelliteNodeId << ","
+                     << rec.beamId << ","
+                     << rec.cellId << ","
+                     << rec.colorGroup << ","
                      << rec.rsrp << ","
-                     << rec.snr << ","
+                     << rec.sinr << ","
+                     << rec.intraBeamInterference_dBm << ","
+                     << rec.interSatInterference_dBm << ","
                      << rec.elevationAngle << ","
                      << rec.remainingServiceTime << ","
-                     << rec.satelliteLoad << ","
-                     << rec.endToEndLatency << ","
+                     << rec.beamLoad << ","
+                     << beamUtil << ","
+                     << (rec.beamActive ? "1" : "0") << ","
                      << topsisScore << ","
                      << state << "\n";
     m_beamFileStream.flush();
@@ -853,6 +979,15 @@ LeoSimVisualizationHelper::LogHandoverEvent(const LeoSimHandoverEvent& evt)
             break;
         case LEOSIM_HO_INTER_ORBIT:
             type = "INTER_ORBIT";
+            break;
+        case LEOSIM_HO_INTRA_BEAM_ADJACENT:
+            type = "INTRA_BEAM_ADJ";
+            break;
+        case LEOSIM_HO_INTRA_BEAM_DISTANT:
+            type = "INTRA_BEAM_DIST";
+            break;
+        case LEOSIM_HO_BEAM_HOPPING_DARK:
+            type = "BEAM_HOP_DARK";
             break;
         default:
             type = "UNKNOWN";
@@ -886,11 +1021,20 @@ LeoSimVisualizationHelper::LogHandoverEvent(const LeoSimHandoverEvent& evt)
             trigger = "UNKNOWN";
     }
 
+    // Route change: true if inter-satellite, false if intra-beam
+    std::string routeChange = (evt.type == LEOSIM_HO_INTER_SATELLITE || evt.type == LEOSIM_HO_INTER_ORBIT)
+                                  ? "true"
+                                  : "false";
+
     m_handoverFileStream << std::fixed << std::setprecision(1)
                          << timeMs << ","
                          << evt.ueNodeId << ","
                          << evt.sourceSatId << ","
                          << evt.targetSatId << ","
+                         << evt.sourceBeamId << ","
+                         << evt.sourceCellId << ","
+                         << evt.targetBeamId << ","
+                         << evt.targetCellId << ","
                          << mode << ","
                          << type << ","
                          << trigger << ","
@@ -898,8 +1042,9 @@ LeoSimVisualizationHelper::LogHandoverEvent(const LeoSimHandoverEvent& evt)
                          << evt.packetsBuffered << ","
                          << evt.packetsDropped << ","
                          << (evt.success ? "1" : "0") << ","
-                         << evt.topsisScoreBefore << ","
-                         << evt.topsisScoreAfter << "\n";
+                         << routeChange << ","
+                         << evt.sinrBefore << ","
+                         << evt.sinrAfter << "\n";
     m_handoverFileStream.flush();
 }
 

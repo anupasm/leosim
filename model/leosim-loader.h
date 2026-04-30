@@ -24,6 +24,7 @@
 #include "ns3/vector.h"
 
 #include <map>
+#include <utility>
 #include <string>
 #include <vector>
 
@@ -186,6 +187,13 @@ class LeoSimLoader : public Object
      * \return Position vector
      */
     Vector GetGroundDevicePosition(uint32_t deviceId) const;
+
+    /**
+     * \brief Get ground device latitude and longitude in degrees.
+     * \param deviceId Device ID.
+     * \return Pair of (latitude, longitude) in degrees.
+     */
+    std::pair<double, double> GetGroundDeviceLatLon(uint32_t deviceId) const;
 
     /**
      * \brief Convert geodetic coordinates to Cartesian (ECEF)

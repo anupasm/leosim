@@ -19,8 +19,11 @@
 #define LEOSIM_BEAM_MANAGER_H
 
 #include "leosim-channel-model.h"
+#include "leosim-beam-hopping-manager.h"
 #include "leosim-loader.h"
+#include "leosim-multi-beam-model.h"
 #include "leosim-routing-calculator.h"
+#include "leosim-sinr-engine.h"
 
 #include "ns3/callback.h"
 #include "ns3/ipv4-address.h"
@@ -41,6 +44,8 @@
 
 namespace ns3
 {
+
+class LeoSimMultiBeamModel;
 
 /**
  * \ingroup leosim
@@ -66,7 +71,10 @@ enum LeoSimHandoverType
 {
     LEOSIM_HO_INTRA_BEAM = 0,        //!< Same satellite, different spot-beam
     LEOSIM_HO_INTER_SATELLITE = 1,   //!< Different satellite, same orbital plane
-    LEOSIM_HO_INTER_ORBIT = 2        //!< Different satellite, different orbital plane
+    LEOSIM_HO_INTER_ORBIT = 2,       //!< Different satellite, different orbital plane
+    LEOSIM_HO_INTRA_BEAM_ADJACENT,   ///< Adjacent hex-ring beam, same satellite
+    LEOSIM_HO_INTRA_BEAM_DISTANT,    ///< Non-adjacent beam, same satellite
+    LEOSIM_HO_BEAM_HOPPING_DARK,     ///< Forced by beam hopping - serving beam went dark
 };
 
 /**
@@ -117,6 +125,15 @@ struct LeoSimBeamRecord
     uint32_t satelliteNodeId;          //!< Satellite node identifier
     double rsrp;                       //!< Reference Signal Received Power (dBm)
     double snr;                        //!< Signal-to-Noise Ratio (dB)
+    uint32_t beamId;                   ///< Spot-beam index within satellite
+    uint32_t cellId;                   ///< NR Cell ID of this beam
+    int colorGroup;                    ///< Frequency reuse colour group
+    double sinr;                       ///< SINR in dB (replaces snr as primary metric)
+    double intraBeamInterference_dBm;  ///< Co-channel interference from same satellite
+    double interSatInterference_dBm;   ///< Co-channel interference from other satellites
+    double beamLoad;                   ///< Active UE count in this specific beam
+    double beamThroughputMbps;         ///< Current throughput in this beam
+    bool beamActive;                   ///< False if beam is dark (beam hopping)
     double pathLoss;                   //!< Path loss (dB)
     double elevationAngle;             //!< Elevation angle (degrees)
     double remainingServiceTime;       //!< Time To Exit (TTE) from ephemeris (seconds)
@@ -152,6 +169,10 @@ struct LeoSimHandoverEvent
     uint32_t ueNodeId;                 //!< UE undergoing handover
     uint32_t sourceSatId;              //!< Source satellite node ID
     uint32_t targetSatId;              //!< Target satellite node ID
+    uint32_t sourceBeamId;             //!< Source beam ID (for beam-level HO tracking)
+    uint32_t targetBeamId;             //!< Target beam ID (for beam-level HO tracking)
+    uint32_t sourceCellId;             //!< Source cell ID
+    uint32_t targetCellId;             //!< Target cell ID
     LeoSimHandoverMode mode;           //!< Handover mode (BHO or CHO)
     LeoSimHandoverType type;           //!< Type of handover
     LeoSimHandoverTrigger trigger;     //!< Event that triggered handover
@@ -161,8 +182,8 @@ struct LeoSimHandoverEvent
     uint32_t packetsBuffered;          //!< Packets buffered during handover
     uint32_t packetsDropped;           //!< Packets dropped during handover
     bool success;                      //!< Whether handover completed successfully
-    double topsisScoreBefore;          //!< TOPSIS score of source beam before HO
-    double topsisScoreAfter;           //!< TOPSIS score of target beam after HO
+    double sinrBefore;                 //!< SINR of source beam before HO (dB)
+    double sinrAfter;                  //!< SINR of target beam after HO (dB)
 };
 
 /**
@@ -330,10 +351,12 @@ class LeoSimBeamManager : public Object
      * \param wElevation Weight for elevation angle
      */
     void SetTopsisWeights(double wRsrp,
+                          double wSinr,
                           double wTte,
                           double wLoad,
                           double wLatency,
-                          double wElevation);
+                          double wElevation,
+                          double wActive);
 
     /**
      * \name Conditional Handover (CHO) Configuration
@@ -414,12 +437,12 @@ class LeoSimBeamManager : public Object
 
     /**
      * \brief Start the beam manager
-     * \param userEquipment Container of UE nodes
+    * \param groundNodes Container of managed ground nodes (for example UEs and servers)
      * \param satellites Container of satellite nodes
      * \param simStart Simulation start time
      * \param simDuration Simulation duration
      */
-    void Start(NodeContainer userEquipment,
+    void Start(NodeContainer groundNodes,
                NodeContainer satellites,
                Time simStart,
                Time simDuration);
@@ -465,6 +488,23 @@ class LeoSimBeamManager : public Object
     void SetHandoverCallback(Callback<void, LeoSimHandoverEvent> callback);
 
     /**
+     * \brief Set the callback for serving beam state updates
+     *
+     * This callback is fired when the UE's serving beam record/state changes
+     * during the CHO state machine (PREPARING/EVALUATING/EXECUTING/CONNECTED).
+     */
+    void SetBeamStateCallback(Callback<void, uint32_t, LeoSimBeamRecord, double> callback);
+
+    /**
+     * \brief Set the callback for CHO candidate configuration (Phase 1)
+     *
+     * Fired when CHO candidates are configured for a UE. The vector is typically
+     * limited to the configured max-candidates.
+     */
+    void SetChoConfigCallback(
+        Callback<void, uint32_t, uint32_t, std::vector<LeoSimTopsisCandidate>> callback);
+
+    /**
      * \name Analytics and Tracing
      * @{
      */
@@ -506,6 +546,11 @@ class LeoSimBeamManager : public Object
     Ptr<LeoSimChannelModel> m_islChannelModel;         //!< Inter-satellite link model
     Ptr<LeoSimRoutingCalculator> m_routingCalculator;  //!< Routing calculator
     Ptr<LeoSimLoader> m_loader;                        //!< Satellite/beam loader
+    Ptr<LeoSimSinrEngine> m_sinrEngine;                //!< SINR decomposition engine
+    Ptr<LeoSimMultiBeamModel> m_multiBeamModel;        //!< Multi-beam topology model
+    LeoSimBeamConfig m_cfg;                            //!< Global multi-beam configuration
+    double m_intraBeamHoDelayMs = 10.0;                //!< Intra-beam HO execution delay (ms)
+    double m_sinrThresholdDb = 3.0;                    //!< SINR threshold for HO/selection (dB)
     bool m_verbose;                                    //!< Debug output enabled
 
     // Handover mode and configuration
@@ -525,8 +570,8 @@ class LeoSimBeamManager : public Object
     Time m_tteThreshold = Seconds(30.0);                 //!< Min TTE before HO (seconds)
 
     // TOPSIS multi-criteria weighting
-    std::array<double, 5> m_topsisWeights = {0.30, 0.30, 0.15, 0.15, 0.10};
-    //  {wRsrp, wTte, wLoad, wLatency, wElevation}
+    std::array<double, 7> m_topsisWeights = {0.20, 0.25, 0.20, 0.15, 0.10, 0.05, 0.05};
+    //  {wRsrp, wSinr, wTte, wLoad, wLatency, wElevation, wActive}
 
     // CHO configuration
     uint32_t m_maxCandidates = 3;                        //!< Max CHO candidates
@@ -552,6 +597,7 @@ class LeoSimBeamManager : public Object
     std::map<uint32_t, std::vector<LeoSimTopsisCandidate>> m_candidates; //!< Ranked candidates
     std::map<uint32_t, std::vector<uint32_t>> m_bufferedPackets; //!< Buffered packets per UE
     std::map<uint32_t, Time> m_lastHandoverTime;         //!< Last HO time per UE
+    std::map<uint32_t, Ptr<LeoSimBeamHoppingManager>> m_beamHopManagers; //!< Per-satellite hopping managers
 
     // Per-candidate CHO configurations (indexed by [UE ID][sat ID])
     std::map<uint32_t, std::map<uint32_t, LeoSimChoConfig>> m_choConfigs;
@@ -571,7 +617,7 @@ class LeoSimBeamManager : public Object
     uint32_t m_pingPongCount = 0;                        //!< Total ping-pong count
 
     // Lifecycle
-    NodeContainer m_userEquipment;                       //!< UE nodes
+    NodeContainer m_userEquipment;                       //!< Managed ground nodes (UEs/servers)
     NodeContainer m_satellites;                          //!< Satellite nodes
     Time m_simStart;                                     //!< Simulation start time
     Time m_simDuration;                                  //!< Simulation duration
@@ -580,6 +626,8 @@ class LeoSimBeamManager : public Object
 
     // Callbacks
     Callback<void, LeoSimHandoverEvent> m_handoverCallback; //!< HO event callback
+    Callback<void, uint32_t, LeoSimBeamRecord, double> m_beamStateCallback; //!< Serving beam state callback
+    Callback<void, uint32_t, uint32_t, std::vector<LeoSimTopsisCandidate>> m_choConfigCallback; //!< CHO config callback
 
     /** @} */
 
@@ -722,6 +770,50 @@ class LeoSimBeamManager : public Object
      * \return True if UE is in beam coverage
      */
     bool IsUeInBeamFootprint(uint32_t ueNodeId, uint32_t satNodeId);
+
+    /**
+     * \brief Evaluate whether intra-beam handover is needed on current serving satellite.
+     * \param ueNodeId UE node identifier.
+     */
+    void EvaluateIntraBeamNeed(uint32_t ueNodeId);
+
+    /**
+     * \brief Execute an intra-beam handover to a target beam on same satellite.
+     * \param ueNodeId UE node identifier.
+     * \param targetBeamId Target spot-beam identifier on serving satellite.
+     * \param trigger Trigger causing this handover.
+     */
+    void ExecuteIntraBeamHandover(uint32_t ueNodeId,
+                                  uint32_t targetBeamId,
+                                  LeoSimHandoverTrigger trigger);
+
+    /**
+     * \brief Find the best currently active beam on a satellite for a UE.
+     * \param ueNodeId UE node identifier.
+     * \param satId Satellite node identifier.
+     * \return Target beam ID, or -1 if no active suitable beam exists.
+     */
+    int32_t FindBestActiveBeam(uint32_t ueNodeId, uint32_t satId) const;
+
+    /**
+     * \brief Find a better beam candidate on the same satellite than current serving beam.
+     * \param ueNodeId UE node identifier.
+     * \param satId Satellite node identifier.
+     * \return Better beam ID, or -1 if no better beam is found.
+     */
+    int32_t FindBetterBeamOnSameSat(uint32_t ueNodeId, uint32_t satId) const;
+
+    /**
+     * \brief Advance beam hopping slot and refresh active/dark beams.
+     */
+    void AdvanceBeamHoppingSlot();
+
+    /**
+     * \brief Handle a beam transitioning to dark state.
+     * \param satId Satellite node identifier.
+     * \param beamId Beam identifier on satellite.
+     */
+    void HandleBeamDark(uint32_t satId, uint32_t beamId);
 
     /**
      * \brief Find serving beam for footprint-based beam steering

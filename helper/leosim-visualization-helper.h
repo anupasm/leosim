@@ -74,6 +74,14 @@ class LeoSimVisualizationHelper
     void EnablePacketLogging(bool enable);
 
     /**
+     * \brief Enable/disable beam + handover logging
+     *
+     * When enabled, this helper can log per-UE serving beam state changes,
+     * CHO candidate configuration, and handover events.
+     */
+    void EnableBeamLogging(bool enable);
+
+    /**
      * \brief Set the loader helper reference
      * \param loaderHelper Reference to the LeoSimLoaderHelper
      */
@@ -90,6 +98,14 @@ class LeoSimVisualizationHelper
      * \param islChannelModel Pointer to the ISL LeoSimChannelModel
      */
     void SetIslChannelModel(Ptr<LeoSimChannelModel> islChannelModel);
+
+    /**
+     * \brief Attach a beam manager to receive beam/handover callbacks
+     *
+     * Call this after creating the beam manager. If beam logging is enabled
+     * and files are initialized, callbacks are installed immediately.
+     */
+    void SetBeamManager(Ptr<LeoSimBeamManager> beamManager);
 
     /**
      * \brief Schedule position logging for all nodes
@@ -147,9 +163,15 @@ class LeoSimVisualizationHelper
     void InitBeamLogging();
 
     /**
+     * \brief Set the maximum UEs per beam for utilization calculation
+     * \param maxUes Maximum number of UEs per beam (default: 20)
+     */
+    void SetMaxUesPerBeam(uint32_t maxUes);
+
+    /**
      * \brief Log current beam state for a UE
      * \param ueId UE node ID
-     * \param rec Beam record with RSRP, SNR, elevation, etc.
+     * \param rec Beam record with RSRP, SINR, elevation, etc.
      * \param topsisScore TOPSIS ranking score
      */
     void LogBeamState(uint32_t ueId, const LeoSimBeamRecord& rec, double topsisScore);
@@ -203,6 +225,8 @@ class LeoSimVisualizationHelper
      */
     void LogGroundConnections();
 
+    void LogServingBeamSnapshot();
+
     void OnPhyTx(std::string context, Ptr<const Packet> packet);
     void OnPhyRx(std::string context, Ptr<const Packet> packet, double snrDb, double dopplerHz);
     void OnPhyRxBasic(std::string context, Ptr<const Packet> packet);
@@ -213,6 +237,13 @@ class LeoSimVisualizationHelper
     bool IsSatelliteNode(Ptr<Node> node) const;
 
     bool ParseContextIds(const std::string& context, int& nodeId, int& deviceId) const;
+
+    void InstallBeamManagerCallbacks();
+    void OnBeamState(uint32_t ueId, LeoSimBeamRecord rec, double topsisScore);
+    void OnHandoverEvent(LeoSimHandoverEvent evt);
+    void OnChoConfig(uint32_t ueId,
+             uint32_t servingSatId,
+             std::vector<LeoSimTopsisCandidate> candidates);
 
     std::string m_outputFile;
     std::string m_linkFile;
@@ -229,11 +260,16 @@ class LeoSimVisualizationHelper
     LeoSimLoaderHelper* m_loaderHelper;
     Ptr<LeoSimChannelModel> m_channelModel;
     Ptr<LeoSimChannelModel> m_islChannelModel;
+    Ptr<LeoSimBeamManager> m_beamManager;
     NodeContainer m_satellites;
     NodeContainer m_servers;
     NodeContainer m_ues;
     bool m_enablePacketLogging;
     bool m_packetLoggingInstalled;
+    bool m_enableBeamLogging;
+    bool m_beamLoggingInitialized;
+    bool m_beamCallbacksInstalled;
+    uint32_t m_maxUesPerBeam;          //!< Maximum UEs per beam for utilization calculation
 };
 
 } // namespace ns3

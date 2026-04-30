@@ -18,6 +18,7 @@
 #include "leosim-beam-manager.h"
 
 #include "leosim-channel-model.h"
+#include "leosim-beam-layout-engine.h"
 #include "leosim-loader.h"
 #include "leosim-routing-calculator.h"
 
@@ -28,12 +29,36 @@
 #include "ns3/ipv4.h"
 #include "ns3/ipv4-interface.h"
 
+#include "leosim-mobility-model.h"
+
 #include <algorithm>
 #include <cmath>
 #include <iomanip>
+#include <limits>
 
 namespace ns3
 {
+
+namespace
+{
+uint32_t
+GetLeoSimIdFromNodeId(uint32_t nodeId)
+{
+    Ptr<Node> node = NodeList::GetNode(nodeId);
+    if (!node)
+    {
+        return nodeId;
+    }
+
+    Ptr<LeoSimMobilityModel> mobility = node->GetObject<LeoSimMobilityModel>();
+    if (!mobility)
+    {
+        return nodeId;
+    }
+
+    return mobility->GetNodeId();
+}
+} // namespace
 
 NS_LOG_COMPONENT_DEFINE("LeoSimBeamManager");
 NS_OBJECT_ENSURE_REGISTERED(LeoSimBeamManager);
@@ -46,6 +71,39 @@ LeoSimBeamManager::GetTypeId()
                             .SetGroupName("LeoSim")
                             .AddConstructor<LeoSimBeamManager>();
     return tid;
+}
+
+void
+LeoSimBeamManager::SetHandoverCallback(Callback<void, LeoSimHandoverEvent> callback)
+{
+    NS_LOG_FUNCTION(this);
+    m_handoverCallback = callback;
+}
+
+void
+LeoSimBeamManager::SetBeamStateCallback(Callback<void, uint32_t, LeoSimBeamRecord, double> callback)
+{
+    NS_LOG_FUNCTION(this);
+    m_beamStateCallback = callback;
+
+    // If the manager already started and has current serving beams,
+    // immediately publish them so late subscribers (e.g., visualization helper)
+    // can log an initial state.
+    if (!m_beamStateCallback.IsNull() && !m_currentBeams.empty())
+    {
+        for (const auto& [ueNodeId, beam] : m_currentBeams)
+        {
+            m_beamStateCallback(ueNodeId, beam, 0.0);
+        }
+    }
+}
+
+void
+LeoSimBeamManager::SetChoConfigCallback(
+    Callback<void, uint32_t, uint32_t, std::vector<LeoSimTopsisCandidate>> callback)
+{
+    NS_LOG_FUNCTION(this);
+    m_choConfigCallback = callback;
 }
 
 // ============================================================================
@@ -186,20 +244,27 @@ LeoSimBeamManager::SetTteThreshold(Time threshold)
 
 void
 LeoSimBeamManager::SetTopsisWeights(double wRsrp,
+                                     double wSinr,
                                      double wTte,
                                      double wLoad,
                                      double wLatency,
-                                     double wElevation)
+                                     double wElevation,
+                                     double wActive)
 {
-    NS_LOG_FUNCTION(this << wRsrp << wTte << wLoad << wLatency << wElevation);
+    NS_LOG_FUNCTION(this << wRsrp << wSinr << wTte << wLoad << wLatency << wElevation
+                         << wActive);
     m_topsisWeights[0] = wRsrp;
-    m_topsisWeights[1] = wTte;
-    m_topsisWeights[2] = wLoad;
-    m_topsisWeights[3] = wLatency;
-    m_topsisWeights[4] = wElevation;
+    m_topsisWeights[1] = wSinr;
+    m_topsisWeights[2] = wTte;
+    m_topsisWeights[3] = wLoad;
+    m_topsisWeights[4] = wLatency;
+    m_topsisWeights[5] = wElevation;
+    m_topsisWeights[6] = wActive;
     
-    NS_LOG_DEBUG("TOPSIS weights: RSRP=" << wRsrp << " TTE=" << wTte << " Load=" << wLoad
-                                         << " Latency=" << wLatency << " Elevation=" << wElevation);
+    NS_LOG_DEBUG("TOPSIS weights: RSRP=" << wRsrp << " SINR=" << wSinr << " TTE=" << wTte
+                                         << " Load=" << wLoad << " Latency=" << wLatency
+                                         << " Elevation=" << wElevation << " Active="
+                                         << wActive);
 }
 
 void
@@ -353,6 +418,18 @@ LeoSimBeamManager::RunTttEvaluation(uint32_t ueNodeId)
         NS_LOG_WARN("No current beam record for UE " << ueNodeId << ", skipping TTT evaluation");
         return;
     }
+    // Refresh serving-beam metrics from the channel model before comparing.
+    // This keeps A3/A4 decisions aligned with dynamic channel updates.
+    if (m_channelModel)
+    {
+        LeoSimChannelQuality servingQual =
+            m_channelModel->GetLinkQuality(ueNodeId, beamIt->second.satelliteNodeId);
+        beamIt->second.rsrp = servingQual.signalStrength;
+        beamIt->second.snr = servingQual.snr;
+        beamIt->second.pathLoss = servingQual.pathLoss;
+        beamIt->second.elevationAngle = servingQual.elevationAngle;
+    }
+
     const LeoSimBeamRecord& servingBeam = beamIt->second;
 
     // Get visible satellites and rank them by TOPSIS
@@ -377,16 +454,42 @@ LeoSimBeamManager::RunTttEvaluation(uint32_t ueNodeId)
         return;
     }
 
-    const LeoSimTopsisCandidate& bestCandidate = rankedCandidates[0];
+    // Pick the best *neighbor* (excluding the serving satellite). The ranking output can
+    // legitimately put the serving satellite first, which would otherwise suppress A3/A4.
+    uint32_t servingSatId = servingBeam.satelliteNodeId;
+    auto bestNeighborIt = std::find_if(
+        rankedCandidates.begin(),
+        rankedCandidates.end(),
+        [servingSatId](const LeoSimTopsisCandidate& c) {
+            return c.beamRecord.satelliteNodeId != servingSatId;
+        });
+
+    if (bestNeighborIt == rankedCandidates.end())
+    {
+        NS_LOG_DEBUG("No neighbor candidates (only serving satellite visible) for UE " << ueNodeId);
+        return;
+    }
+
+    const LeoSimTopsisCandidate& bestCandidate = *bestNeighborIt;
     double bestRsrp = bestCandidate.beamRecord.rsrp;
     uint32_t bestSatId = bestCandidate.beamRecord.satelliteNodeId;
-    uint32_t servingSatId = servingBeam.satelliteNodeId;
-
     // Evaluate A3 condition: best candidate RSRP > serving RSRP + offset AND different satellite
     bool a3Condition = (bestRsrp > servingBeam.rsrp + m_a3Offset) && (bestSatId != servingSatId);
 
     // Evaluate A4 condition: best candidate RSRP > absolute threshold AND A3 holds
     bool a4Condition = (bestRsrp > m_a4Threshold) && a3Condition;
+
+    if (m_verbose)
+    {
+        std::cout << "[HO-CHECK][" << Simulator::Now().GetSeconds() << "s] UE " << ueNodeId
+                  << " TTT eval: serving=" << servingSatId
+                  << " neigh=" << bestSatId
+                  << " bestRsrp=" << bestRsrp << "dBm"
+                  << " servingRsrp=" << servingBeam.rsrp << "dBm"
+                  << " A3=" << (a3Condition ? "1" : "0")
+                  << " A4=" << (a4Condition ? "1" : "0")
+                  << std::endl;
+    }
 
     NS_LOG_DEBUG("TTT evaluation for UE " << ueNodeId << ": A3=" << a3Condition << " (best=" << bestRsrp
                                           << " > serving=" << servingBeam.rsrp << " + offset="
@@ -437,6 +540,12 @@ LeoSimBeamManager::RunTttEvaluation(uint32_t ueNodeId)
         });
 
         m_tttEventIds[ueNodeId] = eventId;
+        if (m_verbose)
+        {
+            std::cout << "[HO-CHECK][" << Simulator::Now().GetSeconds() << "s] UE " << ueNodeId
+                      << " TTT started: duration=" << m_ttt.GetSeconds()
+                      << "s targetSat=" << bestSatId << std::endl;
+        }
         NS_LOG_INFO("TTT timer started for UE " << ueNodeId << " at "
                     << Simulator::Now().GetSeconds() << "s (duration: " << m_ttt.GetSeconds()
                     << "s, target satellite: " << bestSatId << ")");
@@ -446,6 +555,11 @@ LeoSimBeamManager::RunTttEvaluation(uint32_t ueNodeId)
     {
         Simulator::Cancel(m_tttEventIds[ueNodeId]);
         m_tttEventIds.erase(ueNodeId);
+        if (m_verbose)
+        {
+            std::cout << "[HO-CHECK][" << Simulator::Now().GetSeconds() << "s] UE " << ueNodeId
+                      << " TTT cancelled (conditions no longer hold)" << std::endl;
+        }
         NS_LOG_INFO("TTT timer cancelled for UE " << ueNodeId << " at "
                     << Simulator::Now().GetSeconds()
                     << "s (measurement conditions no longer hold)");
@@ -464,8 +578,12 @@ LeoSimBeamManager::ComputeTte(uint32_t ueNodeId, uint32_t satNodeId) const
         return 0.0;
     }
 
+    // Translate ns-3 NodeIds to LeoSim loader IDs.
+    uint32_t ueDeviceId = GetLeoSimIdFromNodeId(ueNodeId);
+    uint32_t satId = GetLeoSimIdFromNodeId(satNodeId);
+
     // Get UE ground position
-    Vector uePos = m_loader->GetGroundDevicePosition(ueNodeId);
+    Vector uePos = m_loader->GetGroundDevicePosition(ueDeviceId);
     NS_LOG_DEBUG("UE " << ueNodeId << " position: " << uePos);
 
     // Start from current simulation time
@@ -474,7 +592,7 @@ LeoSimBeamManager::ComputeTte(uint32_t ueNodeId, uint32_t satNodeId) const
     bool wasAboveThreshold = true;
 
     // Check current elevation angle
-    Vector currentSatPos = m_loader->GetSatellitePositionAt(satNodeId, Seconds(currentTime));
+    Vector currentSatPos = m_loader->GetSatellitePositionAt(satId, Seconds(currentTime));
     
     // Compute current elevation angle
     Vector los = currentSatPos - uePos;
@@ -521,7 +639,7 @@ LeoSimBeamManager::ComputeTte(uint32_t ueNodeId, uint32_t satNodeId) const
     for (double dt = TIME_STEP; dt <= MAX_HORIZON; dt += TIME_STEP)
     {
         double futureTime = currentTime + dt;
-        Vector futureSatPos = m_loader->GetSatellitePositionAt(satNodeId, Seconds(futureTime));
+        Vector futureSatPos = m_loader->GetSatellitePositionAt(satId, Seconds(futureTime));
 
         // Compute elevation angle at future time
         Vector futureLos = futureSatPos - uePos;
@@ -547,8 +665,6 @@ LeoSimBeamManager::ComputeTte(uint32_t ueNodeId, uint32_t satNodeId) const
             double zenithAngle = std::acos(cosZenith);
             futureElevation = (M_PI / 2.0 - zenithAngle) * 180.0 / M_PI;
         }
-
-        NS_LOG_DEBUG("At t=" << futureTime << "s: elevation=" << futureElevation << "°");
 
         // Check if elevation just dropped below threshold
         if (wasAboveThreshold && futureElevation < m_elevationThreshold)
@@ -582,16 +698,23 @@ LeoSimBeamManager::ScanVisibleSatellites(uint32_t ueNodeId)
     NS_LOG_FUNCTION(this << ueNodeId);
     std::vector<LeoSimBeamRecord> visibleBeams;
 
-    if (!m_loader || !m_channelModel)
+    if (!m_loader || !m_channelModel || !m_multiBeamModel || !m_sinrEngine)
     {
-        NS_LOG_WARN("Loader or channel model not configured");
+        NS_LOG_WARN("Loader, channel model, multi-beam model, or SINR engine not configured");
         return visibleBeams;
     }
 
-    // Iterate through all satellites and check link quality with the UE
-    uint32_t numSats = m_loader->GetNumSatellites();
-    for (uint32_t satNodeId = 0; satNodeId < numSats; satNodeId++)
+    // Iterate through the actual satellite nodes and check link quality with the UE.
+    for (uint32_t i = 0; i < m_satellites.GetN(); ++i)
     {
+        Ptr<Node> satNode = m_satellites.Get(i);
+        if (!satNode)
+        {
+            continue;
+        }
+
+        uint32_t satNodeId = satNode->GetId();
+
         // Get link quality between UE and this satellite
         LeoSimChannelQuality linkQuality = m_channelModel->GetLinkQuality(ueNodeId, satNodeId);
 
@@ -615,43 +738,125 @@ LeoSimBeamManager::ScanVisibleSatellites(uint32_t ueNodeId)
             continue;
         }
 
-        // Create beam record with full metrics
-        LeoSimBeamRecord beamRecord;
-        beamRecord.ueNodeId = ueNodeId;
-        beamRecord.satelliteNodeId = satNodeId;
-        beamRecord.rsrp = linkQuality.signalStrength;
-        beamRecord.snr = linkQuality.snr;
-        beamRecord.pathLoss = linkQuality.pathLoss;
-        beamRecord.elevationAngle = linkQuality.elevationAngle;
+        // Compute Time-To-Exit and latency once per satellite (not per-beam)
+        double tte = ComputeTte(ueNodeId, satNodeId);
+        double latency = ComputeEndToEndLatency(ueNodeId, satNodeId);
 
-        // Compute Time-To-Exit
-        beamRecord.remainingServiceTime = ComputeTte(ueNodeId, satNodeId);
-
-        // Compute end-to-end latency
-        beamRecord.endToEndLatency = ComputeEndToEndLatency(ueNodeId, satNodeId);
-
-        // Count active UEs on this satellite
-        uint32_t activeUeCount = 0;
-        for (const auto& entry : m_currentBeams)
+        // Get UE position for SINR computation
+        Vector uePosVec;
+        Ptr<Node> ueNode = NodeList::GetNode(ueNodeId);
+        if (ueNode && ueNode->GetObject<LeoSimMobilityModel>())
         {
-            if (entry.second.satelliteNodeId == satNodeId)
+            uePosVec = ueNode->GetObject<LeoSimMobilityModel>()->GetPosition();
+        }
+        double ueLat = 0.0, ueLon = 0.0;
+        if (m_loader)
+        {
+            auto latLon = m_loader->GetGroundDeviceLatLon(ueNodeId);
+            ueLat = latLon.first;
+            ueLon = latLon.second;
+        }
+
+        // Get all beams map for SINR computation
+        std::map<uint32_t, std::vector<LeoSimSpotBeam>> allBeamsMap;
+        for (uint32_t i = 0; i < m_satellites.GetN(); ++i)
+        {
+            Ptr<Node> sat = m_satellites.Get(i);
+            if (sat)
             {
-                activeUeCount++;
+                allBeamsMap[sat->GetId()] = m_multiBeamModel->GetBeamsForSatellite(sat->GetId());
             }
         }
-        beamRecord.satelliteLoad = activeUeCount;
 
-        // Set beam state
-        beamRecord.state = LEOSIM_BEAM_CONNECTED;
-        beamRecord.associationTime = Simulator::Now();
+        // Get beam list for this satellite
+        const auto& beams = m_multiBeamModel->GetBeamsForSatellite(satNodeId);
+        std::vector<std::pair<size_t, double>> beamSinrPairs; // (beam index, SINR)
 
-        visibleBeams.push_back(beamRecord);
+        for (size_t beamIdx = 0; beamIdx < beams.size(); ++beamIdx)
+        {
+            const auto& beam = beams[beamIdx];
 
-        NS_LOG_DEBUG("Visible beam for UE " << ueNodeId << " to satellite " << satNodeId
-                                           << ": RSRP=" << beamRecord.rsrp << " dBm, TTE="
-                                           << beamRecord.remainingServiceTime << "s, latency="
-                                           << beamRecord.endToEndLatency << "ms, load="
-                                           << beamRecord.satelliteLoad);
+            // Compute SINR for this beam using the SINR engine
+            LeoSimSinrResult sinrResult = m_sinrEngine->ComputeSinr(
+                ueNodeId, satNodeId, beam.beamId, allBeamsMap, ueLat, ueLon);
+            double sinr = sinrResult.sinr_dB;
+
+            // Store (beam index, SINR) for potential filtering
+            beamSinrPairs.push_back({beamIdx, sinr});
+        }
+
+        // Filter beams: if hopping is disabled, keep only top-3 by SINR
+        std::vector<size_t> selectedBeamIndices;
+        if (m_cfg.beamHoppingEnabled)
+        {
+            // Hopping enabled: include all active beams
+            for (size_t beamIdx = 0; beamIdx < beams.size(); ++beamIdx)
+            {
+                selectedBeamIndices.push_back(beamIdx);
+            }
+        }
+        else
+        {
+            // Hopping disabled: select top-3 by SINR
+            std::sort(beamSinrPairs.begin(), beamSinrPairs.end(),
+                      [](const auto& a, const auto& b) { return a.second > b.second; });
+            for (size_t j = 0; j < std::min(size_t(3), beamSinrPairs.size()); ++j)
+            {
+                selectedBeamIndices.push_back(beamSinrPairs[j].first);
+            }
+        }
+
+        // Generate one record per selected beam
+        for (size_t beamIdx : selectedBeamIndices)
+        {
+            const auto& beam = beams[beamIdx];
+
+            // Compute SINR for this beam
+            LeoSimSinrResult sinrResult = m_sinrEngine->ComputeSinr(
+                ueNodeId, satNodeId, beam.beamId, allBeamsMap, ueLat, ueLon);
+            double sinr = sinrResult.sinr_dB;
+
+            // Count active UEs on this specific beam
+            uint32_t beamActiveUeCount = 0;
+            for (const auto& [ueId, beamRec] : m_currentBeams)
+            {
+                if (beamRec.satelliteNodeId == satNodeId && beamRec.beamId == beam.beamId)
+                {
+                    beamActiveUeCount++;
+                }
+            }
+
+            // Create beam-specific record
+            LeoSimBeamRecord beamRecord;
+            beamRecord.ueNodeId = ueNodeId;
+            beamRecord.satelliteNodeId = satNodeId;
+            beamRecord.beamId = beam.beamId;
+            beamRecord.cellId = beam.cellId;
+            beamRecord.colorGroup = beam.colorGroup;
+            beamRecord.rsrp = linkQuality.signalStrength;
+            beamRecord.snr = linkQuality.snr;
+            beamRecord.sinr = sinr;  // New: beam-specific SINR
+            beamRecord.intraBeamInterference_dBm = sinrResult.intraBeamInterference_dBm;
+            beamRecord.interSatInterference_dBm = sinrResult.interSatInterference_dBm;
+            beamRecord.beamLoad = beamActiveUeCount;  // New: per-beam load
+            beamRecord.beamActive = beam.activeInCurrentSlot;  // New: beam active flag
+            beamRecord.pathLoss = linkQuality.pathLoss;
+            beamRecord.elevationAngle = linkQuality.elevationAngle;
+            beamRecord.remainingServiceTime = tte;
+            beamRecord.satelliteLoad = 0;  // Not used in 7-criterion version, kept for compatibility
+            beamRecord.endToEndLatency = latency;
+            beamRecord.state = LEOSIM_BEAM_CONNECTED;
+            beamRecord.associationTime = Simulator::Now();
+
+            visibleBeams.push_back(beamRecord);
+
+            NS_LOG_DEBUG("Visible beam for UE " << ueNodeId << " to satellite " << satNodeId
+                                               << " beam " << beam.beamId << ": RSRP="
+                                               << beamRecord.rsrp << " dBm, SINR=" << sinr
+                                               << " dB, TTE=" << tte << "s, latency=" << latency
+                                               << "ms, beamLoad=" << beamActiveUeCount
+                                               << ", active=" << (int)beam.activeInCurrentSlot);
+        }
     }
 
     NS_LOG_INFO("Found " << visibleBeams.size() << " visible beams for UE " << ueNodeId);
@@ -685,13 +890,22 @@ LeoSimBeamManager::RankByTopsis(const std::vector<LeoSimBeamRecord>& candidates,
     }
     NS_ASSERT_MSG(std::abs(weightSum - 1.0) < 0.01,
                   "TOPSIS weights must sum to ~1.0, got " << weightSum);
+    NS_ASSERT_MSG(m_topsisWeights.size() == 7,
+                  "TOPSIS weights array must have exactly 7 elements, got " << m_topsisWeights.size());
 
-    const size_t numCriteria = 5;
+    const size_t numCriteria = 7;
     const size_t numCandidates = candidates.size();
 
-    // --- TOPSIS Algorithm ---
-    // Step 1: Build decision matrix (numCandidates x numCriteria)
-    // Criteria: [0] RSRP, [1] TTE, [2] 1/load, [3] 1/latency, [4] elevation angle
+    // --- TOPSIS Algorithm (7-Attribute Version) ---
+    // Step 1: Build decision matrix (numCandidates x 7)
+    // Criteria (all benefit - higher is better):
+    //   [0] RSRP (dBm)
+    //   [1] SINR (dB)
+    //   [2] TTE - Time To Exit (seconds)
+    //   [3] 1.0 / beamLoad - inverse of per-beam UE count
+    //   [4] 1.0 / endToEndLatency (inverse of ms)
+    //   [5] Elevation angle (degrees)
+    //   [6] beamActive binary (1.0 if active, 0.0 if dark)
     std::vector<std::vector<double>> decisionMatrix(numCandidates, std::vector<double>(numCriteria));
     std::vector<double> sumSquares(numCriteria, 0.0);
 
@@ -702,22 +916,29 @@ LeoSimBeamManager::RankByTopsis(const std::vector<LeoSimBeamRecord>& candidates,
         // Criterion 0: RSRP (benefit - higher is better)
         decisionMatrix[i][0] = std::max(candidate.rsrp, -200.0); // Cap at -200 dBm minimum
 
-        // Criterion 1: TTE in seconds (benefit - longer is better)
-        decisionMatrix[i][1] = candidate.remainingServiceTime;
+        // Criterion 1: SINR in dB (benefit - higher is better)
+        // Replace SNR with per-beam SINR from SINR engine
+        decisionMatrix[i][1] = std::max(candidate.sinr, -20.0); // Cap at -20 dB minimum
 
-        // Criterion 2: Inverse of satellite load (benefit - lower load is better)
-        // If load is 0, use a high value to avoid division issues
-        decisionMatrix[i][2] = (candidate.satelliteLoad > 0.001)
-                                   ? (1.0 / candidate.satelliteLoad)
+        // Criterion 2: TTE in seconds (benefit - longer is better)
+        decisionMatrix[i][2] = candidate.remainingServiceTime;
+
+        // Criterion 3: Inverse of per-beam load (benefit - lower load is better)
+        // beamLoad is the UE count on this specific beam
+        decisionMatrix[i][3] = (candidate.beamLoad > 0.001)
+                                   ? (1.0 / candidate.beamLoad)
                                    : 100.0;
 
-        // Criterion 3: Inverse of end-to-end latency in ms (benefit - lower is better)
-        decisionMatrix[i][3] = (candidate.endToEndLatency > 0.1)
+        // Criterion 4: Inverse of end-to-end latency in ms (benefit - lower is better)
+        decisionMatrix[i][4] = (candidate.endToEndLatency > 0.1)
                                    ? (1.0 / candidate.endToEndLatency)
                                    : 100.0;
 
-        // Criterion 4: Elevation angle in degrees (benefit - higher coverage is better)
-        decisionMatrix[i][4] = std::max(candidate.elevationAngle, 0.0);
+        // Criterion 5: Elevation angle in degrees (benefit - higher coverage is better)
+        decisionMatrix[i][5] = std::max(candidate.elevationAngle, 0.0);
+
+        // Criterion 6: Beam active binary (benefit - active is better)
+        decisionMatrix[i][6] = candidate.beamActive ? 1.0 : 0.0;
 
         // Compute sum of squares for normalization
         for (size_t j = 0; j < numCriteria; j++)
@@ -725,11 +946,13 @@ LeoSimBeamManager::RankByTopsis(const std::vector<LeoSimBeamRecord>& candidates,
             sumSquares[j] += decisionMatrix[i][j] * decisionMatrix[i][j];
         }
 
-        NS_LOG_DEBUG("Candidate " << candidate.satelliteNodeId << ": RSRP=" << candidate.rsrp
-                                  << " dBm, TTE=" << candidate.remainingServiceTime << "s, "
-                                  << "Load=" << candidate.satelliteLoad
-                                  << ", Latency=" << candidate.endToEndLatency
-                                  << "ms, Elevation=" << candidate.elevationAngle);
+        NS_LOG_DEBUG("Candidate sat=" << candidate.satelliteNodeId << " beam="
+                                      << candidate.beamId << ": RSRP=" << candidate.rsrp
+                                      << " dBm, SINR=" << candidate.sinr << " dB, TTE="
+                                      << candidate.remainingServiceTime << "s, beamLoad="
+                                      << candidate.beamLoad << ", latency=" << candidate.endToEndLatency
+                                      << "ms, elevation=" << candidate.elevationAngle
+                                      << ", active=" << (int)candidate.beamActive);
     }
 
     // Step 2: Normalize decision matrix by L2 norm (column-wise)
@@ -841,10 +1064,28 @@ LeoSimBeamManager::InitiateChoPreparation(uint32_t ueNodeId, uint32_t candidateS
     NS_LOG_INFO("UE " << ueNodeId << " initiating CHO preparation for satellite "
                       << candidateSatId << " at time " << Simulator::Now().GetSeconds() << "s");
 
-    // TODO: Implement CHO Phase 1 (preparation)
-    // - Add candidate to m_choConfigs per TS 38.300
-    // - Schedule CHO execution after m_choPreparationDelay
-    // - Buffer packets during preparation
+    // Wrapper around the full multi-candidate CHO preparation:
+    // rank all visible satellites, then ensure the requested candidate is
+    // prioritized, and reuse the existing implementation.
+    std::vector<LeoSimBeamRecord> visibleBeams = ScanVisibleSatellites(ueNodeId);
+    std::vector<LeoSimTopsisCandidate> ranked = RankByTopsis(visibleBeams, ueNodeId);
+    if (ranked.empty())
+    {
+        NS_LOG_WARN("CHO preparation requested for UE " << ueNodeId
+                                                        << " but no visible candidates exist");
+        return;
+    }
+
+    auto candIt = std::find_if(ranked.begin(), ranked.end(),
+                               [candidateSatId](const LeoSimTopsisCandidate& c) {
+                                   return c.beamRecord.satelliteNodeId == candidateSatId;
+                               });
+    if (candIt != ranked.end() && candIt != ranked.begin())
+    {
+        std::iter_swap(ranked.begin(), candIt);
+    }
+
+    InitiateChoPreparation(ueNodeId, ranked);
 }
 
 void
@@ -865,11 +1106,17 @@ LeoSimBeamManager::InitiateChoPreparation(uint32_t ueNodeId,
     beamIt->second.state = LEOSIM_BEAM_PREPARING;
     NS_LOG_DEBUG("UE " << ueNodeId << " current beam state changed to LEOSIM_BEAM_PREPARING");
 
+    if (!m_beamStateCallback.IsNull())
+    {
+        m_beamStateCallback(ueNodeId, beamIt->second, 0.0);
+    }
+
     // Step 2: Clear any existing m_choConfigs[ueNodeId]
     m_choConfigs[ueNodeId].clear();
     NS_LOG_DEBUG("Cleared existing CHO configs for UE " << ueNodeId);
 
     // Step 3: Iterate over the first min(topN.size(), m_maxCandidates) candidates
+    std::vector<LeoSimTopsisCandidate> configured;
     size_t numCandidates = std::min(static_cast<size_t>(m_maxCandidates), topN.size());
     for (size_t i = 0; i < numCandidates; ++i)
     {
@@ -911,6 +1158,13 @@ LeoSimBeamManager::InitiateChoPreparation(uint32_t ueNodeId,
         // Step 3c: Push the config into m_choConfigs[ueNodeId]
         m_choConfigs[ueNodeId][candidateSatId] = cfg;
         NS_LOG_DEBUG("Added CHO config for UE " << ueNodeId << " -> satellite " << candidateSatId);
+
+        configured.push_back(candidate);
+    }
+
+    if (!m_choConfigCallback.IsNull() && !configured.empty())
+    {
+        m_choConfigCallback(ueNodeId, servingSatId, configured);
     }
 
     // Step 4: Log with NS_LOG_INFO
@@ -930,6 +1184,11 @@ LeoSimBeamManager::InitiateChoPreparation(uint32_t ueNodeId,
             beamIt2->second.state = LEOSIM_BEAM_EVALUATING;
             NS_LOG_DEBUG("UE " << ueNodeId
                                << " current beam state changed to LEOSIM_BEAM_EVALUATING");
+
+            if (!m_beamStateCallback.IsNull())
+            {
+                m_beamStateCallback(ueNodeId, beamIt2->second, 0.0);
+            }
         }
         EvaluateChoConditions(ueNodeId);
         NS_LOG_DEBUG("CHO evaluation initiated for UE " << ueNodeId << " at "
@@ -1036,6 +1295,17 @@ LeoSimBeamManager::EvaluateChoConditions(uint32_t ueNodeId)
         // Step 4d: Evaluate TTE-based condition: ComputeTte < TTE threshold
         double currentTte = ComputeTte(ueNodeId, servingSatId);
         bool tteBased = currentTte < m_tteThreshold.GetSeconds();
+        if (m_verbose)
+        {
+            std::cout << "[HO-CHECK][" << Simulator::Now().GetSeconds() << "s] UE " << ueNodeId
+                      << " candidate=" << candidateSatId
+                      << " A3=" << (a3Condition ? "1" : "0")
+                      << " A4=" << (a4Condition ? "1" : "0")
+                      << " TTE=" << currentTte << "s"
+                      << " threshold=" << m_tteThreshold.GetSeconds() << "s"
+                      << " TTE_TRIGGER=" << (tteBased ? "1" : "0")
+                      << std::endl;
+        }
         NS_LOG_DEBUG("  TTE-based: current TTE=" << currentTte << "s < threshold="
                                                   << m_tteThreshold.GetSeconds()
                                                   << "s => " << (tteBased ? "TRUE" : "FALSE"));
@@ -1095,6 +1365,11 @@ LeoSimBeamManager::ExecuteChoHandover(uint32_t ueNodeId,
 
     uint32_t sourceSatId = beamIt->second.satelliteNodeId;
     beamIt->second.state = LEOSIM_BEAM_EXECUTING;
+
+    if (!m_beamStateCallback.IsNull())
+    {
+        m_beamStateCallback(ueNodeId, beamIt->second, 0.0);
+    }
 
     // Step 2: Log NS_LOG_INFO with UE ID, target satellite, and trigger type
     std::string triggerStr;
@@ -1177,6 +1452,11 @@ LeoSimBeamManager::CompleteHandover(uint32_t ueNodeId,
     currentBeam.associationTime = Simulator::Now();
     currentBeam.state = LEOSIM_BEAM_CONNECTED;
 
+    if (!m_beamStateCallback.IsNull())
+    {
+        m_beamStateCallback(ueNodeId, currentBeam, 0.0);
+    }
+
     NS_LOG_DEBUG("Updated beam record for UE " << ueNodeId << " to satellite " << targetSatId
                                                << ": RSRP=" << currentBeam.rsrp
                                                << " dBm, SNR=" << currentBeam.snr << " dB");
@@ -1185,8 +1465,8 @@ LeoSimBeamManager::CompleteHandover(uint32_t ueNodeId,
     m_lastHandoverTime[ueNodeId] = Simulator::Now();
 
     // Step 4: Classify handover type
-    uint32_t sourcePlane = m_loader->GetOrbitPlane(sourceSatId);
-    uint32_t targetPlane = m_loader->GetOrbitPlane(targetSatId);
+    uint32_t sourcePlane = m_loader->GetOrbitPlane(GetLeoSimIdFromNodeId(sourceSatId));
+    uint32_t targetPlane = m_loader->GetOrbitPlane(GetLeoSimIdFromNodeId(targetSatId));
 
     LeoSimHandoverType hoType = (sourcePlane == targetPlane) ? LEOSIM_HO_INTER_SATELLITE
                                                              : LEOSIM_HO_INTER_ORBIT;
@@ -1201,6 +1481,10 @@ LeoSimBeamManager::CompleteHandover(uint32_t ueNodeId,
     hoEvent.ueNodeId = ueNodeId;
     hoEvent.sourceSatId = sourceSatId;
     hoEvent.targetSatId = targetSatId;
+    hoEvent.sourceBeamId = 0;  // TODO: retrieve from current beam record
+    hoEvent.targetBeamId = 0;  // TODO: retrieve from target beam record
+    hoEvent.sourceCellId = 0;  // TODO: retrieve from current beam record
+    hoEvent.targetCellId = 0;  // TODO: retrieve from target beam record
     hoEvent.mode = LEOSIM_HO_MODE_CHO; // Conditional handover
     hoEvent.type = hoType;
     hoEvent.trigger = trigger;
@@ -1210,8 +1494,8 @@ LeoSimBeamManager::CompleteHandover(uint32_t ueNodeId,
     hoEvent.packetsBuffered = 0;  // TODO: get from buffer manager
     hoEvent.packetsDropped = 0;   // TODO: get from buffer manager
     hoEvent.success = true;
-    hoEvent.topsisScoreBefore = 0.0;   // TODO: retrieve from candidate record
-    hoEvent.topsisScoreAfter = 0.0;    // TODO: retrieve from ranked candidates
+    hoEvent.sinrBefore = 0.0;   // TODO: retrieve from candidate record
+    hoEvent.sinrAfter = 0.0;    // TODO: retrieve from ranked candidates
 
     NS_LOG_DEBUG("Built handover event: latency=" << hoEvent.handoverLatencyMs
                                                    << "ms, success=" << hoEvent.success);
@@ -1365,6 +1649,293 @@ LeoSimBeamManager::PreScheduleEphemerisHandovers(Time lookaheadWindow)
     }
 }
 
+void
+LeoSimBeamManager::EvaluateIntraBeamNeed(uint32_t ueNodeId)
+{
+    NS_LOG_FUNCTION(this << ueNodeId);
+
+    if (!m_loader || !m_sinrEngine || !m_multiBeamModel)
+    {
+        NS_LOG_DEBUG("Intra-beam evaluation skipped for UE " << ueNodeId
+                                                               << " (missing loader/sinr/multi-beam model)");
+        return;
+    }
+
+    auto currentIt = m_currentBeams.find(ueNodeId);
+    if (currentIt == m_currentBeams.end())
+    {
+        return;
+    }
+
+    LeoSimBeamRecord& rec = currentIt->second;
+    const uint32_t satId = rec.satelliteNodeId;
+    const auto& beams = m_multiBeamModel->GetBeamsForSatellite(satId);
+    if (beams.empty())
+    {
+        return;
+    }
+
+    const auto [ueLat, ueLon] = m_loader->GetGroundDeviceLatLon(ueNodeId);
+    int32_t naturalBeam = LeoSimBeamLayoutEngine::FindBeamForPosition(beams, ueLat, ueLon);
+
+    const auto& allBeams = m_multiBeamModel->GetAllBeams();
+
+    // Step 5: A3-like intra-beam trigger if UE has moved into another beam footprint.
+    if (naturalBeam >= 0 && static_cast<uint32_t>(naturalBeam) != rec.beamId)
+    {
+        LeoSimSinrResult naturalSinr = m_sinrEngine->ComputeSinr(ueNodeId,
+                                                                 satId,
+                                                                 static_cast<uint32_t>(naturalBeam),
+                                                                 allBeams,
+                                                                 ueLat,
+                                                                 ueLon);
+
+        if (naturalSinr.sinr_dB > rec.sinr + m_a3Offset)
+        {
+            ExecuteIntraBeamHandover(ueNodeId,
+                                     static_cast<uint32_t>(naturalBeam),
+                                     LEOSIM_HO_A3);
+            return;
+        }
+    }
+
+    const auto currentBeamIt = std::find_if(beams.begin(), beams.end(),
+                                            [&rec](const LeoSimSpotBeam& b) {
+                                                return b.beamId == rec.beamId;
+                                            });
+
+    // Step 6: Beam hopping case where current beam is dark.
+    if (currentBeamIt != beams.end() && !currentBeamIt->activeInCurrentSlot)
+    {
+        int32_t bestBeam = FindBestActiveBeam(ueNodeId, satId);
+        if (bestBeam >= 0)
+        {
+            ExecuteIntraBeamHandover(ueNodeId,
+                                     static_cast<uint32_t>(bestBeam),
+                                     static_cast<LeoSimHandoverTrigger>(LEOSIM_HO_BEAM_HOPPING_DARK));
+            return;
+        }
+    }
+
+    // Step 7: Low-SINR trigger for better same-satellite beam.
+    if (rec.sinr < m_sinrThresholdDb)
+    {
+        int32_t betterBeam = FindBetterBeamOnSameSat(ueNodeId, satId);
+        if (betterBeam >= 0)
+        {
+            ExecuteIntraBeamHandover(ueNodeId,
+                                     static_cast<uint32_t>(betterBeam),
+                                     LEOSIM_HO_A4);
+            return;
+        }
+    }
+}
+
+void
+LeoSimBeamManager::ExecuteIntraBeamHandover(uint32_t ueNodeId,
+                                            uint32_t targetBeamId,
+                                            LeoSimHandoverTrigger trigger)
+{
+    NS_LOG_FUNCTION(this << ueNodeId << targetBeamId << trigger);
+
+    if (!m_loader || !m_sinrEngine || !m_multiBeamModel)
+    {
+        return;
+    }
+
+    auto it = m_currentBeams.find(ueNodeId);
+    if (it == m_currentBeams.end())
+    {
+        return;
+    }
+
+    LeoSimBeamRecord& rec = it->second;
+    uint32_t sourceBeamId = rec.beamId;
+    const uint32_t satId = rec.satelliteNodeId;
+
+    NS_LOG_INFO("Intra-beam handover start: UE " << ueNodeId << " beam " << sourceBeamId
+                                                  << " -> " << targetBeamId << " on satellite "
+                                                  << satId << ", trigger=" << trigger);
+
+    rec.state = LEOSIM_BEAM_EXECUTING;
+    if (!m_beamStateCallback.IsNull())
+    {
+        m_beamStateCallback(ueNodeId, rec, 0.0);
+    }
+
+    Time delay = MilliSeconds(m_intraBeamHoDelayMs);
+    auto complete = [this,
+                     ueNodeId,
+                     satId,
+                     sourceBeamId,
+                     targetBeamId,
+                     trigger,
+                     delay]() {
+        auto curIt = m_currentBeams.find(ueNodeId);
+        if (curIt == m_currentBeams.end())
+        {
+            return;
+        }
+
+        const auto& satBeams = m_multiBeamModel->GetBeamsForSatellite(satId);
+        if (targetBeamId >= satBeams.size())
+        {
+            NS_LOG_WARN("Intra-beam handover target out of range for UE " << ueNodeId
+                                                                            << ": sat=" << satId
+                                                                            << " targetBeam="
+                                                                            << targetBeamId);
+            curIt->second.state = LEOSIM_BEAM_CONNECTED;
+            return;
+        }
+
+        const LeoSimSpotBeam& targetBeam = satBeams[targetBeamId];
+
+        LeoSimBeamRecord& r = curIt->second;
+
+        r.beamId = targetBeam.beamId;
+        r.satelliteNodeId = satId;
+        r.cellId = targetBeam.cellId;
+        r.colorGroup = targetBeam.colorGroup;
+        r.beamLoad = targetBeam.currentLoad;
+        r.beamThroughputMbps = targetBeam.currentThroughputMbps;
+        r.beamActive = targetBeam.activeInCurrentSlot;
+
+        const auto [ueLat, ueLon] = m_loader->GetGroundDeviceLatLon(ueNodeId);
+        const auto& allBeams = m_multiBeamModel->GetAllBeams();
+        LeoSimSinrResult sinr =
+            m_sinrEngine->ComputeSinr(ueNodeId, satId, targetBeam.beamId, allBeams, ueLat, ueLon);
+
+        r.sinr = sinr.sinr_dB;
+        r.snr = sinr.sinr_dB;
+        r.rsrp = sinr.signal_dBm;
+        r.intraBeamInterference_dBm = sinr.intraBeamInterference_dBm;
+        r.interSatInterference_dBm = sinr.interSatInterference_dBm;
+        r.associationTime = Simulator::Now();
+        r.state = LEOSIM_BEAM_CONNECTED;
+
+        LeoSimHandoverEvent evt;
+        evt.ueNodeId = ueNodeId;
+        evt.sourceSatId = satId;
+        evt.targetSatId = satId;
+        evt.mode = m_hoMode;
+        evt.type = LEOSIM_HO_INTRA_BEAM;
+        evt.trigger = trigger;
+        evt.initiatedAt = Simulator::Now() - delay;
+        evt.completedAt = Simulator::Now();
+        evt.handoverLatencyMs = m_intraBeamHoDelayMs;
+        evt.packetsBuffered = 0;
+        evt.packetsDropped = 0;
+        evt.success = true;
+        evt.sourceBeamId = 0;  // TODO: retrieve from current beam
+        evt.targetBeamId = 0;  // TODO: retrieve from target beam
+        evt.sourceCellId = 0;
+        evt.targetCellId = 0;
+        evt.sinrBefore = 0.0;
+        evt.sinrAfter = 0.0;
+        m_handoverHistory.push_back(evt);
+
+        if (!m_handoverCallback.IsNull())
+        {
+            m_handoverCallback(evt);
+        }
+
+        if (!m_beamStateCallback.IsNull())
+        {
+            m_beamStateCallback(ueNodeId, r, 0.0);
+        }
+
+        NS_LOG_INFO("Intra-beam handover complete: UE " << ueNodeId << " beam " << sourceBeamId
+                                                         << " -> " << targetBeam.beamId
+                                                         << " on satellite " << satId
+                                                         << ", SINR=" << r.sinr << " dB");
+    };
+
+    Simulator::Schedule(delay, complete);
+}
+
+int32_t
+LeoSimBeamManager::FindBestActiveBeam(uint32_t ueNodeId, uint32_t satId) const
+{
+    NS_LOG_FUNCTION(this << ueNodeId << satId);
+
+    if (!m_loader || !m_sinrEngine || !m_multiBeamModel)
+    {
+        return -1;
+    }
+
+    const auto& beams = m_multiBeamModel->GetBeamsForSatellite(satId);
+    if (beams.empty())
+    {
+        return -1;
+    }
+
+    const auto [ueLat, ueLon] = m_loader->GetGroundDeviceLatLon(ueNodeId);
+    const auto& allBeams = m_multiBeamModel->GetAllBeams();
+
+    int32_t bestBeam = -1;
+    double bestSinr = -std::numeric_limits<double>::infinity();
+    for (const auto& b : beams)
+    {
+        if (!b.activeInCurrentSlot)
+        {
+            continue;
+        }
+
+        LeoSimSinrResult s =
+            m_sinrEngine->ComputeSinr(ueNodeId, satId, b.beamId, allBeams, ueLat, ueLon);
+        if (s.sinr_dB > bestSinr)
+        {
+            bestSinr = s.sinr_dB;
+            bestBeam = static_cast<int32_t>(b.beamId);
+        }
+    }
+
+    return bestBeam;
+}
+
+int32_t
+LeoSimBeamManager::FindBetterBeamOnSameSat(uint32_t ueNodeId, uint32_t satId) const
+{
+    NS_LOG_FUNCTION(this << ueNodeId << satId);
+
+    auto currentIt = m_currentBeams.find(ueNodeId);
+    if (currentIt == m_currentBeams.end())
+    {
+        return -1;
+    }
+    const LeoSimBeamRecord& rec = currentIt->second;
+
+    int32_t bestBeam = -1;
+    double bestSinr = rec.sinr + m_a3Offset;
+
+    if (!m_loader || !m_sinrEngine || !m_multiBeamModel)
+    {
+        return -1;
+    }
+
+    const auto& beams = m_multiBeamModel->GetBeamsForSatellite(satId);
+    const auto [ueLat, ueLon] = m_loader->GetGroundDeviceLatLon(ueNodeId);
+    const auto& allBeams = m_multiBeamModel->GetAllBeams();
+
+    for (const auto& b : beams)
+    {
+        if (!b.activeInCurrentSlot || b.beamId == rec.beamId)
+        {
+            continue;
+        }
+
+        LeoSimSinrResult s =
+            m_sinrEngine->ComputeSinr(ueNodeId, satId, b.beamId, allBeams, ueLat, ueLon);
+        if (s.sinr_dB > bestSinr)
+        {
+            bestSinr = s.sinr_dB;
+            bestBeam = static_cast<int32_t>(b.beamId);
+        }
+    }
+
+    return bestBeam;
+}
+
 Ptr<Node>
 LeoSimBeamManager::FindServingBeamForFootprint(uint32_t ueNodeId) const
 {
@@ -1429,61 +2000,114 @@ LeoSimBeamManager::UpdateCycle()
         return;
     }
 
-    // Iterate over all UEs with current beam assignments
-    for (const auto& entry : m_currentBeams)
+    // Drive the beam manager state machine for each UE.
+    for (uint32_t i = 0; i < m_userEquipment.GetN(); ++i)
     {
-        uint32_t ueNodeId = entry.first;
-        const LeoSimBeamRecord& currentBeam = entry.second;
+        Ptr<Node> ueNode = m_userEquipment.Get(i);
+        if (!ueNode)
+        {
+            continue;
+        }
+
+        uint32_t ueNodeId = ueNode->GetId();
+
+        // Ensure each UE has an initial serving beam assignment.
+        auto beamIt = m_currentBeams.find(ueNodeId);
+        if (beamIt == m_currentBeams.end())
+        {
+            std::vector<LeoSimBeamRecord> visible = ScanVisibleSatellites(ueNodeId);
+            std::vector<LeoSimTopsisCandidate> ranked = RankByTopsis(visible, ueNodeId);
+            if (ranked.empty())
+            {
+                NS_LOG_DEBUG("No visible satellites to attach UE " << ueNodeId
+                                                                    << " during UpdateCycle");
+                continue;
+            }
+
+            LeoSimBeamRecord serving = ranked[0].beamRecord;
+            serving.state = LEOSIM_BEAM_CONNECTED;
+            serving.associationTime = Simulator::Now();
+            m_currentBeams[ueNodeId] = serving;
+
+            if (!m_beamStateCallback.IsNull())
+            {
+                m_beamStateCallback(ueNodeId, serving, ranked[0].topsisScore);
+            }
+            continue;
+        }
+
+        // Run intra-beam checks first in each UE update iteration.
+        EvaluateIntraBeamNeed(ueNodeId);
+
+        LeoSimBeamRecord& currentBeam = beamIt->second;
         uint32_t currentSatId = currentBeam.satelliteNodeId;
 
-        // Earth-fixed beam mode: beam steering based on cell footprints
+        // Refresh current-beam metrics for logging and decision-making.
+        if (m_channelModel)
+        {
+            LeoSimChannelQuality servingQual = m_channelModel->GetLinkQuality(ueNodeId, currentSatId);
+            currentBeam.rsrp = servingQual.signalStrength;
+            currentBeam.snr = servingQual.snr;
+            currentBeam.pathLoss = servingQual.pathLoss;
+            currentBeam.elevationAngle = servingQual.elevationAngle;
+            currentBeam.remainingServiceTime = ComputeTte(ueNodeId, currentSatId);
+            currentBeam.endToEndLatency = ComputeEndToEndLatency(ueNodeId, currentSatId);
+        }
+
+        if (!m_beamStateCallback.IsNull())
+        {
+            m_beamStateCallback(ueNodeId, currentBeam, 0.0);
+        }
+
+        // If intra-beam handover has started, skip inter-satellite logic this cycle.
+        auto refreshed = m_currentBeams.find(ueNodeId);
+        if (refreshed != m_currentBeams.end() &&
+            refreshed->second.state != LEOSIM_BEAM_CONNECTED)
+        {
+            continue;
+        }
+
+        // Earth-fixed beam mode: beam steering based on cell footprints.
         if (m_earthFixedBeam)
         {
             NS_LOG_DEBUG("Processing UE " << ueNodeId << " in earth-fixed beam mode");
 
-            // Find the best serving beam for the current UE footprint location
             Ptr<Node> bestServing = FindServingBeamForFootprint(ueNodeId);
-
-            if (!bestServing)
+            if (bestServing)
             {
-                NS_LOG_DEBUG("No serving beam found for UE " << ueNodeId
-                                                             << " in earth-fixed mode");
-                continue;
-            }
-
-            uint32_t bestServingId = bestServing->GetId();
-
-            // Check if the serving satellite has changed (footprint switch)
-            if (bestServingId != currentSatId)
-            {
-                NS_LOG_INFO("Earth-fixed beam footprint switch for UE " << ueNodeId << ": "
-                                                                        << currentSatId << " -> "
-                                                                        << bestServingId << " at time "
-                                                                        << Simulator::Now().GetSeconds()
-                                                                        << "s");
-
-                // Get the ranked candidates for handover preparation
-                std::vector<LeoSimBeamRecord> visibleBeams =
-                    ScanVisibleSatellites(ueNodeId);
-                if (visibleBeams.empty())
+                uint32_t bestServingId = bestServing->GetId();
+                if (bestServingId != currentSatId)
                 {
-                    NS_LOG_DEBUG("No visible satellites for handover preparation at UE "
-                                 << ueNodeId);
-                    continue;
-                }
+                    NS_LOG_INFO("Earth-fixed beam footprint switch for UE " << ueNodeId << ": "
+                                                                            << currentSatId << " -> "
+                                                                            << bestServingId << " at time "
+                                                                            << Simulator::Now().GetSeconds()
+                                                                            << "s");
 
-                std::vector<LeoSimTopsisCandidate> ranked =
-                    RankByTopsis(visibleBeams, ueNodeId);
-
-                if (!ranked.empty())
-                {
-                    // Trigger handover preparation with the ranked candidates
-                    InitiateChoPreparation(ueNodeId, ranked);
-                    NS_LOG_DEBUG("Initiated CHO preparation for UE " << ueNodeId
-                                                                     << " due to footprint switch");
+                    std::vector<LeoSimBeamRecord> visibleBeams = ScanVisibleSatellites(ueNodeId);
+                    std::vector<LeoSimTopsisCandidate> ranked = RankByTopsis(visibleBeams, ueNodeId);
+                    if (!ranked.empty())
+                    {
+                        InitiateChoPreparation(ueNodeId, ranked);
+                    }
                 }
             }
         }
+
+        // CHO condition evaluation should be revisited periodically.
+        if (currentBeam.state == LEOSIM_BEAM_EVALUATING)
+        {
+            EvaluateChoConditions(ueNodeId);
+        }
+
+        // When connected, run TTT/A3/A4 evaluation to trigger CHO preparation.
+        if (currentBeam.state == LEOSIM_BEAM_CONNECTED)
+        {
+            RunTttEvaluation(ueNodeId);
+        }
+
+        // Always run RLF detection.
+        RunT310Evaluation(ueNodeId);
     }
 
     // Reschedule the next update cycle
@@ -1503,11 +2127,14 @@ LeoSimBeamManager::ComputeEndToEndLatency(uint32_t ueNodeId, uint32_t satNodeId)
         return 100.0; // Default latency in ms
     }
 
-    // Step 1: Get UE position from loader
-    Vector uePos = m_loader->GetGroundDevicePosition(ueNodeId);
+    // Step 1: Translate NodeIds to loader IDs and get positions from loader
+    uint32_t ueDeviceId = GetLeoSimIdFromNodeId(ueNodeId);
+    uint32_t satId = GetLeoSimIdFromNodeId(satNodeId);
+
+    Vector uePos = m_loader->GetGroundDevicePosition(ueDeviceId);
 
     // Step 2: Get satellite position at current time
-    Vector satPos = m_loader->GetSatellitePositionAt(satNodeId, Simulator::Now());
+    Vector satPos = m_loader->GetSatellitePositionAt(satId, Simulator::Now());
 
     // Step 3: Compute UE-to-satellite distance using 3D Euclidean distance
     double dx = satPos.x - uePos.x;
@@ -1596,14 +2223,15 @@ LeoSimBeamManager::IsPingPong(uint32_t ueNodeId, uint32_t sourceSatId, uint32_t 
 }
 
 void
-LeoSimBeamManager::Start(NodeContainer userEquipment,
+LeoSimBeamManager::Start(NodeContainer groundNodes,
                          NodeContainer satellites,
                          Time simStart,
                          Time simDuration)
 {
-    NS_LOG_FUNCTION(this << userEquipment.GetN() << " UEs, " << satellites.GetN() << " satellites");
+    NS_LOG_FUNCTION(this << groundNodes.GetN() << " ground nodes, " << satellites.GetN()
+                         << " satellites");
 
-    m_userEquipment = userEquipment;
+    m_userEquipment = groundNodes;
     m_satellites = satellites;
     m_simStart = simStart;
     m_simDuration = simDuration;
@@ -1612,10 +2240,10 @@ LeoSimBeamManager::Start(NodeContainer userEquipment,
                                                      << "s with simulation duration "
                                                      << simDuration.GetSeconds() << "s");
 
-    // Initialize raw sockets for each UE node to support packet buffering and transmission
-    for (uint32_t i = 0; i < userEquipment.GetN(); i++)
+    // Initialize raw sockets for each managed ground node to support packet buffering and transmission
+    for (uint32_t i = 0; i < groundNodes.GetN(); i++)
     {
-        Ptr<Node> ueNode = userEquipment.Get(i);
+        Ptr<Node> ueNode = groundNodes.Get(i);
         uint32_t ueNodeId = ueNode->GetId();
 
         // Create a raw socket (SOCK_RAW) for packet transmission
@@ -1652,13 +2280,237 @@ LeoSimBeamManager::Start(NodeContainer userEquipment,
         }
     }
 
+    // === Initial Serving Beam Assignment ===
+    // Populate m_currentBeams so UpdateCycle() has something to process and so
+    // visualization can log the serving satellite from t=0.
+    for (uint32_t i = 0; i < groundNodes.GetN(); i++)
+    {
+        Ptr<Node> ueNode = groundNodes.Get(i);
+        if (!ueNode)
+        {
+            continue;
+        }
+
+        uint32_t ueNodeId = ueNode->GetId();
+        std::vector<LeoSimBeamRecord> visible = ScanVisibleSatellites(ueNodeId);
+        std::vector<LeoSimTopsisCandidate> ranked = RankByTopsis(visible, ueNodeId);
+
+        if (ranked.empty())
+        {
+            NS_LOG_WARN("No visible satellites to attach UE " << ueNodeId << " at start time ");
+            continue;
+        }
+
+        LeoSimBeamRecord serving = ranked[0].beamRecord;
+        serving.state = LEOSIM_BEAM_CONNECTED;
+        serving.associationTime = Simulator::Now();
+        m_currentBeams[ueNodeId] = serving;
+
+        if (!m_beamStateCallback.IsNull())
+        {
+            m_beamStateCallback(ueNodeId, serving, ranked[0].topsisScore);
+        }
+
+        NS_LOG_INFO("Initial beam association for UE " << ueNodeId << " -> satellite "
+                                                      << serving.satelliteNodeId
+                                                      << " (TOPSIS=" << ranked[0].topsisScore
+                                                      << ")");
+    }
+
+    // Kick off ephemeris-based pre-scheduling once we have an initial serving beam.
+    // Without this, TIME_BASED (TTE) handovers will only be scheduled after a
+    // previous handover completes.
+    PreScheduleEphemerisHandovers(Seconds(600));
+
     // Schedule the first update cycle after the start time
     m_updateEventId = Simulator::Schedule(simStart + m_updateInterval, &LeoSimBeamManager::UpdateCycle, this);
     NS_LOG_DEBUG("Scheduled first UpdateCycle at time " << (simStart + m_updateInterval).GetSeconds()
                                                          << "s with interval "
                                                          << m_updateInterval.GetSeconds() << "s");
+
+    if (m_cfg.beamHoppingEnabled && m_multiBeamModel)
+    {
+        auto& allBeams = m_multiBeamModel->GetAllBeamsMutable();
+        for (auto& [satId, beams] : allBeams)
+        {
+            auto mgrIt = m_beamHopManagers.find(satId);
+            if (mgrIt == m_beamHopManagers.end() || !mgrIt->second)
+            {
+                m_beamHopManagers[satId] = CreateObject<LeoSimBeamHoppingManager>(
+                    static_cast<uint32_t>(beams.size()),
+                    std::max<uint32_t>(1, m_cfg.beamHopCycleSlotsN),
+                    std::max<uint32_t>(1, m_cfg.beamHopSlotMs),
+                    std::max<uint32_t>(1, m_cfg.frequencyReuseColors));
+            }
+
+            std::vector<double> demand;
+            demand.reserve(beams.size());
+            for (const auto& b : beams)
+            {
+                demand.push_back(std::max(0.0, b.currentLoad));
+            }
+
+            m_beamHopManagers[satId]->GenerateSchedule(demand);
+            uint32_t currentSlot =
+                (simStart.GetMilliSeconds() / std::max<uint32_t>(1, m_cfg.beamHopSlotMs)) %
+                std::max<uint32_t>(1, m_cfg.beamHopCycleSlotsN);
+            const auto active = m_beamHopManagers[satId]->GetActiveBeams(currentSlot);
+            for (auto& beam : beams)
+            {
+                beam.activeInCurrentSlot =
+                    std::find(active.begin(), active.end(), beam.beamId) != active.end();
+            }
+        }
+
+        Simulator::Schedule(MilliSeconds(std::max<uint32_t>(1, m_cfg.beamHopSlotMs)),
+                            &LeoSimBeamManager::AdvanceBeamHoppingSlot,
+                            this);
+    }
     
     NS_LOG_INFO("Initialized " << m_ueSocketMap.size() << " UE sockets for handover buffering");
+}
+
+void
+LeoSimBeamManager::AdvanceBeamHoppingSlot()
+{
+    NS_LOG_FUNCTION(this);
+
+    if (!m_cfg.beamHoppingEnabled || !m_multiBeamModel)
+    {
+        return;
+    }
+
+    const uint32_t slotMs = std::max<uint32_t>(1, m_cfg.beamHopSlotMs);
+    const uint32_t cycleSlots = std::max<uint32_t>(1, m_cfg.beamHopCycleSlotsN);
+    uint32_t currentSlot = (Simulator::Now().GetMilliSeconds() / slotMs) % cycleSlots;
+
+    auto& allBeams = m_multiBeamModel->GetAllBeamsMutable();
+    for (auto& [satId, beams] : allBeams)
+    {
+        auto mgrIt = m_beamHopManagers.find(satId);
+        if (mgrIt == m_beamHopManagers.end() || !mgrIt->second)
+        {
+            continue;
+        }
+
+        const auto activeList = mgrIt->second->GetActiveBeams(currentSlot);
+        for (auto& beam : beams)
+        {
+            bool wasActive = beam.activeInCurrentSlot;
+            bool isActive = std::find(activeList.begin(), activeList.end(), beam.beamId) != activeList.end();
+            beam.activeInCurrentSlot = isActive;
+
+            if (wasActive && !isActive)
+            {
+                HandleBeamDark(satId, beam.beamId);
+            }
+        }
+    }
+
+    Simulator::Schedule(MilliSeconds(slotMs), &LeoSimBeamManager::AdvanceBeamHoppingSlot, this);
+}
+
+void
+LeoSimBeamManager::HandleBeamDark(uint32_t satId, uint32_t beamId)
+{
+    NS_LOG_FUNCTION(this << satId << beamId);
+
+    std::vector<uint32_t> impactedUes;
+    for (const auto& [ueId, rec] : m_currentBeams)
+    {
+        if (rec.satelliteNodeId == satId && rec.beamId == beamId)
+        {
+            impactedUes.push_back(ueId);
+        }
+    }
+
+    for (uint32_t ueId : impactedUes)
+    {
+        EvaluateIntraBeamNeed(ueId);
+    }
+}
+
+LeoSimBeamRecord
+LeoSimBeamManager::GetCurrentBeam(uint32_t ueNodeId)
+{
+    NS_LOG_FUNCTION(this << ueNodeId);
+
+    auto it = m_currentBeams.find(ueNodeId);
+    if (it != m_currentBeams.end())
+    {
+        return it->second;
+    }
+
+    LeoSimBeamRecord empty;
+    empty.ueNodeId = ueNodeId;
+    empty.satelliteNodeId = std::numeric_limits<uint32_t>::max();
+    empty.rsrp = -200.0;
+    empty.snr = 0.0;
+    empty.pathLoss = 0.0;
+    empty.elevationAngle = 0.0;
+    empty.remainingServiceTime = 0.0;
+    empty.satelliteLoad = 0.0;
+    empty.endToEndLatency = 0.0;
+    empty.associationTime = Simulator::Now();
+    empty.state = LEOSIM_BEAM_SEARCHING;
+    return empty;
+}
+
+std::vector<LeoSimTopsisCandidate>
+LeoSimBeamManager::GetRankedCandidates(uint32_t ueNodeId)
+{
+    NS_LOG_FUNCTION(this << ueNodeId);
+    std::vector<LeoSimBeamRecord> visible = ScanVisibleSatellites(ueNodeId);
+    return RankByTopsis(visible, ueNodeId);
+}
+
+double
+LeoSimBeamManager::GetTimeToExit(uint32_t ueNodeId, uint32_t satNodeId)
+{
+    NS_LOG_FUNCTION(this << ueNodeId << satNodeId);
+    return ComputeTte(ueNodeId, satNodeId);
+}
+
+std::vector<LeoSimHandoverEvent>
+LeoSimBeamManager::GetHandoverHistory() const
+{
+    return m_handoverHistory;
+}
+
+uint32_t
+LeoSimBeamManager::GetHandoverCount(uint32_t ueNodeId) const
+{
+    uint32_t cnt = 0;
+    for (const auto& evt : m_handoverHistory)
+    {
+        if (evt.ueNodeId == ueNodeId)
+        {
+            cnt++;
+        }
+    }
+    return cnt;
+}
+
+double
+LeoSimBeamManager::GetAverageHandoverLatencyMs() const
+{
+    double sum = 0.0;
+    uint32_t n = 0;
+    for (const auto& evt : m_handoverHistory)
+    {
+        if (evt.success)
+        {
+            sum += evt.handoverLatencyMs;
+            n++;
+        }
+    }
+    return (n > 0) ? (sum / n) : 0.0;
+}
+
+uint32_t
+LeoSimBeamManager::GetPingPongCount() const
+{
+    return m_pingPongCount;
 }
 
 void
@@ -1919,7 +2771,7 @@ LeoSimBeamManager::Stop()
         {
             successfulHo++;
             sumLatency += evt.handoverLatencyMs;
-            sumScoreImprovement += (evt.topsisScoreAfter - evt.topsisScoreBefore);
+            sumScoreImprovement += (evt.sinrAfter - evt.sinrBefore);
             successfulCnt++;
         }
 
