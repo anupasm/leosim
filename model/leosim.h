@@ -45,5 +45,8 @@
 #include "leosim-multi-beam-model.h"
 #include "leosim-routing-calculator.h"
 #include "leosim-sinr-engine.h"
+#include "leosim-operator-model.h"
+
+#include "../helper/leosim-operator-helper.h"
 
 #endif /* LEOSIM_H */

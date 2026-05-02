@@ -23,6 +23,7 @@
 #include "ns3/double.h"
 #include "ns3/boolean.h"
 
+#include <algorithm>
 #include <cmath>
 
 namespace ns3
@@ -497,6 +498,7 @@ LeoSimChannelModel::GetChannelQuality(Ptr<Node> node1, Ptr<Node> node2)
     quality.elevationAngle = 0.0;
     quality.signalStrength = -200.0;
     quality.snr = -100.0;
+    quality.peerNodeId = 0;
     quality.lastUpdate = Simulator::Now();
     return quality;
 }
@@ -1036,9 +1038,9 @@ LeoSimChannelModel::GetIslFrequency() const
 }
 
 std::vector<LeoSimChannelQuality>
-LeoSimChannelModel::GetLinksForNode(uint32_t nodeId) const
+LeoSimChannelModel::GetLinksForNode(uint32_t nodeId, bool filterBySharing) const
 {
-    NS_LOG_FUNCTION(this << nodeId);
+    NS_LOG_FUNCTION(this << nodeId << filterBySharing);
     std::vector<LeoSimChannelQuality> result;
 
     // Iterate through all links to find those connected to this node
@@ -1055,9 +1057,23 @@ LeoSimChannelModel::GetLinksForNode(uint32_t nodeId) const
             if (linkInfo.quality.linkState == LEOSIM_LINK_UP ||
                 linkInfo.quality.linkState == LEOSIM_LINK_DEGRADED)
             {
-                result.push_back(linkInfo.quality);
+                LeoSimChannelQuality quality = linkInfo.quality;
+                quality.peerNodeId = (id1 == nodeId) ? id2 : id1;
+                result.push_back(quality);
             }
         }
+    }
+
+    if (filterBySharing)
+    {
+        result.erase(std::remove_if(result.begin(),
+                                    result.end(),
+                                    [&](const LeoSimChannelQuality& lq) {
+                                        return GetAlpha(nodeId,
+                                                        lq.peerNodeId,
+                                                        LEOSIM_DIR_DOWNLINK) == 0.0;
+                                    }),
+                     result.end());
     }
 
     NS_LOG_DEBUG("Found " << result.size() << " UP/DEGRADED links for node " << nodeId);
@@ -1093,6 +1109,7 @@ LeoSimChannelModel::GetLinkQuality(uint32_t nodeA, uint32_t nodeB) const
     defaultQuality.elevationAngle = 0.0;
     defaultQuality.signalStrength = -200.0;
     defaultQuality.snr = -100.0;
+    defaultQuality.peerNodeId = 0;
     defaultQuality.lastUpdate = Simulator::Now();
     defaultQuality.linkType = LEOSIM_LINK_SATELLITE_TO_GROUND; // Default type
 
@@ -1126,6 +1143,35 @@ LeoSimChannelModel::GetLinkState(uint32_t nodeA, uint32_t nodeB) const
     NS_LOG_DEBUG("Link not found for nodes " << nodeA << " and " << nodeB 
                  << ", returning DOWN state");
     return LEOSIM_LINK_DOWN;
+}
+
+void
+LeoSimChannelModel::SetOperatorModel(Ptr<LeoSimOperatorModel> model)
+{
+    NS_LOG_FUNCTION(this << model);
+    m_operatorModel = model;
+}
+
+LeoSimOperatorId
+LeoSimChannelModel::GetOperatorId(uint32_t nodeId) const
+{
+    NS_LOG_FUNCTION(this << nodeId);
+    if (!m_operatorModel)
+    {
+        return "unknown";
+    }
+    return m_operatorModel->GetOperatorId(nodeId);
+}
+
+double
+LeoSimChannelModel::GetAlpha(uint32_t nodeA, uint32_t nodeB, LeoSimLinkDirection dir) const
+{
+    NS_LOG_FUNCTION(this << nodeA << nodeB << dir);
+    if (!m_operatorModel)
+    {
+        return 1.0;
+    }
+    return m_operatorModel->GetAlpha(nodeA, nodeB, dir);
 }
 
 } // namespace ns3

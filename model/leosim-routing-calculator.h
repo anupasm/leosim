@@ -19,6 +19,7 @@
 #define LEOSIM_ROUTING_CALCULATOR_H
 
 #include "leosim-channel-model.h"
+#include "leosim-operator-model.h"
 
 #include "ns3/object.h"
 #include "ns3/ptr.h"
@@ -93,7 +94,8 @@ class LeoSimRoutingCalculator : public Object
     {
         LEOSIM_PATH_ANY,         //!< Allow any combination of ISL and ground links
         LEOSIM_PATH_ISL_ONLY,    //!< Only use ISL links
-        LEOSIM_PATH_GROUND_ONLY  //!< Only use ground links
+      LEOSIM_PATH_GROUND_ONLY, //!< Only use ground links
+      LEOSIM_PATH_SAME_OPERATOR_ONLY //!< Never cross operator boundary; intra-op only
     };
 
     /**
@@ -138,6 +140,18 @@ class LeoSimRoutingCalculator : public Object
      * \return Pointer to the ISL channel model (null if not set)
      */
     Ptr<LeoSimChannelModel> GetIslChannelModel() const;
+
+    /**
+     * \brief Set operator model used for operator-aware routing.
+     * \param model Pointer to operator model
+     */
+    void SetOperatorModel(Ptr<LeoSimOperatorModel> model);
+
+    /**
+     * \brief Set a default PathType used when none is specified in ComputeRoute
+     * \param pathType Default path type constraint
+     */
+    void SetPathType(PathType pathType);
 
     /**
      * \brief Compute route between source and destination using specified metric
@@ -382,11 +396,30 @@ class LeoSimRoutingCalculator : public Object
      */
     bool MeetsSnrConstraint(Ptr<Node> source, Ptr<Node> destination, double minSnr);
 
+    /**
+     * \brief Compute edge weight with optional operator sharing multiplier.
+     * \param nodeA First node ID
+     * \param nodeB Second node ID
+     * \param dir Link direction
+     * \param baseCost Baseline edge cost
+     * \return Effective weighted edge cost
+     */
+    double GetEdgeWeight(uint32_t nodeA,
+               uint32_t nodeB,
+               LeoSimLinkDirection dir,
+               double baseCost) const;
+
     // Pointer to the channel model for accessing link information
     Ptr<LeoSimChannelModel> m_channelModel;
 
     // Pointer to the ISL channel model for inter-satellite links
     Ptr<LeoSimChannelModel> m_islChannelModel;
+
+    // Pointer to operator model for operator-aware costs and constraints
+    Ptr<LeoSimOperatorModel> m_operatorModel;
+
+    // Default path type (used when caller does not specify one)
+    PathType m_defaultPathType;
 
     // Configuration
     bool m_verbose;  //!< Enable verbose logging

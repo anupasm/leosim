@@ -22,6 +22,7 @@
 
 #include "ns3/leosim-channel-model.h"
 #include "ns3/leosim-beam-manager.h"
+#include "ns3/leosim-operator-model.h"
 #include "ns3/node-container.h"
 
 #include <fstream>
@@ -158,6 +159,37 @@ class LeoSimVisualizationHelper
     void SetChoFile(const std::string& filename);
 
     /**
+     * \brief Set the output file for operator assignment data
+     * \param filename Path to operator CSV file
+     */
+    void SetOperatorFile(const std::string& filename);
+
+    /**
+     * \brief Set the output file for sharing-state data
+     * \param filename Path to sharing CSV file
+     */
+    void SetSharingFile(const std::string& filename);
+
+    /**
+     * \brief Write operator assignments for all nodes to CSV
+     * \param model Operator model used to resolve operator ID and role
+     * \param allNodes Container of all nodes to export
+     */
+    void InitOperatorLogging(Ptr<LeoSimOperatorModel> model, const NodeContainer& allNodes);
+
+    /**
+     * \brief Append active cross-operator sharing state to CSV
+     * \param model Operator model used for sharing queries
+     * \param channelModel Ground channel model
+     * \param islChannelModel ISL channel model
+     * \param simTime Simulation time for the snapshot row
+     */
+    void LogSharingState(Ptr<LeoSimOperatorModel> model,
+               Ptr<LeoSimChannelModel> channelModel,
+               Ptr<LeoSimChannelModel> islChannelModel,
+               double simTime);
+
+    /**
      * \brief Initialize beam state and handover logging with header rows
      */
     void InitBeamLogging();
@@ -251,6 +283,8 @@ class LeoSimVisualizationHelper
     std::string m_beamFile;
     std::string m_handoverFile;
     std::string m_choFile;
+    std::string m_operatorFile;
+    std::string m_sharingFile;
     std::ofstream m_posFile;
     std::ofstream m_linkFileStream;
     std::ofstream m_packetFileStream;

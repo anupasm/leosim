@@ -203,7 +203,8 @@ class LeoSimBeamManagerHelper
              double w4,
              double w5,
              double w6,
-             double w7);
+              double w7,
+              double w8 = 0.12);
 
     /**
      * \brief Set the maximum number of CHO candidates
@@ -380,7 +381,7 @@ class LeoSimBeamManagerHelper
     Time m_tteThreshold;
 
     // TOPSIS weights
-    std::array<double, 7> m_topsisWeights;
+    std::array<double, 8> m_topsisWeights;
     uint32_t m_maxCandidates;
 
     // CHO timing

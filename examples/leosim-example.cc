@@ -30,6 +30,7 @@
 #include "ns3/leosim-loader-helper.h"
 #include "ns3/leosim-loader.h"
 #include "ns3/leosim-mobility-helper.h"
+#include "ns3/leosim-operator-helper.h"
 #include "ns3/leosim-routing-calculator-helper.h"
 #include "ns3/leosim-routing-calculator.h"
 #include "ns3/leosim-traffic-generator-helper.h"
@@ -108,6 +109,12 @@ main(int argc, char* argv[])
     bool enableLoadBalancing = true;
     bool enableHoBuffering = true;
 
+    // === Operator Sharing ===
+    std::string satOperatorsFile = "";
+    std::string sharingMatrixFile = "";
+    double defaultAlpha = 1.0;
+    bool operatorIsolation = false;
+
     CommandLine cmd;
     cmd.AddValue("satellites", "Path to satellite position file", satelliteFile);
     cmd.AddValue("groundDevices", "Path to ground device CSV file", groundDeviceFile);
@@ -175,6 +182,20 @@ main(int argc, char* argv[])
     cmd.AddValue("wActive", "TOPSIS weight for active-beam preference", wActive);
     cmd.AddValue("enableLoadBalancing", "Enable load-balancing handovers", enableLoadBalancing);
     cmd.AddValue("enableHoBuffering", "Enable packet buffering during handover", enableHoBuffering);
+
+    // === Operator Sharing ===
+    cmd.AddValue("satOperators",
+                 "CSV file: SatelliteIndex,Operator assignments",
+                 satOperatorsFile);
+    cmd.AddValue("sharingMatrix",
+                 "CSV file: OperatorA,OperatorB,AlphaDL,AlphaUL,AlphaISL",
+                 sharingMatrixFile);
+    cmd.AddValue("defaultAlpha",
+                 "Default cross-operator alpha when no matrix given [0,1]",
+                 defaultAlpha);
+    cmd.AddValue("operatorIsolation",
+                 "If true, routes never cross operator boundaries",
+                 operatorIsolation);
     cmd.Parse(argc, argv);
 
     Time::SetResolution(Time::NS);
@@ -300,6 +321,29 @@ main(int argc, char* argv[])
 
     mobilityHelper.StartAll();
 
+    // === Operator Model Setup (Phase 8 of LeoSim) ===
+    if (!satOperatorsFile.empty())
+    {
+        loader->LoadSatelliteOperatorsFromCsv(satOperatorsFile);
+    }
+
+    LeoSimOperatorHelper opHelper;
+    opHelper.SetLoader(loader);
+    opHelper.SetVerbose(verbose);
+    opHelper.RegisterSatellites(satelliteNodes);
+    opHelper.RegisterGroundDevices(ueNodes, serverNodes);
+
+    if (!sharingMatrixFile.empty())
+    {
+        opHelper.LoadSharingMatrix(sharingMatrixFile);
+    }
+    else if (defaultAlpha < 1.0)
+    {
+        opHelper.SetUniformCrossOperatorAlpha(defaultAlpha, defaultAlpha, defaultAlpha);
+    }
+
+    Ptr<LeoSimOperatorModel> operatorModel = opHelper.Build();
+
     // Create visualization helper
     LeoSimVisualizationHelper vizHelper;
     vizHelper.SetOutputFile(positionFile);
@@ -329,6 +373,7 @@ main(int argc, char* argv[])
 
     Ptr<LeoSimChannelModel> channelModel =
         channelHelper.CreateChannels(satelliteNodes, allGroundNodes);
+    channelModel->SetOperatorModel(operatorModel);
 
     channelModel->StartUpdates();
 
@@ -347,6 +392,7 @@ main(int argc, char* argv[])
         islHelper.SetVerbose(verbose);
 
         islChannelModel = islHelper.CreateIslMesh(satelliteNodes);
+        islChannelModel->SetOperatorModel(operatorModel);
         islChannelModel->StartUpdates();
 
         std::cout << "[t=" << Simulator::Now().GetSeconds() << "s] ISL configuration:" << std::endl;
@@ -369,12 +415,14 @@ main(int argc, char* argv[])
     // Install devices for ground links (satellite-to-UE, satellite-to-Server)
     LeoSimDeviceInstaller deviceInstaller;
     deviceInstaller.SetChannelModel(channelModel);
+    deviceInstaller.SetOperatorModel(operatorModel);
     deviceInstaller.SetDeviceDataRate("100Mbps");
     deviceInstaller.SetDeviceDelay("1ms");
     deviceInstaller.SetDeviceMtu(1500);
     deviceInstaller.SetVerbose(verbose);
 
     NetDeviceContainer groundDevices = deviceInstaller.Install(satelliteNodes, allGroundNodes);
+    deviceInstaller.ApplySharingRates(groundDevices);
     std::cout << "[t=" << Simulator::Now().GetSeconds() << "s] Installed " << groundDevices.GetN() << " ground link devices" << std::endl;
 
     // Install devices for ISL links if enabled
@@ -383,12 +431,14 @@ main(int argc, char* argv[])
     {
         LeoSimDeviceInstaller islDeviceInstaller;
         islDeviceInstaller.SetChannelModel(islChannelModel);
+        islDeviceInstaller.SetOperatorModel(operatorModel);
         islDeviceInstaller.SetDeviceDataRate("10Gbps"); // ISL uses higher data rate
         islDeviceInstaller.SetDeviceDelay("100us");     // ISL lower latency
         islDeviceInstaller.SetDeviceMtu(1500);
         islDeviceInstaller.SetVerbose(verbose);
 
         islDevices = islDeviceInstaller.Install(satelliteNodes, NodeContainer());
+        islDeviceInstaller.ApplySharingRates(islDevices);
         std::cout << "[t=" << Simulator::Now().GetSeconds() << "s] Installed " << islDevices.GetN() << " ISL devices" << std::endl;
     }
 
@@ -484,6 +534,10 @@ main(int argc, char* argv[])
     allNodes.Add(ueNodes);
     allNodes.Add(serverNodes);
 
+    vizHelper.SetOperatorFile("leosim_operators.csv");
+    vizHelper.SetSharingFile("leosim_sharing.csv");
+    vizHelper.InitOperatorLogging(operatorModel, allNodes);
+
     // Install computed routes into static routing tables
     std::cout << "\n[t=" << Simulator::Now().GetSeconds() << "s] Setting up dynamic routing with periodic updates..." << std::endl;
     LeoSimRoutingCalculatorHelper routingHelper;
@@ -491,6 +545,11 @@ main(int argc, char* argv[])
     // Create unified routing calculator that handles both ground and ISL links
     Ptr<LeoSimRoutingCalculator> unifiedCalc =
         routingHelper.CreateUnifiedRoutingCalculator(channelModel, islChannelModel, verbose);
+    unifiedCalc->SetOperatorModel(operatorModel);
+    if (operatorIsolation)
+    {
+        unifiedCalc->SetPathType(LeoSimRoutingCalculator::LEOSIM_PATH_SAME_OPERATOR_ONLY);
+    }
 
     // Combine all nodes for routing (already created above)
 
@@ -563,6 +622,7 @@ main(int argc, char* argv[])
     // Install beam manager on all ground nodes (UEs + servers)
     Ptr<LeoSimBeamManager> beamManager =
         beamHelper.Install(allGroundNodes, satelliteNodes, Seconds(simTime));
+    beamManager->SetOperatorModel(operatorModel);
 
     if (logBeams)
     {
@@ -589,6 +649,16 @@ main(int argc, char* argv[])
 
     // Schedule position and link logging
     vizHelper.SchedulePositionLogging(satelliteNodes, serverNodes, ueNodes, logInterval, simTime);
+    for (double t = 0; t <= simTime; t += logInterval)
+    {
+        Simulator::Schedule(Seconds(t),
+                            &LeoSimVisualizationHelper::LogSharingState,
+                            &vizHelper,
+                            operatorModel,
+                            channelModel,
+                            islChannelModel,
+                            t);
+    }
 
     // Install TCP traffic from UEs to server
     std::cout << "\n[t=" << Simulator::Now().GetSeconds() << "s] Installing TCP traffic from UEs to server..." << std::endl;

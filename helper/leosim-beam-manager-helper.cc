@@ -35,7 +35,7 @@ LeoSimBeamManagerHelper::LeoSimBeamManagerHelper()
       m_a4Threshold(-110.0),
       m_elevationThreshold(10.0),
       m_tteThreshold(Seconds(30.0)),
-    m_topsisWeights({0.20, 0.25, 0.20, 0.15, 0.10, 0.05, 0.05}),
+        m_topsisWeights({0.18, 0.22, 0.18, 0.12, 0.08, 0.05, 0.05, 0.12}),
       m_maxCandidates(3),
       m_choPreparationDelay(MilliSeconds(100)),
       m_choExecutionDelay(MilliSeconds(150)),
@@ -158,9 +158,10 @@ LeoSimBeamManagerHelper::SetTopsisWeights(double w1,
                                           double w4,
                                           double w5,
                                           double w6,
-                                          double w7)
+                                          double w7,
+                                          double w8)
 {
-    NS_LOG_FUNCTION(this << w1 << w2 << w3 << w4 << w5 << w6 << w7);
+    NS_LOG_FUNCTION(this << w1 << w2 << w3 << w4 << w5 << w6 << w7 << w8);
     m_topsisWeights[0] = w1;
     m_topsisWeights[1] = w2;
     m_topsisWeights[2] = w3;
@@ -168,6 +169,7 @@ LeoSimBeamManagerHelper::SetTopsisWeights(double w1,
     m_topsisWeights[4] = w5;
     m_topsisWeights[5] = w6;
     m_topsisWeights[6] = w7;
+    m_topsisWeights[7] = w8;
 }
 
 void
@@ -290,7 +292,8 @@ LeoSimBeamManagerHelper::Install(NodeContainer groundNodes,
                                  m_topsisWeights[3],
                                  m_topsisWeights[4],
                                  m_topsisWeights[5],
-                                 m_topsisWeights[6]);
+                                 m_topsisWeights[6],
+                                 m_topsisWeights[7]);
     m_manager->SetMaxCandidates(m_maxCandidates);
 
     m_manager->SetChoPreparationDelay(m_choPreparationDelay);

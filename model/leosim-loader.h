@@ -18,6 +18,8 @@
 #ifndef LEOSIM_LOADER_H
 #define LEOSIM_LOADER_H
 
+#include "leosim-operator-model.h"
+
 #include "ns3/mobility-model.h"
 #include "ns3/node-container.h"
 #include "ns3/object.h"
@@ -154,6 +156,40 @@ class LeoSimLoader : public Object
     std::string GetGroundDeviceType(uint32_t deviceId) const;
 
     /**
+     * \brief Get operator ID for a ground device.
+     *
+     * Returns the value parsed from the optional Operator column in
+     * ground_devices.csv. Returns "default" if the column is absent or
+     * the device ID is not found.
+     *
+     * \param deviceId Ground device ID
+     * \return Operator identifier for the device, or "default"
+     */
+    LeoSimOperatorId GetGroundDeviceOperator(uint32_t deviceId) const;
+
+    /**
+     * \brief Get operator ID for a satellite.
+     *
+     * Returns the satellite operator loaded via LoadSatelliteOperatorsFromCsv().
+     * Returns "default" if no operator mapping was loaded for this satellite.
+     *
+     * \param satId Satellite ID
+     * \return Operator identifier for the satellite, or "default"
+     */
+    LeoSimOperatorId GetSatelliteOperator(uint32_t satId) const;
+
+    /**
+     * \brief Load satellite operator assignments from CSV.
+     *
+     * Loads a two-column CSV of the form (SatelliteIndex, Operator).
+     * A header row is optional and recognized when the first token is
+     * "SatelliteIndex" or "Index".
+     *
+     * \param csvFile Path to satellite operator CSV file
+     */
+    void LoadSatelliteOperatorsFromCsv(const std::string& csvFile);
+
+    /**
      * \brief Get ground device IDs matching a device type
      * \param deviceType Device type string
      * \return Vector of device IDs
@@ -275,7 +311,9 @@ class LeoSimLoader : public Object
 
     std::map<uint32_t, std::vector<SatellitePosition>> m_satelliteData; //!< Satellite position data
     std::map<uint32_t, std::string> m_satelliteNames;                   //!< Satellite names
+    std::map<uint32_t, LeoSimOperatorId> m_satelliteOperators;          //!< Satellite-to-operator mapping
     std::map<uint32_t, GroundDevice> m_groundDevices;                   //!< Ground device data
+    std::map<uint32_t, LeoSimOperatorId> m_groundDeviceOperators;       //!< Ground-device-to-operator mapping
     uint32_t m_numSatellites;                                           //!< Number of satellites
     uint32_t m_numGroundDevices;                                        //!< Number of ground devices
     uint32_t m_satellitesPerPlane = 20;                                 //!< Satellites per orbital plane (default: 20)

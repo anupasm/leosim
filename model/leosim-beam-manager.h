@@ -22,6 +22,7 @@
 #include "leosim-beam-hopping-manager.h"
 #include "leosim-loader.h"
 #include "leosim-multi-beam-model.h"
+#include "leosim-operator-model.h"
 #include "leosim-routing-calculator.h"
 #include "leosim-sinr-engine.h"
 
@@ -258,6 +259,12 @@ class LeoSimBeamManager : public Object
     void SetLoader(Ptr<LeoSimLoader> loader);
 
     /**
+     * \brief Set the operator model for operator-aware beam decisions.
+     * \param model Pointer to operator model
+     */
+    void SetOperatorModel(Ptr<LeoSimOperatorModel> model);
+
+    /**
      * \brief Enable verbose/debug output
      * \param verbose True to enable debug logging
      */
@@ -356,7 +363,8 @@ class LeoSimBeamManager : public Object
                           double wLoad,
                           double wLatency,
                           double wElevation,
-                          double wActive);
+                          double wActive,
+                          double wOperatorCompat);
 
     /**
      * \name Conditional Handover (CHO) Configuration
@@ -535,6 +543,20 @@ class LeoSimBeamManager : public Object
     uint32_t GetPingPongCount() const;
     /** @} */
 
+    /**
+     * \brief Rank beam candidates using TOPSIS multi-criteria decision analysis.
+     *
+     * Criteria order matches SetTopsisWeights (w0..w7):
+     * - RSRP, SINR, TTE, satellite load, latency, elevation, beam-active, operator compat
+     *
+     * \param candidates Vector of LeoSimBeamRecord with full metrics to rank
+     * \param ueNodeId UE node identifier for context logging
+     * \return Sorted vector of LeoSimTopsisCandidate by TOPSIS score (descending)
+     */
+    std::vector<LeoSimTopsisCandidate> RankByTopsis(
+        const std::vector<LeoSimBeamRecord>& candidates,
+        uint32_t ueNodeId);
+
   private:
     /**
      * \name State Members
@@ -545,6 +567,7 @@ class LeoSimBeamManager : public Object
     Ptr<LeoSimChannelModel> m_channelModel;            //!< Propagation channel model
     Ptr<LeoSimChannelModel> m_islChannelModel;         //!< Inter-satellite link model
     Ptr<LeoSimRoutingCalculator> m_routingCalculator;  //!< Routing calculator
+    Ptr<LeoSimOperatorModel> m_operatorModel;          //!< Operator sharing model
     Ptr<LeoSimLoader> m_loader;                        //!< Satellite/beam loader
     Ptr<LeoSimSinrEngine> m_sinrEngine;                //!< SINR decomposition engine
     Ptr<LeoSimMultiBeamModel> m_multiBeamModel;        //!< Multi-beam topology model
@@ -570,8 +593,8 @@ class LeoSimBeamManager : public Object
     Time m_tteThreshold = Seconds(30.0);                 //!< Min TTE before HO (seconds)
 
     // TOPSIS multi-criteria weighting
-    std::array<double, 7> m_topsisWeights = {0.20, 0.25, 0.20, 0.15, 0.10, 0.05, 0.05};
-    //  {wRsrp, wSinr, wTte, wLoad, wLatency, wElevation, wActive}
+    std::array<double, 8> m_topsisWeights = {0.18, 0.22, 0.18, 0.12, 0.08, 0.05, 0.05, 0.12};
+    //  {wRsrp, wSinr, wTte, wLoad, wLatency, wElevation, wActive, wOperatorCompat}
 
     // CHO configuration
     uint32_t m_maxCandidates = 3;                        //!< Max CHO candidates
@@ -683,9 +706,6 @@ class LeoSimBeamManager : public Object
      * \param ueNodeId UE node identifier for context logging
      * \return Sorted vector of LeoSimTopsisCandidate by TOPSIS score (descending)
      */
-    std::vector<LeoSimTopsisCandidate> RankByTopsis(
-        const std::vector<LeoSimBeamRecord>& candidates,
-        uint32_t ueNodeId);
 
     /**
      * \brief Compute Time-To-Exit (TTE) for a UE-satellite pair

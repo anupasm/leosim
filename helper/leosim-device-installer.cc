@@ -18,13 +18,19 @@
 #include "leosim-device-installer.h"
 
 #include "ns3/attribute.h"
+#include "ns3/data-rate.h"
 #include "ns3/internet-stack-helper.h"
 #include "ns3/log.h"
 #include "ns3/node.h"
 #include "ns3/point-to-point-helper.h"
+#include "ns3/point-to-point-net-device.h"
+#include "ns3/simulator.h"
 #include "ns3/simple-channel.h"
 #include "ns3/string.h"
 #include "ns3/uinteger.h"
+
+#include <algorithm>
+#include <cctype>
 
 namespace ns3
 {
@@ -58,10 +64,59 @@ LeoSimDeviceInstaller::SetChannelModel(Ptr<LeoSimChannelModel> channelModel)
 }
 
 void
+LeoSimDeviceInstaller::SetOperatorModel(Ptr<LeoSimOperatorModel> model)
+{
+    NS_LOG_FUNCTION(this << model);
+    m_operatorModel = model;
+}
+
+void
 LeoSimDeviceInstaller::SetDeviceDataRate(std::string dataRate)
 {
     NS_LOG_FUNCTION(this << dataRate);
     m_dataRate = dataRate;
+
+    // Parse the configured data-rate string and use it as baseline rates.
+    std::string normalized = dataRate;
+    normalized.erase(std::remove_if(normalized.begin(), normalized.end(),
+                                    [](unsigned char c) { return std::isspace(c) != 0; }),
+                     normalized.end());
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+    uint64_t multiplier = 1;
+    if (normalized.size() >= 4 && normalized.substr(normalized.size() - 4) == "gbps")
+    {
+        multiplier = 1000000000ULL;
+        normalized = normalized.substr(0, normalized.size() - 4);
+    }
+    else if (normalized.size() >= 4 && normalized.substr(normalized.size() - 4) == "mbps")
+    {
+        multiplier = 1000000ULL;
+        normalized = normalized.substr(0, normalized.size() - 4);
+    }
+    else if (normalized.size() >= 4 && normalized.substr(normalized.size() - 4) == "kbps")
+    {
+        multiplier = 1000ULL;
+        normalized = normalized.substr(0, normalized.size() - 4);
+    }
+    else if (normalized.size() >= 3 && normalized.substr(normalized.size() - 3) == "bps")
+    {
+        multiplier = 1ULL;
+        normalized = normalized.substr(0, normalized.size() - 3);
+    }
+
+    try
+    {
+        const uint64_t value = static_cast<uint64_t>(std::stoull(normalized));
+        const uint64_t bps = value * multiplier;
+        m_baseGroundRateBps = bps;
+        m_baseIslRateBps = bps;
+    }
+    catch (const std::exception&)
+    {
+        NS_LOG_WARN("Failed to parse data rate for baseline bps: " << dataRate);
+    }
 }
 
 void
@@ -478,6 +533,120 @@ LeoSimDeviceInstaller::OnLinkStateChange(Ptr<Node> node1, Ptr<Node> node2, LeoSi
     // With pooled devices, all devices are already created and IP addresses assigned.
     // This callback just logs state changes for tracking purposes.
     // The routing layer will use available devices regardless of link state.
+}
+
+LeoSimLinkDirection
+LeoSimDeviceInstaller::InferDirection(Ptr<Node> nodeA, Ptr<Node> nodeB) const
+{
+    if (!m_operatorModel || !nodeA || !nodeB)
+    {
+        return LEOSIM_DIR_DOWNLINK;
+    }
+
+    const LeoSimNodeRole roleA = m_operatorModel->GetRole(nodeA->GetId());
+    const LeoSimNodeRole roleB = m_operatorModel->GetRole(nodeB->GetId());
+
+    if (roleA == LEOSIM_ROLE_SATELLITE && roleB == LEOSIM_ROLE_SATELLITE)
+    {
+        return LEOSIM_DIR_ISL;
+    }
+
+    if ((roleA == LEOSIM_ROLE_SATELLITE && roleB == LEOSIM_ROLE_UE) ||
+        (roleB == LEOSIM_ROLE_SATELLITE && roleA == LEOSIM_ROLE_UE))
+    {
+        return LEOSIM_DIR_DOWNLINK;
+    }
+
+    if ((roleA == LEOSIM_ROLE_SATELLITE && roleB == LEOSIM_ROLE_SERVER) ||
+        (roleB == LEOSIM_ROLE_SATELLITE && roleA == LEOSIM_ROLE_SERVER))
+    {
+        return LEOSIM_DIR_DOWNLINK;
+    }
+
+    return LEOSIM_DIR_DOWNLINK;
+}
+
+void
+LeoSimDeviceInstaller::ApplySharingRates(NetDeviceContainer& devices)
+{
+    NS_LOG_FUNCTION(this << devices.GetN());
+
+    if (!m_operatorModel)
+    {
+        NS_LOG_WARN("Operator model not set; skipping ApplySharingRates");
+        return;
+    }
+
+    for (uint32_t i = 0; i + 1 < devices.GetN(); i += 2)
+    {
+        Ptr<NetDevice> devA = devices.Get(i);
+        Ptr<NetDevice> devB = devices.Get(i + 1);
+        if (!devA || !devB)
+        {
+            continue;
+        }
+
+        Ptr<Node> nodeA = devA->GetNode();
+        Ptr<Node> nodeB = devB->GetNode();
+        if (!nodeA || !nodeB)
+        {
+            continue;
+        }
+
+        const LeoSimLinkDirection dir = InferDirection(nodeA, nodeB);
+
+        uint64_t effectiveRateBps = 1;
+        double alphaUsed = 1.0;
+
+        if (dir == LEOSIM_DIR_ISL)
+        {
+            alphaUsed = m_operatorModel->GetAlpha(nodeA->GetId(), nodeB->GetId(), LEOSIM_DIR_ISL);
+            effectiveRateBps = m_operatorModel->GetEffectiveDataRateBps(
+                nodeA->GetId(), nodeB->GetId(), m_baseIslRateBps, LEOSIM_DIR_ISL);
+        }
+        else
+        {
+            const double alphaDl =
+                m_operatorModel->GetAlpha(nodeA->GetId(), nodeB->GetId(), LEOSIM_DIR_DOWNLINK);
+            const double alphaUl =
+                m_operatorModel->GetAlpha(nodeA->GetId(), nodeB->GetId(), LEOSIM_DIR_UPLINK);
+
+            alphaUsed = std::min(alphaDl, alphaUl);
+
+            const uint64_t effDl = m_operatorModel->GetEffectiveDataRateBps(
+                nodeA->GetId(), nodeB->GetId(), m_baseGroundRateBps, LEOSIM_DIR_DOWNLINK);
+            const uint64_t effUl = m_operatorModel->GetEffectiveDataRateBps(
+                nodeA->GetId(), nodeB->GetId(), m_baseGroundRateBps, LEOSIM_DIR_UPLINK);
+            effectiveRateBps = std::min(effDl, effUl);
+        }
+
+        Ptr<PointToPointNetDevice> p2pA = DynamicCast<PointToPointNetDevice>(devA);
+        Ptr<PointToPointNetDevice> p2pB = DynamicCast<PointToPointNetDevice>(devB);
+        if (p2pA)
+        {
+            p2pA->SetDataRate(DataRate(effectiveRateBps));
+        }
+        if (p2pB)
+        {
+            p2pB->SetDataRate(DataRate(effectiveRateBps));
+        }
+
+        if (m_verbose)
+        {
+            NS_LOG_INFO("Sharing rate applied: nodes " << nodeA->GetId() << "(" << m_operatorModel->GetOperatorId(nodeA->GetId())
+                                                       << ") <-> " << nodeB->GetId() << "(" << m_operatorModel->GetOperatorId(nodeB->GetId())
+                                                       << "), alpha=" << alphaUsed
+                                                       << ", effectiveRate=" << (static_cast<double>(effectiveRateBps) / 1e6) << " Mbps");
+        }
+    }
+}
+
+void
+LeoSimDeviceInstaller::UpdateSharingRates(NetDeviceContainer& devices)
+{
+    NS_LOG_FUNCTION(this << devices.GetN());
+    NS_LOG_INFO("Updating sharing rates at t=" << Simulator::Now().GetSeconds());
+    ApplySharingRates(devices);
 }
 
 } // namespace ns3

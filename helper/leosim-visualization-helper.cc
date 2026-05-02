@@ -28,10 +28,85 @@
 
 #include <iomanip>
 #include <limits>
+#include <ios>
 #include <sstream>
 
 namespace ns3
 {
+
+namespace
+{
+std::string
+RoleToString(LeoSimNodeRole role)
+{
+    switch (role)
+    {
+    case LEOSIM_ROLE_SATELLITE:
+        return "SATELLITE";
+    case LEOSIM_ROLE_UE:
+        return "UE";
+    case LEOSIM_ROLE_SERVER:
+        return "SERVER";
+    case LEOSIM_ROLE_GATEWAY:
+        return "GATEWAY";
+    default:
+        return "UNKNOWN";
+    }
+}
+
+void
+AppendSharingRows(std::ofstream& stream,
+                  Ptr<LeoSimOperatorModel> model,
+                  const std::vector<LeoSimChannelModel::LinkSnapshot>& links,
+                  const std::string& defaultLinkType,
+                  LeoSimLinkDirection direction,
+                  double simTime,
+                  double baseRateMbps)
+{
+    for (const auto& link : links)
+    {
+        uint32_t nodeA = link.node1->GetId();
+        uint32_t nodeB = link.node2->GetId();
+        if (model->IsSameOperator(nodeA, nodeB))
+        {
+            continue;
+        }
+
+        std::string opA = model->GetOperatorId(nodeA);
+        std::string opB = model->GetOperatorId(nodeB);
+        LeoSimNodeRole roleA = model->GetRole(nodeA);
+        LeoSimNodeRole roleB = model->GetRole(nodeB);
+        std::string linkType = defaultLinkType;
+        LeoSimLinkDirection effectiveDirection = direction;
+
+        if (direction != LEOSIM_DIR_ISL)
+        {
+            const bool nodeASat = (roleA == LEOSIM_ROLE_SATELLITE);
+            const bool nodeBSat = (roleB == LEOSIM_ROLE_SATELLITE);
+            if (nodeASat && !nodeBSat)
+            {
+                linkType = "DOWNLINK";
+                effectiveDirection = LEOSIM_DIR_DOWNLINK;
+            }
+            else if (!nodeASat && nodeBSat)
+            {
+                linkType = "UPLINK";
+                effectiveDirection = LEOSIM_DIR_UPLINK;
+            }
+        }
+
+        double alphaDl = model->GetAlpha(nodeA, nodeB, LEOSIM_DIR_DOWNLINK);
+        double alphaUl = model->GetAlpha(nodeA, nodeB, LEOSIM_DIR_UPLINK);
+        double alphaIsl = model->GetAlpha(nodeA, nodeB, LEOSIM_DIR_ISL);
+        double effRateMbps = model->GetAlpha(nodeA, nodeB, effectiveDirection) * baseRateMbps;
+
+        stream << std::fixed << std::setprecision(3);
+        stream << simTime << ',' << nodeA << ',' << nodeB << ',' << opA << ',' << opB << ','
+               << linkType << ',' << alphaDl << ',' << alphaUl << ',' << alphaIsl << ','
+               << effRateMbps << std::endl;
+    }
+}
+} // namespace
 
 NS_LOG_COMPONENT_DEFINE("LeoSimVisualizationHelper");
 
@@ -42,6 +117,8 @@ LeoSimVisualizationHelper::LeoSimVisualizationHelper()
       m_beamFile("leosim_beams_multibeam.csv"),
       m_handoverFile("leosim_handovers.csv"),
       m_choFile("leosim_cho.csv"),
+    m_operatorFile("leosim_operators.csv"),
+    m_sharingFile("leosim_sharing.csv"),
       m_loaderHelper(nullptr),
       m_channelModel(nullptr),
       m_islChannelModel(nullptr),
@@ -838,6 +915,106 @@ void
 LeoSimVisualizationHelper::SetChoFile(const std::string& filename)
 {
     m_choFile = filename;
+}
+
+void
+LeoSimVisualizationHelper::SetOperatorFile(const std::string& filename)
+{
+    m_operatorFile = filename;
+}
+
+void
+LeoSimVisualizationHelper::SetSharingFile(const std::string& filename)
+{
+    m_sharingFile = filename;
+}
+
+void
+LeoSimVisualizationHelper::InitOperatorLogging(Ptr<LeoSimOperatorModel> model,
+                                               const NodeContainer& allNodes)
+{
+    if (!model)
+    {
+        NS_LOG_WARN("Operator model not set; skipping operator CSV initialization");
+        return;
+    }
+
+    std::ofstream operatorStream(m_operatorFile, std::ios::out | std::ios::trunc);
+    if (!operatorStream.is_open())
+    {
+        NS_LOG_ERROR("Could not open operator file: " << m_operatorFile);
+        return;
+    }
+
+    operatorStream << "node_id,node_name,role,operator_id" << std::endl;
+    for (uint32_t i = 0; i < allNodes.GetN(); ++i)
+    {
+        Ptr<Node> node = allNodes.Get(i);
+        if (!node)
+        {
+            continue;
+        }
+
+        uint32_t nodeId = node->GetId();
+        std::string nodeName = Names::FindName(node);
+        LeoSimNodeRole role = model->GetRole(nodeId);
+        operatorStream << nodeId << ',' << nodeName << ',' << RoleToString(role) << ','
+                       << model->GetOperatorId(nodeId) << std::endl;
+    }
+}
+
+void
+LeoSimVisualizationHelper::LogSharingState(Ptr<LeoSimOperatorModel> model,
+                                           Ptr<LeoSimChannelModel> channelModel,
+                                           Ptr<LeoSimChannelModel> islChannelModel,
+                                           double simTime)
+{
+    if (!model)
+    {
+        NS_LOG_WARN("Operator model not set; skipping sharing-state logging");
+        return;
+    }
+
+    std::ifstream existingStream(m_sharingFile);
+    const bool needsHeader = !existingStream.good() || existingStream.peek() == std::ifstream::traits_type::eof();
+    existingStream.close();
+
+    std::ofstream sharingStream(m_sharingFile, std::ios::out | std::ios::app);
+    if (!sharingStream.is_open())
+    {
+        NS_LOG_ERROR("Could not open sharing file: " << m_sharingFile);
+        return;
+    }
+
+    if (needsHeader)
+    {
+        sharingStream << "time,node_a,node_b,op_a,op_b,link_type,alpha_dl,alpha_ul,alpha_isl,eff_rate_mbps"
+                      << std::endl;
+    }
+
+    if (channelModel)
+    {
+        auto groundLinks = channelModel->GetLinksByType(LEOSIM_LINK_SATELLITE_TO_GROUND, true);
+        AppendSharingRows(sharingStream,
+                          model,
+                          groundLinks,
+                          "DOWNLINK",
+                          LEOSIM_DIR_DOWNLINK,
+                          simTime,
+                          100.0);
+    }
+
+    if (islChannelModel)
+    {
+        auto islLinks = islChannelModel->GetLinksByType(LEOSIM_LINK_ISL, false);
+        AppendSharingRows(sharingStream,
+                          model,
+                          islLinks,
+                          "ISL",
+                          LEOSIM_DIR_ISL,
+                          simTime,
+                          10000.0);
+    }
 }
 
 void

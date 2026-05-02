@@ -22,6 +22,8 @@ build_lib(
     helper/leosim-visualization-helper.cc
     helper/leosim-device-installer.cc
     helper/leosim-traffic-generator-helper.cc
+    model/leosim-operator-model.cc
+    helper/leosim-operator-helper.cc
     
   HEADER_FILES
     model/leosim.h
@@ -46,6 +48,8 @@ build_lib(
     helper/leosim-visualization-helper.h
     helper/leosim-device-installer.h
     helper/leosim-traffic-generator-helper.h
+    model/leosim-operator-model.h
+    helper/leosim-operator-helper.h
     
   LIBRARIES_TO_LINK
     ${libcore}

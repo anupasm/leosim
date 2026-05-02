@@ -1,0 +1,10 @@
+# Assigns each satellite to an operator.
+# SatelliteIndex matches the zero-based index in the satellite mobility file.
+# Operator string must match entries in sharing_matrix.csv.
+SatelliteIndex,Operator
+0,OpA
+1,OpA
+2,OpA
+3,OpB
+4,OpB
+5,OpB

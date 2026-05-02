@@ -35,6 +35,7 @@
 #include <cmath>
 #include <iomanip>
 #include <limits>
+#include <numeric>
 
 namespace ns3
 {
@@ -136,6 +137,13 @@ LeoSimBeamManager::SetLoader(Ptr<LeoSimLoader> loader)
 {
     NS_LOG_FUNCTION(this << loader);
     m_loader = loader;
+}
+
+void
+LeoSimBeamManager::SetOperatorModel(Ptr<LeoSimOperatorModel> model)
+{
+    NS_LOG_FUNCTION(this << model);
+    m_operatorModel = model;
 }
 
 void
@@ -249,10 +257,11 @@ LeoSimBeamManager::SetTopsisWeights(double wRsrp,
                                      double wLoad,
                                      double wLatency,
                                      double wElevation,
-                                     double wActive)
+                                     double wActive,
+                                     double wOperatorCompat)
 {
     NS_LOG_FUNCTION(this << wRsrp << wSinr << wTte << wLoad << wLatency << wElevation
-                         << wActive);
+                         << wActive << wOperatorCompat);
     m_topsisWeights[0] = wRsrp;
     m_topsisWeights[1] = wSinr;
     m_topsisWeights[2] = wTte;
@@ -260,11 +269,12 @@ LeoSimBeamManager::SetTopsisWeights(double wRsrp,
     m_topsisWeights[4] = wLatency;
     m_topsisWeights[5] = wElevation;
     m_topsisWeights[6] = wActive;
+    m_topsisWeights[7] = wOperatorCompat;
     
     NS_LOG_DEBUG("TOPSIS weights: RSRP=" << wRsrp << " SINR=" << wSinr << " TTE=" << wTte
                                          << " Load=" << wLoad << " Latency=" << wLatency
                                          << " Elevation=" << wElevation << " Active="
-                                         << wActive);
+                                         << wActive << " OperatorCompat=" << wOperatorCompat);
 }
 
 void
@@ -859,6 +869,30 @@ LeoSimBeamManager::ScanVisibleSatellites(uint32_t ueNodeId)
         }
     }
 
+    if (m_operatorModel)
+    {
+        const std::size_t beforeCount = visibleBeams.size();
+        visibleBeams.erase(
+            std::remove_if(
+                visibleBeams.begin(),
+                visibleBeams.end(),
+                [&](const LeoSimBeamRecord& c) {
+                    double alpha = m_operatorModel->GetAlpha(
+                        ueNodeId,
+                        c.satelliteNodeId,
+                        LEOSIM_DIR_DOWNLINK);
+                    return alpha == 0.0;
+                }),
+            visibleBeams.end());
+
+        const std::size_t removed = beforeCount - visibleBeams.size();
+        if (m_verbose && removed > 0)
+        {
+            NS_LOG_INFO("[BeamMgr] Filtered out " << removed << " candidates with alpha=0"
+                                                   << " for UE " << ueNodeId);
+        }
+    }
+
     NS_LOG_INFO("Found " << visibleBeams.size() << " visible beams for UE " << ueNodeId);
     return visibleBeams;
 }
@@ -883,21 +917,17 @@ LeoSimBeamManager::RankByTopsis(const std::vector<LeoSimBeamRecord>& candidates,
     }
 
     // Validate TOPSIS weights sum to approximately 1.0
-    double weightSum = 0.0;
-    for (double w : m_topsisWeights)
-    {
-        weightSum += w;
-    }
+    double weightSum = std::accumulate(m_topsisWeights.begin(), m_topsisWeights.end(), 0.0);
     NS_ASSERT_MSG(std::abs(weightSum - 1.0) < 0.01,
                   "TOPSIS weights must sum to ~1.0, got " << weightSum);
-    NS_ASSERT_MSG(m_topsisWeights.size() == 7,
-                  "TOPSIS weights array must have exactly 7 elements, got " << m_topsisWeights.size());
+    NS_ASSERT_MSG(m_topsisWeights.size() == 8,
+                  "TOPSIS weights array must have exactly 8 elements, got " << m_topsisWeights.size());
 
-    const size_t numCriteria = 7;
+    const size_t numCriteria = 8;
     const size_t numCandidates = candidates.size();
 
-    // --- TOPSIS Algorithm (7-Attribute Version) ---
-    // Step 1: Build decision matrix (numCandidates x 7)
+    // --- TOPSIS Algorithm (8-Attribute Version) ---
+    // Step 1: Build decision matrix (8 criteria x numCandidates)
     // Criteria (all benefit - higher is better):
     //   [0] RSRP (dBm)
     //   [1] SINR (dB)
@@ -906,44 +936,51 @@ LeoSimBeamManager::RankByTopsis(const std::vector<LeoSimBeamRecord>& candidates,
     //   [4] 1.0 / endToEndLatency (inverse of ms)
     //   [5] Elevation angle (degrees)
     //   [6] beamActive binary (1.0 if active, 0.0 if dark)
-    std::vector<std::vector<double>> decisionMatrix(numCandidates, std::vector<double>(numCriteria));
-    std::vector<double> sumSquares(numCriteria, 0.0);
+    //   [7] operator compatibility (1.0 same-op, alpha if cross-op)
+    std::array<std::vector<double>, 8> A;
+    std::array<double, 8> sumSquares{};
 
     for (size_t i = 0; i < numCandidates; i++)
     {
         const auto& candidate = candidates[i];
 
         // Criterion 0: RSRP (benefit - higher is better)
-        decisionMatrix[i][0] = std::max(candidate.rsrp, -200.0); // Cap at -200 dBm minimum
+        A[0].push_back(std::max(candidate.rsrp, -200.0)); // Cap at -200 dBm minimum
 
         // Criterion 1: SINR in dB (benefit - higher is better)
         // Replace SNR with per-beam SINR from SINR engine
-        decisionMatrix[i][1] = std::max(candidate.sinr, -20.0); // Cap at -20 dB minimum
+        A[1].push_back(std::max(candidate.sinr, -20.0)); // Cap at -20 dB minimum
 
         // Criterion 2: TTE in seconds (benefit - longer is better)
-        decisionMatrix[i][2] = candidate.remainingServiceTime;
+        A[2].push_back(candidate.remainingServiceTime);
 
         // Criterion 3: Inverse of per-beam load (benefit - lower load is better)
         // beamLoad is the UE count on this specific beam
-        decisionMatrix[i][3] = (candidate.beamLoad > 0.001)
-                                   ? (1.0 / candidate.beamLoad)
-                                   : 100.0;
+        A[3].push_back((candidate.beamLoad > 0.001) ? (1.0 / candidate.beamLoad) : 100.0);
 
         // Criterion 4: Inverse of end-to-end latency in ms (benefit - lower is better)
-        decisionMatrix[i][4] = (candidate.endToEndLatency > 0.1)
-                                   ? (1.0 / candidate.endToEndLatency)
-                                   : 100.0;
+        A[4].push_back((candidate.endToEndLatency > 0.1) ? (1.0 / candidate.endToEndLatency)
+                                  : 100.0);
 
         // Criterion 5: Elevation angle in degrees (benefit - higher coverage is better)
-        decisionMatrix[i][5] = std::max(candidate.elevationAngle, 0.0);
+        A[5].push_back(std::max(candidate.elevationAngle, 0.0));
 
         // Criterion 6: Beam active binary (benefit - active is better)
-        decisionMatrix[i][6] = candidate.beamActive ? 1.0 : 0.0;
+        A[6].push_back(candidate.beamActive ? 1.0 : 0.0);
+
+        // Criterion 7: operator compatibility (1.0 same-op, alpha if cross-op)
+        double opScore = m_operatorModel
+                             ? m_operatorModel->GetAlpha(ueNodeId,
+                                                         candidate.satelliteNodeId,
+                                                         LEOSIM_DIR_DOWNLINK)
+                             : 1.0;
+        A[7].push_back(opScore);
 
         // Compute sum of squares for normalization
         for (size_t j = 0; j < numCriteria; j++)
         {
-            sumSquares[j] += decisionMatrix[i][j] * decisionMatrix[i][j];
+            double value = A[j].back();
+            sumSquares[j] += value * value;
         }
 
         NS_LOG_DEBUG("Candidate sat=" << candidate.satelliteNodeId << " beam="
@@ -956,45 +993,45 @@ LeoSimBeamManager::RankByTopsis(const std::vector<LeoSimBeamRecord>& candidates,
     }
 
     // Step 2: Normalize decision matrix by L2 norm (column-wise)
-    std::vector<std::vector<double>> normalizedMatrix(numCandidates,
-                                                      std::vector<double>(numCriteria));
+    std::array<std::vector<double>, 8> N;
     for (size_t i = 0; i < numCandidates; i++)
     {
         for (size_t j = 0; j < numCriteria; j++)
         {
             if (sumSquares[j] > 0)
             {
-                normalizedMatrix[i][j] = decisionMatrix[i][j] / std::sqrt(sumSquares[j]);
+                N[j].push_back(A[j][i] / std::sqrt(sumSquares[j]));
             }
             else
             {
-                normalizedMatrix[i][j] = 0.0;
+                N[j].push_back(0.0);
             }
         }
     }
 
     // Step 3: Apply weights to normalized matrix
-    std::vector<std::vector<double>> weightedMatrix(numCandidates,
-                                                    std::vector<double>(numCriteria));
+    std::array<std::vector<double>, 8> W;
     for (size_t i = 0; i < numCandidates; i++)
     {
         for (size_t j = 0; j < numCriteria; j++)
         {
-            weightedMatrix[i][j] = normalizedMatrix[i][j] * m_topsisWeights[j];
+            W[j].push_back(N[j][i] * m_topsisWeights[j]);
         }
     }
 
     // Step 4: Determine ideal solution V+ and anti-ideal solution V-
     // All criteria are benefit criteria (higher is better)
-    std::vector<double> idealSolution(numCriteria, -1e99);
-    std::vector<double> antiIdealSolution(numCriteria, 1e99);
+    std::array<double, 8> Vpos;
+    std::array<double, 8> Vneg;
+    Vpos.fill(-1e99);
+    Vneg.fill(1e99);
 
     for (size_t j = 0; j < numCriteria; j++)
     {
         for (size_t i = 0; i < numCandidates; i++)
         {
-            idealSolution[j] = std::max(idealSolution[j], weightedMatrix[i][j]);
-            antiIdealSolution[j] = std::min(antiIdealSolution[j], weightedMatrix[i][j]);
+            Vpos[j] = std::max(Vpos[j], W[j][i]);
+            Vneg[j] = std::min(Vneg[j], W[j][i]);
         }
     }
 
@@ -1006,8 +1043,8 @@ LeoSimBeamManager::RankByTopsis(const std::vector<LeoSimBeamRecord>& candidates,
     {
         for (size_t j = 0; j < numCriteria; j++)
         {
-            double diff_ideal = weightedMatrix[i][j] - idealSolution[j];
-            double diff_antiIdeal = weightedMatrix[i][j] - antiIdealSolution[j];
+            double diff_ideal = W[j][i] - Vpos[j];
+            double diff_antiIdeal = W[j][i] - Vneg[j];
 
             separationFromIdeal[i] += diff_ideal * diff_ideal;
             separationFromAntiIdeal[i] += diff_antiIdeal * diff_antiIdeal;

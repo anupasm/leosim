@@ -22,6 +22,7 @@
 #include "ns3/node-list.h"
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 
 namespace ns3
@@ -42,6 +43,7 @@ LeoSimRoutingCalculator::GetTypeId()
 
 LeoSimRoutingCalculator::LeoSimRoutingCalculator()
     : m_verbose(false),
+      m_defaultPathType(LEOSIM_PATH_ANY),
       m_topologyCacheTTL(Seconds(0.1))
 {
     NS_LOG_FUNCTION(this);
@@ -79,6 +81,20 @@ LeoSimRoutingCalculator::GetIslChannelModel() const
 }
 
 void
+LeoSimRoutingCalculator::SetOperatorModel(Ptr<LeoSimOperatorModel> model)
+{
+    NS_LOG_FUNCTION(this << model);
+    m_operatorModel = model;
+}
+
+void
+LeoSimRoutingCalculator::SetPathType(PathType pathType)
+{
+    NS_LOG_FUNCTION(this << pathType);
+    m_defaultPathType = pathType;
+}
+
+void
 LeoSimRoutingCalculator::SetVerbose(bool verbose)
 {
     NS_LOG_FUNCTION(this << verbose);
@@ -92,6 +108,13 @@ LeoSimRoutingCalculator::ComputeRoute(Ptr<Node> source,
                                        PathType pathType)
 {
     NS_LOG_FUNCTION(this << source << destination << metric << pathType);
+
+    // Apply the instance-level default when caller passes LEOSIM_PATH_ANY
+    // but a stricter default has been configured via SetPathType.
+    if (pathType == LEOSIM_PATH_ANY && m_defaultPathType != LEOSIM_PATH_ANY)
+    {
+        pathType = m_defaultPathType;
+    }
 
     if (!m_channelModel)
     {
@@ -541,6 +564,13 @@ LeoSimRoutingCalculator::IsLinkAllowed(Ptr<Node> source, Ptr<Node> destination, 
         return quality.linkType == LEOSIM_LINK_SATELLITE_TO_GROUND;
     }
 
+    // LEOSIM_PATH_SAME_OPERATOR_ONLY: link type is unrestricted; operator check is
+    // handled separately in DijkstrasAlgorithm, so allow the link here.
+    if (pathType == LEOSIM_PATH_SAME_OPERATOR_ONLY)
+    {
+        return true;
+    }
+
     return false;
 }
 
@@ -554,6 +584,26 @@ LeoSimRoutingCalculator::MeetsSnrConstraint(Ptr<Node> source, Ptr<Node> destinat
 
     LeoSimChannelQuality quality = m_channelModel->GetChannelQuality(source, destination);
     return quality.snr >= minSnr;
+}
+
+double
+LeoSimRoutingCalculator::GetEdgeWeight(uint32_t nodeA,
+                                       uint32_t nodeB,
+                                       LeoSimLinkDirection dir,
+                                       double baseCost) const
+{
+    if (!m_operatorModel)
+    {
+        return baseCost;
+    }
+
+    const double multiplier = m_operatorModel->GetRoutingCostMultiplier(nodeA, nodeB, dir);
+    if (multiplier > 1e5)
+    {
+        return std::numeric_limits<double>::infinity();
+    }
+
+    return baseCost * multiplier;
 }
 
 LeoSimRoute
@@ -632,6 +682,12 @@ LeoSimRoutingCalculator::DijkstrasAlgorithm(Ptr<Node> source,
                     continue;
                 }
 
+                if (pathType == LEOSIM_PATH_SAME_OPERATOR_ONLY && m_operatorModel &&
+                    !m_operatorModel->IsSameOperator(current->GetId(), neighbor->GetId()))
+                {
+                    continue;
+                }
+
                 if (!IsLinkAllowed(current, neighbor, pathType))
                 {
                     continue;
@@ -642,7 +698,35 @@ LeoSimRoutingCalculator::DijkstrasAlgorithm(Ptr<Node> source,
                     continue;
                 }
 
-                double linkMetric = GetLinkMetricValue(current, neighbor, metric);
+                const double baseLinkCost = GetLinkMetricValue(current, neighbor, metric);
+                LeoSimLinkDirection dir = LEOSIM_DIR_DOWNLINK;
+
+                if (m_operatorModel)
+                {
+                    const LeoSimNodeRole currentRole = m_operatorModel->GetRole(current->GetId());
+                    const LeoSimNodeRole neighborRole = m_operatorModel->GetRole(neighbor->GetId());
+                    if (currentRole == LEOSIM_ROLE_SATELLITE &&
+                        neighborRole == LEOSIM_ROLE_SATELLITE)
+                    {
+                        dir = LEOSIM_DIR_ISL;
+                    }
+                }
+                else
+                {
+                    LeoSimChannelQuality quality = GetLinkQuality(current, neighbor);
+                    if (quality.linkType == LEOSIM_LINK_ISL)
+                    {
+                        dir = LEOSIM_DIR_ISL;
+                    }
+                }
+
+                const double linkMetric =
+                    GetEdgeWeight(current->GetId(), neighbor->GetId(), dir, baseLinkCost);
+                if (std::isinf(linkMetric))
+                {
+                    continue;
+                }
+
                 double newDistance = distances[current] + linkMetric;
 
                 if (newDistance < distances[neighbor])

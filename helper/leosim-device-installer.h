@@ -19,6 +19,7 @@
 #define LEOSIM_DEVICE_INSTALLER_H
 
 #include "ns3/leosim-channel-model.h"
+#include "ns3/leosim-operator-model.h"
 #include "ns3/net-device-container.h"
 #include "ns3/node-container.h"
 #include "ns3/ptr.h"
@@ -72,6 +73,12 @@ class LeoSimDeviceInstaller
      * \param channelModel Pointer to LeoSimChannelModel
      */
     void SetChannelModel(Ptr<LeoSimChannelModel> channelModel);
+
+    /**
+     * \brief Set the operator model used for sharing-aware rate enforcement.
+     * \param model Pointer to LeoSimOperatorModel
+     */
+    void SetOperatorModel(Ptr<LeoSimOperatorModel> model);
 
     /**
      * \brief Set data rate for installed devices
@@ -194,6 +201,25 @@ class LeoSimDeviceInstaller
      */
     void EnableLinkStateCallbacks(Ptr<LeoSimChannelModel> channelModel);
 
+    /**
+     * \brief Apply operator-sharing adjusted data rates to installed devices.
+     *
+     * Iterates over point-to-point device pairs and applies alpha-weighted
+     * rates using the configured operator sharing model.
+     *
+     * \param devices Container of devices to update
+     */
+    void ApplySharingRates(NetDeviceContainer& devices);
+
+    /**
+     * \brief Re-apply sharing-aware rates without reinstalling devices.
+     *
+     * This can be used for dynamic renegotiation at runtime.
+     *
+     * \param devices Container of devices to update
+     */
+    void UpdateSharingRates(NetDeviceContainer& devices);
+
   private:
     /**
      * \brief Install point-to-point devices for a single link
@@ -222,6 +248,15 @@ class LeoSimDeviceInstaller
      * \param newState New state of the link
      */
     void OnLinkStateChange(Ptr<Node> node1, Ptr<Node> node2, LeoSimLinkState newState);
+
+    /**
+     * \brief Infer logical link direction from node roles.
+     * \param nodeA First node
+     * \param nodeB Second node
+     * \return Inferred LeoSimLinkDirection
+     */
+    LeoSimLinkDirection InferDirection(Ptr<Node> nodeA, Ptr<Node> nodeB) const;
+
   private:
     /**
      * \brief Create a unique key for a node pair
@@ -233,11 +268,14 @@ class LeoSimDeviceInstaller
 
     // Channel model
     Ptr<LeoSimChannelModel> m_channelModel; //!< Pointer to channel model
+    Ptr<LeoSimOperatorModel> m_operatorModel; //!< Operator model for sharing-aware rates
 
     // Device configuration
     std::string m_dataRate;  //!< Data rate for devices
     std::string m_delay;     //!< Propagation delay for devices
     uint32_t m_mtu;          //!< MTU size for devices
+    uint64_t m_baseGroundRateBps = 100000000; //!< Baseline ground-link rate (100 Mbps)
+    uint64_t m_baseIslRateBps = 10000000000; //!< Baseline ISL rate (10 Gbps)
     bool m_verbose;          //!< Verbose logging
     uint32_t m_numInstalledDevices;                         //!< Count of installed devices
     uint32_t m_devicesPerNode; //!< Number of devices to allocate per node

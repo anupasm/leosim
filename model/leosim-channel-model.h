@@ -18,6 +18,8 @@
 #ifndef LEOSIM_CHANNEL_MODEL_H
 #define LEOSIM_CHANNEL_MODEL_H
 
+#include "leosim-operator-model.h"
+
 #include "ns3/object.h"
 #include "ns3/ptr.h"
 #include "ns3/node.h"
@@ -63,6 +65,7 @@ struct LeoSimChannelQuality
     double elevationAngle;     //!< Elevation angle from ground node (degrees)
     double signalStrength;     //!< Received signal strength (dBm)
     double snr;                //!< Signal-to-noise ratio (dB)
+    uint32_t peerNodeId;       //!< Peer node ID for node-scoped link queries
     LeoSimLinkState linkState; //!< Current link state
     LeoSimLinkType linkType;   //!< Link type (ground or ISL)
     Time lastUpdate;           //!< Time of last update
@@ -376,12 +379,36 @@ class LeoSimChannelModel : public Object
     std::vector<LinkSnapshot> GetLinksByType(LeoSimLinkType linkType, bool includeDown) const;
 
     /**
+     * \brief Set the operator model used for sharing-aware queries
+     * \param model Operator model instance
+     */
+    void SetOperatorModel(Ptr<LeoSimOperatorModel> model);
+
+    /**
+     * \brief Get operator identifier for a node
+     * \param nodeId Node identifier
+     * \return Operator ID, or "unknown" when no operator model is configured
+     */
+    LeoSimOperatorId GetOperatorId(uint32_t nodeId) const;
+
+    /**
+     * \brief Get sharing alpha between two nodes for a direction
+     * \param nodeA First node identifier
+     * \param nodeB Second node identifier
+     * \param dir Link direction
+     * \return Alpha in [0,1], or 1.0 when no operator model is configured
+     */
+    double GetAlpha(uint32_t nodeA, uint32_t nodeB, LeoSimLinkDirection dir) const;
+
+    /**
      * \brief Get all link quality records for a node with UP or DEGRADED state
      * \param nodeId Node identifier
+     * \param filterBySharing When true, remove links blocked by sharing (alpha == 0.0)
      * \return Vector of LeoSimChannelQuality records for links connected to this node
      *         where link state is UP or DEGRADED
      */
-    std::vector<LeoSimChannelQuality> GetLinksForNode(uint32_t nodeId) const;
+    std::vector<LeoSimChannelQuality> GetLinksForNode(uint32_t nodeId,
+                                                      bool filterBySharing = false) const;
 
     /**
      * \brief Get link quality information for a specific node pair
@@ -475,6 +502,7 @@ class LeoSimChannelModel : public Object
     double m_islTransmitPower;      //!< ISL transmit power (dBm)
     double m_islAntennaGain;        //!< ISL antenna gain (dB)
     double m_islFrequency;          //!< ISL frequency (Hz)
+    Ptr<LeoSimOperatorModel> m_operatorModel; //!< Optional operator sharing model
 
     // Update scheduling
     EventId m_updateEvent;          //!< Scheduled update event

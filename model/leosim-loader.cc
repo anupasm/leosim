@@ -18,6 +18,7 @@
 #include "leosim-loader.h"
 
 #include "ns3/constant-position-mobility-model.h"
+#include "ns3/fatal-error.h"
 #include "ns3/log.h"
 #include "ns3/names.h"
 #include "ns3/simulator.h"
@@ -374,6 +375,7 @@ LeoSimLoader::LoadGroundDevicesFromCsvInternal(const std::string& filename,
     int latitudeIndex = findIndex({"latitude_deg", "latitude", "lat"});
     int longitudeIndex = findIndex({"longitude_deg", "longitude", "lon", "lng"});
     int altitudeIndex = findIndex({"altitude_m", "altitude", "alt"});
+    int operatorIndex = findIndex({"operator"});
     int xIndex = findIndex({"x_m", "x"});
     int yIndex = findIndex({"y_m", "y"});
     int zIndex = findIndex({"z_m", "z"});
@@ -383,6 +385,7 @@ LeoSimLoader::LoadGroundDevicesFromCsvInternal(const std::string& filename,
     if (clearExisting)
     {
         m_groundDevices.clear();
+        m_groundDeviceOperators.clear();
     }
 
     while (std::getline(file, line))
@@ -453,6 +456,24 @@ LeoSimLoader::LoadGroundDevicesFromCsvInternal(const std::string& filename,
             device.isGeodetic = false;
         }
 
+        // Optional 7th column: Operator
+        LeoSimOperatorId operatorToken = "default";
+        if (operatorIndex >= 0)
+        {
+            const size_t opIndex = static_cast<size_t>(operatorIndex);
+            if (fields.size() > opIndex && !fields[opIndex].empty())
+            {
+                operatorToken = fields[opIndex];
+            }
+        }
+        else if (fields.size() > 6 && !fields[6].empty())
+        {
+            operatorToken = fields[6];
+        }
+
+        m_groundDeviceOperators[device.deviceId] = operatorToken;
+        NS_LOG_DEBUG("Ground device " << device.deviceId << " assigned to operator " << operatorToken);
+
         m_groundDevices[device.deviceId] = device;
     }
 
@@ -507,6 +528,72 @@ LeoSimLoader::GetGroundDeviceType(uint32_t deviceId) const
         return it->second.deviceType;
     }
     return "";
+}
+
+LeoSimOperatorId
+LeoSimLoader::GetGroundDeviceOperator(uint32_t deviceId) const
+{
+    return m_groundDeviceOperators.count(deviceId) ? m_groundDeviceOperators.at(deviceId) : "default";
+}
+
+LeoSimOperatorId
+LeoSimLoader::GetSatelliteOperator(uint32_t satId) const
+{
+    return m_satelliteOperators.count(satId) ? m_satelliteOperators.at(satId) : "default";
+}
+
+void
+LeoSimLoader::LoadSatelliteOperatorsFromCsv(const std::string& csvFile)
+{
+    NS_LOG_FUNCTION(this << csvFile);
+
+    std::ifstream file(csvFile);
+    if (!file.is_open())
+    {
+        NS_FATAL_ERROR("Failed to open satellite operators CSV: " << csvFile);
+    }
+
+    m_satelliteOperators.clear();
+
+    std::string line;
+    while (std::getline(file, line))
+    {
+        const auto firstContent = line.find_first_not_of(" \t\r");
+        if (firstContent == std::string::npos || line[firstContent] == '#')
+        {
+            continue;
+        }
+
+        auto fields = ParseCsvLine(line);
+        if (fields.size() < 2)
+        {
+            continue;
+        }
+
+        std::string firstToken = fields[0];
+        std::transform(firstToken.begin(), firstToken.end(), firstToken.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+        if (firstToken == "satelliteindex" || firstToken == "index")
+        {
+            continue;
+        }
+
+        uint32_t satIndex = 0;
+        try
+        {
+            satIndex = std::stoul(fields[0]);
+        }
+        catch (const std::exception&)
+        {
+            NS_FATAL_ERROR("Invalid satellite index in " << csvFile << ": " << fields[0]);
+        }
+
+        m_satelliteOperators[satIndex] = fields[1];
+    }
+
+    NS_LOG_INFO("Loaded " << m_satelliteOperators.size() << " satellite operator assignments from "
+                           << csvFile);
 }
 
 std::vector<uint32_t>
