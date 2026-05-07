@@ -23,6 +23,7 @@
 #include "ns3/leosim-channel-model.h"
 #include "ns3/leosim-beam-manager.h"
 #include "ns3/leosim-operator-model.h"
+#include "ns3/leosim-weather-model.h"
 #include "ns3/node-container.h"
 
 #include <fstream>
@@ -229,6 +230,48 @@ class LeoSimVisualizationHelper
      */
     void FinalizeBeamLogging();
 
+    /**
+     * \brief Set the output file for per-node weather state data
+     * \param filename Path to weather CSV file
+     */
+    void SetWeatherFile(const std::string& filename);
+
+    /**
+     * \brief Set the output file for per-link attenuation breakdown data
+     * \param filename Path to attenuation CSV file
+     */
+    void SetAttenuationFile(const std::string& filename);
+
+    /**
+     * \brief Write CSV headers for weather and attenuation log files
+     *
+     * Must be called once before the simulation starts (before Simulator::Run()).
+     * Opens both files in truncate mode and writes their respective header rows.
+     */
+    void InitWeatherLogging();
+
+    /**
+     * \brief Append one row per ground node to leosim_weather.csv
+     * \param model Weather model used to query state and parameters
+     * \param groundNodes Container of all ground nodes to log
+     * \param simTime Current simulation time (seconds) for the timestamp column
+     */
+    void LogWeatherState(Ptr<LeoSimWeatherModel> model,
+                         const NodeContainer& groundNodes,
+                         double simTime);
+
+    /**
+     * \brief Append one row per active UE-satellite link to leosim_attenuation.csv
+     * \param channelModel Ground channel model used to iterate active links
+     * \param ueNodes Container of UE nodes
+     * \param satNodes Container of satellite nodes (unused; reserved for future use)
+     * \param simTime Current simulation time (seconds) for the timestamp column
+     */
+    void LogAttenuationState(Ptr<LeoSimChannelModel> channelModel,
+                              const NodeContainer& ueNodes,
+                              const NodeContainer& satNodes,
+                              double simTime);
+
   private:
     /**
      * \brief Log a single node position
@@ -285,6 +328,8 @@ class LeoSimVisualizationHelper
     std::string m_choFile;
     std::string m_operatorFile;
     std::string m_sharingFile;
+    std::string m_weatherFile;
+    std::string m_attenuationFile;
     std::ofstream m_posFile;
     std::ofstream m_linkFileStream;
     std::ofstream m_packetFileStream;

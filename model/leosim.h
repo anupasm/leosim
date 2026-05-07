@@ -46,7 +46,9 @@
 #include "leosim-routing-calculator.h"
 #include "leosim-sinr-engine.h"
 #include "leosim-operator-model.h"
+#include "leosim-weather-model.h"
 
 #include "../helper/leosim-operator-helper.h"
+#include "../helper/leosim-weather-helper.h"
 
 #endif /* LEOSIM_H */

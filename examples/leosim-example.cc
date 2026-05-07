@@ -35,6 +35,7 @@
 #include "ns3/leosim-routing-calculator.h"
 #include "ns3/leosim-traffic-generator-helper.h"
 #include "ns3/leosim-visualization-helper.h"
+#include "ns3/leosim-weather-helper.h"
 #include "ns3/mobility-module.h"
 #include "ns3/network-module.h"
 #include "ns3/output-stream-wrapper.h"
@@ -114,6 +115,14 @@ main(int argc, char* argv[])
     std::string sharingMatrixFile = "";
     double defaultAlpha = 1.0;
     bool operatorIsolation = false;
+
+    // === Weather Model ===
+    std::string weatherTrace = "";
+    std::string weatherMarkov = "";
+    std::string initialWeather = "CLEAR";
+    double rainFadeThreshold = 10.0;
+    double weatherHoThreshold = 15.0;
+    bool enableWeather = false;
 
     CommandLine cmd;
     cmd.AddValue("satellites", "Path to satellite position file", satelliteFile);
@@ -196,6 +205,21 @@ main(int argc, char* argv[])
     cmd.AddValue("operatorIsolation",
                  "If true, routes never cross operator boundaries",
                  operatorIsolation);
+
+    cmd.AddValue("weatherTrace", "Per-node weather time series CSV", weatherTrace);
+    cmd.AddValue("weatherMarkov", "Markov transition matrix CSV", weatherMarkov);
+    cmd.AddValue("initialWeather",
+                 "Initial weather state for all nodes: CLEAR|CLOUDY|LIGHT_RAIN|HEAVY_RAIN",
+                 initialWeather);
+    cmd.AddValue("rainFadeThreshold",
+                 "Rain fade degradation threshold (dB)",
+                 rainFadeThreshold);
+    cmd.AddValue("weatherHoThresh",
+                 "Weather fade handover trigger threshold (dB)",
+                 weatherHoThreshold);
+    cmd.AddValue("enableWeather",
+                 "Enable atmospheric weather attenuation model",
+                 enableWeather);
     cmd.Parse(argc, argv);
 
     Time::SetResolution(Time::NS);
@@ -376,6 +400,56 @@ main(int argc, char* argv[])
     channelModel->SetOperatorModel(operatorModel);
 
     channelModel->StartUpdates();
+
+    // Optional weather model wiring
+    Ptr<LeoSimWeatherModel> weatherModel;
+    if (enableWeather)
+    {
+        LeoSimWeatherHelper weatherHelper;
+        weatherHelper.SetVerbose(verbose);
+        weatherHelper.SetFrequency(frequency);
+        weatherHelper.SetGroundStationHeight(0.0);
+        weatherHelper.SetRainFadeThreshold(rainFadeThreshold);
+        weatherHelper.SetSnrFloor(-5.0);
+        weatherHelper.SetWeatherFadeHoThreshold(weatherHoThreshold);
+
+        if (!weatherTrace.empty())
+        {
+            weatherHelper.LoadWeatherTrace(weatherTrace);
+        }
+        if (!weatherMarkov.empty())
+        {
+            weatherHelper.SetMarkovMatrix(weatherMarkov);
+        }
+
+        if (initialWeather == "CLEAR")
+        {
+            weatherHelper.SetUniformWeather(LEOSIM_WX_CLEAR, 0.0, 0.0);
+        }
+        else if (initialWeather == "CLOUDY")
+        {
+            weatherHelper.SetUniformWeather(LEOSIM_WX_CLOUDY, 0.0, 0.3);
+        }
+        else if (initialWeather == "LIGHT_RAIN")
+        {
+            weatherHelper.SetUniformWeather(LEOSIM_WX_LIGHT_RAIN, 2.0, 0.3);
+        }
+        else if (initialWeather == "HEAVY_RAIN")
+        {
+            weatherHelper.SetUniformWeather(LEOSIM_WX_HEAVY_RAIN, 25.0, 1.0);
+        }
+        else
+        {
+            NS_LOG_WARN("Unknown initialWeather='" << initialWeather
+                                                    << "', defaulting to CLEAR");
+            weatherHelper.SetUniformWeather(LEOSIM_WX_CLEAR, 0.0, 0.0);
+        }
+
+        weatherModel = weatherHelper.Install(allGroundNodes, Seconds(simTime));
+        channelModel->SetWeatherModel(weatherModel);
+        channelModel->SetRainFadeThresholdDb(rainFadeThreshold);
+        channelModel->SetSnrFloorDb(-5.0);
+    }
 
     // Create ISL mesh if enabled
     Ptr<LeoSimChannelModel> islChannelModel;
@@ -623,6 +697,11 @@ main(int argc, char* argv[])
     Ptr<LeoSimBeamManager> beamManager =
         beamHelper.Install(allGroundNodes, satelliteNodes, Seconds(simTime));
     beamManager->SetOperatorModel(operatorModel);
+    if (enableWeather && weatherModel)
+    {
+        beamManager->SetWeatherModel(weatherModel);
+        beamManager->SetWeatherFadeThresholdDb(weatherHoThreshold);
+    }
 
     if (logBeams)
     {

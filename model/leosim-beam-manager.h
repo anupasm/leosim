@@ -93,7 +93,8 @@ enum LeoSimHandoverTrigger
     LEOSIM_HO_LOCATION_BASED = 3, //!< UE position-based TTE trigger
     LEOSIM_HO_ELEVATION = 4,     //!< Elevation angle below minimum threshold
     LEOSIM_HO_RLF = 5,           //!< Radio Link Failure (T310 expiry)
-    LEOSIM_HO_LOAD_BALANCE = 6   //!< Traffic load rebalancing
+    LEOSIM_HO_LOAD_BALANCE = 6,  //!< Traffic load rebalancing
+    LEOSIM_HO_WEATHER_FADE = 7   //!< Rain/cloud attenuation triggered handover
 };
 
 /**
@@ -265,6 +266,12 @@ class LeoSimBeamManager : public Object
     void SetOperatorModel(Ptr<LeoSimOperatorModel> model);
 
     /**
+     * \brief Set the weather model for weather-aware HO and TOPSIS scoring
+     * \param model Pointer to weather model
+     */
+    void SetWeatherModel(Ptr<LeoSimWeatherModel> model);
+
+    /**
      * \brief Enable verbose/debug output
      * \param verbose True to enable debug logging
      */
@@ -347,6 +354,12 @@ class LeoSimBeamManager : public Object
      * \param threshold TTE threshold
      */
     void SetTteThreshold(Time threshold);
+
+    /**
+     * \brief Set the weather fade threshold for weather-triggered handover
+     * \param thresholdDb Attenuation threshold in dB
+     */
+    void SetWeatherFadeThresholdDb(double thresholdDb);
     /** @} */
 
     /**
@@ -364,7 +377,8 @@ class LeoSimBeamManager : public Object
                           double wLatency,
                           double wElevation,
                           double wActive,
-                          double wOperatorCompat);
+                          double wOperatorCompat,
+                          double wWeather = 0.11);
 
     /**
      * \name Conditional Handover (CHO) Configuration
@@ -546,8 +560,9 @@ class LeoSimBeamManager : public Object
     /**
      * \brief Rank beam candidates using TOPSIS multi-criteria decision analysis.
      *
-     * Criteria order matches SetTopsisWeights (w0..w7):
-     * - RSRP, SINR, TTE, satellite load, latency, elevation, beam-active, operator compat
+    * Criteria order matches SetTopsisWeights (w0..w8):
+    * - RSRP, SINR, TTE, satellite load, latency, elevation, beam-active,
+    *   operator compat, weather score
      *
      * \param candidates Vector of LeoSimBeamRecord with full metrics to rank
      * \param ueNodeId UE node identifier for context logging
@@ -568,6 +583,7 @@ class LeoSimBeamManager : public Object
     Ptr<LeoSimChannelModel> m_islChannelModel;         //!< Inter-satellite link model
     Ptr<LeoSimRoutingCalculator> m_routingCalculator;  //!< Routing calculator
     Ptr<LeoSimOperatorModel> m_operatorModel;          //!< Operator sharing model
+    Ptr<LeoSimWeatherModel> m_weatherModel;            //!< Weather model for HO/TOPSIS
     Ptr<LeoSimLoader> m_loader;                        //!< Satellite/beam loader
     Ptr<LeoSimSinrEngine> m_sinrEngine;                //!< SINR decomposition engine
     Ptr<LeoSimMultiBeamModel> m_multiBeamModel;        //!< Multi-beam topology model
@@ -591,10 +607,11 @@ class LeoSimBeamManager : public Object
     double m_a4Threshold = -110.0;                       //!< A4 threshold (dBm)
     double m_elevationThreshold = 10.0;                  //!< Min elevation angle (degrees)
     Time m_tteThreshold = Seconds(30.0);                 //!< Min TTE before HO (seconds)
+    double m_weatherFadeThresholdDb = 15.0;              //!< Weather fade HO threshold (dB)
 
     // TOPSIS multi-criteria weighting
-    std::array<double, 8> m_topsisWeights = {0.18, 0.22, 0.18, 0.12, 0.08, 0.05, 0.05, 0.12};
-    //  {wRsrp, wSinr, wTte, wLoad, wLatency, wElevation, wActive, wOperatorCompat}
+    std::array<double, 9> m_topsisWeights = {0.16, 0.20, 0.16, 0.10, 0.08, 0.05, 0.04, 0.10, 0.11};
+    //  {wRsrp, wSinr, wTte, wLoad, wLatency, wElevation, wActive, wOperatorCompat, wWeather}
 
     // CHO configuration
     uint32_t m_maxCandidates = 3;                        //!< Max CHO candidates

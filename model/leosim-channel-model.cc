@@ -142,7 +142,9 @@ LeoSimChannelModel::LeoSimChannelModel()
       m_islMaxDistance(5000000.0),
       m_islTransmitPower(30.0),
       m_islAntennaGain(30.0),
-      m_islFrequency(26.0e9)
+      m_islFrequency(26.0e9),
+      m_rainFadeThresholdDb(10.0),
+      m_snrFloorDb(-5.0)
 {
     NS_LOG_FUNCTION(this);
 }
@@ -424,6 +426,40 @@ LeoSimChannelModel::UpdateLink(uint32_t linkId)
 
     NS_LOG_DEBUG("SNR: " << snr << " dB");
 
+    // Apply weather attenuation for ground-to-satellite links
+    if (!isIsl && m_weatherModel) {
+        // Determine which node is the ground station
+        uint32_t groundNodeId = node1->GetId();
+        uint32_t satNodeId    = node2->GetId();
+        Ptr<LeoSimMobilityModel> leoM1 = node1->GetObject<LeoSimMobilityModel>();
+        Ptr<LeoSimMobilityModel> leoM2 = node2->GetObject<LeoSimMobilityModel>();
+        if (leoM1 && leoM2) {
+            if (leoM1->GetNodeType() == LEOSIM_SATELLITE) {
+                groundNodeId = node2->GetId();
+                satNodeId    = node1->GetId();
+            }
+        }
+
+        auto atten = m_weatherModel->ComputeAttenuation(
+            groundNodeId, satNodeId, info.quality.elevationAngle);
+
+        info.quality.snr           -= atten.totalAttenuation_dB;
+        info.quality.signalStrength -= atten.totalAttenuation_dB;
+        info.quality.pathLoss      += atten.totalAttenuation_dB;
+        info.quality.weatherAtten   = atten;
+
+        // Update local snr for state determination below
+        snr = info.quality.snr;
+
+        // Cache for GetLastAttenuation
+        m_lastAttenuation[std::make_pair(groundNodeId, satNodeId)] = atten;
+
+        NS_LOG_DEBUG("Weather attenuation: " << atten.totalAttenuation_dB
+            << " dB (rain=" << atten.rainAttenuation_dB
+            << " cloud=" << atten.cloudAttenuation_dB
+            << " gas=" << atten.gaseousAttenuation_dB << ")");
+    }
+
     // Determine link state based on SNR
     LeoSimLinkState oldState = info.quality.linkState;
     LeoSimLinkState newState;
@@ -445,6 +481,22 @@ LeoSimChannelModel::UpdateLink(uint32_t linkId)
     }
 
     info.quality.linkState = newState;
+
+    // Rain fade and SNR floor overrides from weather model
+    if (!isIsl && m_weatherModel) {
+        if (info.quality.weatherAtten.rainAttenuation_dB > m_rainFadeThresholdDb &&
+            info.quality.linkState != LEOSIM_LINK_DOWN) {
+            info.quality.linkState = LEOSIM_LINK_DEGRADED;
+            NS_LOG_DEBUG("Weather: rain fade " << info.quality.weatherAtten.rainAttenuation_dB
+                << " dB exceeds threshold " << m_rainFadeThresholdDb << " dB -> DEGRADED");
+        }
+        if (info.quality.snr < m_snrFloorDb) {
+            info.quality.linkState = LEOSIM_LINK_DOWN;
+            NS_LOG_DEBUG("Weather: SNR " << info.quality.snr
+                << " dB below floor " << m_snrFloorDb << " dB -> DOWN");
+        }
+        newState = info.quality.linkState;
+    }
 
     // Fire trace callbacks if state changed
     if (oldState != newState)
@@ -1143,6 +1195,38 @@ LeoSimChannelModel::GetLinkState(uint32_t nodeA, uint32_t nodeB) const
     NS_LOG_DEBUG("Link not found for nodes " << nodeA << " and " << nodeB 
                  << ", returning DOWN state");
     return LEOSIM_LINK_DOWN;
+}
+
+void
+LeoSimChannelModel::SetWeatherModel(Ptr<LeoSimWeatherModel> model)
+{
+    NS_LOG_FUNCTION(this << model);
+    m_weatherModel = model;
+}
+
+void
+LeoSimChannelModel::SetRainFadeThresholdDb(double threshDb)
+{
+    NS_LOG_FUNCTION(this << threshDb);
+    m_rainFadeThresholdDb = threshDb;
+}
+
+void
+LeoSimChannelModel::SetSnrFloorDb(double snrDb)
+{
+    NS_LOG_FUNCTION(this << snrDb);
+    m_snrFloorDb = snrDb;
+}
+
+LeoSimAttenuationResult
+LeoSimChannelModel::GetLastAttenuation(uint32_t groundNodeId, uint32_t satNodeId) const
+{
+    NS_LOG_FUNCTION(this << groundNodeId << satNodeId);
+    auto key = std::make_pair(groundNodeId, satNodeId);
+    auto it = m_lastAttenuation.find(key);
+    if (it != m_lastAttenuation.end())
+        return it->second;
+    return LeoSimAttenuationResult{};
 }
 
 void

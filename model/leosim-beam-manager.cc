@@ -147,6 +147,13 @@ LeoSimBeamManager::SetOperatorModel(Ptr<LeoSimOperatorModel> model)
 }
 
 void
+LeoSimBeamManager::SetWeatherModel(Ptr<LeoSimWeatherModel> model)
+{
+    NS_LOG_FUNCTION(this << model);
+    m_weatherModel = model;
+}
+
+void
 LeoSimBeamManager::SetVerbose(bool verbose)
 {
     NS_LOG_FUNCTION(this << verbose);
@@ -246,6 +253,14 @@ LeoSimBeamManager::SetTteThreshold(Time threshold)
     NS_LOG_DEBUG("TTE threshold set to " << threshold.GetSeconds() << " seconds");
 }
 
+void
+LeoSimBeamManager::SetWeatherFadeThresholdDb(double thresholdDb)
+{
+    NS_LOG_FUNCTION(this << thresholdDb);
+    m_weatherFadeThresholdDb = thresholdDb;
+    NS_LOG_DEBUG("Weather fade threshold set to " << thresholdDb << " dB");
+}
+
 // ============================================================================
 // TOPSIS Multi-Criteria Configuration
 // ============================================================================
@@ -258,10 +273,11 @@ LeoSimBeamManager::SetTopsisWeights(double wRsrp,
                                      double wLatency,
                                      double wElevation,
                                      double wActive,
-                                     double wOperatorCompat)
+                                     double wOperatorCompat,
+                                     double wWeather)
 {
     NS_LOG_FUNCTION(this << wRsrp << wSinr << wTte << wLoad << wLatency << wElevation
-                         << wActive << wOperatorCompat);
+                         << wActive << wOperatorCompat << wWeather);
     m_topsisWeights[0] = wRsrp;
     m_topsisWeights[1] = wSinr;
     m_topsisWeights[2] = wTte;
@@ -270,11 +286,13 @@ LeoSimBeamManager::SetTopsisWeights(double wRsrp,
     m_topsisWeights[5] = wElevation;
     m_topsisWeights[6] = wActive;
     m_topsisWeights[7] = wOperatorCompat;
+    m_topsisWeights[8] = wWeather;
     
     NS_LOG_DEBUG("TOPSIS weights: RSRP=" << wRsrp << " SINR=" << wSinr << " TTE=" << wTte
                                          << " Load=" << wLoad << " Latency=" << wLatency
                                          << " Elevation=" << wElevation << " Active="
-                                         << wActive << " OperatorCompat=" << wOperatorCompat);
+                                         << wActive << " OperatorCompat=" << wOperatorCompat
+                                         << " Weather=" << wWeather);
 }
 
 void
@@ -920,14 +938,14 @@ LeoSimBeamManager::RankByTopsis(const std::vector<LeoSimBeamRecord>& candidates,
     double weightSum = std::accumulate(m_topsisWeights.begin(), m_topsisWeights.end(), 0.0);
     NS_ASSERT_MSG(std::abs(weightSum - 1.0) < 0.01,
                   "TOPSIS weights must sum to ~1.0, got " << weightSum);
-    NS_ASSERT_MSG(m_topsisWeights.size() == 8,
-                  "TOPSIS weights array must have exactly 8 elements, got " << m_topsisWeights.size());
+    NS_ASSERT_MSG(m_topsisWeights.size() == 9,
+                  "TOPSIS weights array must have exactly 9 elements, got " << m_topsisWeights.size());
 
-    const size_t numCriteria = 8;
+    const size_t numCriteria = 9;
     const size_t numCandidates = candidates.size();
 
-    // --- TOPSIS Algorithm (8-Attribute Version) ---
-    // Step 1: Build decision matrix (8 criteria x numCandidates)
+    // --- TOPSIS Algorithm (9-Attribute Version) ---
+    // Step 1: Build decision matrix (9 criteria x numCandidates)
     // Criteria (all benefit - higher is better):
     //   [0] RSRP (dBm)
     //   [1] SINR (dB)
@@ -937,8 +955,9 @@ LeoSimBeamManager::RankByTopsis(const std::vector<LeoSimBeamRecord>& candidates,
     //   [5] Elevation angle (degrees)
     //   [6] beamActive binary (1.0 if active, 0.0 if dark)
     //   [7] operator compatibility (1.0 same-op, alpha if cross-op)
-    std::array<std::vector<double>, 8> A;
-    std::array<double, 8> sumSquares{};
+    //   [8] weather quality score (1.0 clear sky, 0.0 severe fade)
+    std::array<std::vector<double>, 9> A;
+    std::array<double, 9> sumSquares{};
 
     for (size_t i = 0; i < numCandidates; i++)
     {
@@ -976,6 +995,24 @@ LeoSimBeamManager::RankByTopsis(const std::vector<LeoSimBeamRecord>& candidates,
                              : 1.0;
         A[7].push_back(opScore);
 
+        // Criterion 8: weather quality score
+        // 1.0 = clear sky/no attenuation, 0.0 = severe fade (>=30 dB)
+        double wxScore = 1.0;
+        if (m_channelModel)
+        {
+            double atten = m_channelModel->GetLastAttenuation(ueNodeId,
+                                                              candidate.satelliteNodeId)
+                               .totalAttenuation_dB;
+            wxScore = std::max(0.0, 1.0 - atten / 30.0);
+        }
+        else if (m_weatherModel)
+        {
+            double atten = m_weatherModel->GetTotalAttenuation(ueNodeId,
+                                                               candidate.satelliteNodeId);
+            wxScore = std::max(0.0, 1.0 - atten / 30.0);
+        }
+        A[8].push_back(wxScore);
+
         // Compute sum of squares for normalization
         for (size_t j = 0; j < numCriteria; j++)
         {
@@ -989,11 +1026,12 @@ LeoSimBeamManager::RankByTopsis(const std::vector<LeoSimBeamRecord>& candidates,
                                       << candidate.remainingServiceTime << "s, beamLoad="
                                       << candidate.beamLoad << ", latency=" << candidate.endToEndLatency
                                       << "ms, elevation=" << candidate.elevationAngle
-                                      << ", active=" << (int)candidate.beamActive);
+                                      << ", active=" << (int)candidate.beamActive
+                                      << ", weatherScore=" << A[8].back());
     }
 
     // Step 2: Normalize decision matrix by L2 norm (column-wise)
-    std::array<std::vector<double>, 8> N;
+    std::array<std::vector<double>, 9> N;
     for (size_t i = 0; i < numCandidates; i++)
     {
         for (size_t j = 0; j < numCriteria; j++)
@@ -1010,7 +1048,7 @@ LeoSimBeamManager::RankByTopsis(const std::vector<LeoSimBeamRecord>& candidates,
     }
 
     // Step 3: Apply weights to normalized matrix
-    std::array<std::vector<double>, 8> W;
+    std::array<std::vector<double>, 9> W;
     for (size_t i = 0; i < numCandidates; i++)
     {
         for (size_t j = 0; j < numCriteria; j++)
@@ -1021,8 +1059,8 @@ LeoSimBeamManager::RankByTopsis(const std::vector<LeoSimBeamRecord>& candidates,
 
     // Step 4: Determine ideal solution V+ and anti-ideal solution V-
     // All criteria are benefit criteria (higher is better)
-    std::array<double, 8> Vpos;
-    std::array<double, 8> Vneg;
+    std::array<double, 9> Vpos;
+    std::array<double, 9> Vneg;
     Vpos.fill(-1e99);
     Vneg.fill(1e99);
 
@@ -1347,12 +1385,23 @@ LeoSimBeamManager::EvaluateChoConditions(uint32_t ueNodeId)
                                                   << m_tteThreshold.GetSeconds()
                                                   << "s => " << (tteBased ? "TRUE" : "FALSE"));
 
+        bool weatherBased = false;
+        if (m_weatherModel)
+        {
+            double atten = m_weatherModel->GetTotalAttenuation(ueNodeId, servingSatId);
+            weatherBased = (atten > m_weatherFadeThresholdDb);
+            NS_LOG_DEBUG("  WEATHER-based: attenuation=" << atten << " dB > threshold="
+                                                         << m_weatherFadeThresholdDb << " dB => "
+                                                         << (weatherBased ? "TRUE" : "FALSE"));
+        }
+
         // Step 4e: If any condition is met, execute handover
-        if (a3Condition || a4Condition || tteBased)
+        if (a3Condition || a4Condition || tteBased || weatherBased)
         {
             cfg.conditionMet = true;
 
-            // Determine trigger: TIME_BASED if TTE triggered, A4 if A4 met, else A3
+            // Determine trigger: TIME_BASED if TTE triggered, A4 if A4 met,
+            // A3 if A3 met, else WEATHER_FADE.
             LeoSimHandoverTrigger trigger;
             if (tteBased)
             {
@@ -1368,9 +1417,13 @@ LeoSimBeamManager::EvaluateChoConditions(uint32_t ueNodeId)
             }
             else
             {
-                trigger = LEOSIM_HO_A3;
+                trigger = weatherBased ? LEOSIM_HO_WEATHER_FADE : LEOSIM_HO_A3;
                 NS_LOG_INFO("CHO condition met for UE " << ueNodeId << " -> satellite " << candidateSatId
-                                                        << ": TRIGGER=A3 (neighbour exceeds serving + offset)");
+                                                        << ": TRIGGER="
+                                                        << (weatherBased ? "WEATHER_FADE" : "A3")
+                                                        << (weatherBased
+                                                                ? " (attenuation exceeds weather threshold)"
+                                                                : " (neighbour exceeds serving + offset)"));
             }
 
             // Call ExecuteChoHandover and return immediately — first condition wins
@@ -1432,6 +1485,9 @@ LeoSimBeamManager::ExecuteChoHandover(uint32_t ueNodeId,
             break;
         case LEOSIM_HO_LOAD_BALANCE:
             triggerStr = "LOAD_BALANCE";
+            break;
+        case LEOSIM_HO_WEATHER_FADE:
+            triggerStr = "WEATHER_FADE";
             break;
         default:
             triggerStr = "UNKNOWN";
@@ -1764,6 +1820,37 @@ LeoSimBeamManager::EvaluateIntraBeamNeed(uint32_t ueNodeId)
                                      static_cast<uint32_t>(betterBeam),
                                      LEOSIM_HO_A4);
             return;
+        }
+    }
+
+    // Weather fade trigger: if serving link attenuation exceeds threshold,
+    // prepare CHO toward the top-ranked visible satellite candidate.
+    if (m_channelModel || m_weatherModel)
+    {
+        double atten = 0.0;
+        if (m_channelModel)
+        {
+            atten = m_channelModel->GetLastAttenuation(ueNodeId, satId).totalAttenuation_dB;
+        }
+        else if (m_weatherModel)
+        {
+            atten = m_weatherModel->GetTotalAttenuation(ueNodeId, satId);
+        }
+        if (atten > m_weatherFadeThresholdDb)
+        {
+            auto candidates = RankByTopsis(ScanVisibleSatellites(ueNodeId), ueNodeId);
+            if (!candidates.empty() &&
+                candidates[0].beamRecord.satelliteNodeId != satId)
+            {
+                NS_LOG_INFO("Weather fade trigger for UE " << ueNodeId
+                                                           << ": attenuation=" << atten
+                                                           << " dB > threshold="
+                                                           << m_weatherFadeThresholdDb
+                                                           << " dB, preparing CHO to sat "
+                                                           << candidates[0].beamRecord.satelliteNodeId);
+                InitiateChoPreparation(ueNodeId, candidates);
+                return;
+            }
         }
     }
 }

@@ -592,18 +592,38 @@ LeoSimRoutingCalculator::GetEdgeWeight(uint32_t nodeA,
                                        LeoSimLinkDirection dir,
                                        double baseCost) const
 {
-    if (!m_operatorModel)
+    double effectiveCost = baseCost;
+
+    if (m_operatorModel)
     {
-        return baseCost;
+        const double multiplier = m_operatorModel->GetRoutingCostMultiplier(nodeA, nodeB, dir);
+        if (multiplier > 1e5)
+        {
+            return std::numeric_limits<double>::infinity();
+        }
+        effectiveCost *= multiplier;
     }
 
-    const double multiplier = m_operatorModel->GetRoutingCostMultiplier(nodeA, nodeB, dir);
-    if (multiplier > 1e5)
+    // Apply weather-induced routing penalty when attenuation is available.
+    if (m_channelModel)
     {
-        return std::numeric_limits<double>::infinity();
+        // Attenuation cache is keyed as (groundNodeId, satNodeId). Check both
+        // orders to support calls where endpoint order is unknown at this layer.
+        auto attenForward = m_channelModel->GetLastAttenuation(nodeA, nodeB);
+        auto attenReverse = m_channelModel->GetLastAttenuation(nodeB, nodeA);
+        double totalAttenuation = std::max(attenForward.totalAttenuation_dB,
+                                           attenReverse.totalAttenuation_dB);
+
+        if (totalAttenuation > 0.0)
+        {
+            // Map attenuation to cost multiplier: 1.0 (0 dB) -> 10.0 (30 dB).
+            double weatherMultiplier = 1.0 +
+                std::pow(totalAttenuation / 30.0, 2.0) * 9.0;
+            effectiveCost *= weatherMultiplier;
+        }
     }
 
-    return baseCost * multiplier;
+    return effectiveCost;
 }
 
 LeoSimRoute

@@ -106,6 +106,40 @@ AppendSharingRows(std::ofstream& stream,
                << effRateMbps << std::endl;
     }
 }
+
+std::string
+WeatherStateToString(LeoSimWeatherState state)
+{
+    switch (state)
+    {
+    case LEOSIM_WX_CLEAR:
+        return "CLEAR";
+    case LEOSIM_WX_CLOUDY:
+        return "CLOUDY";
+    case LEOSIM_WX_LIGHT_RAIN:
+        return "LIGHT_RAIN";
+    case LEOSIM_WX_HEAVY_RAIN:
+        return "HEAVY_RAIN";
+    default:
+        return "UNKNOWN";
+    }
+}
+
+std::string
+LinkStateToString(LeoSimLinkState state)
+{
+    switch (state)
+    {
+    case LEOSIM_LINK_UP:
+        return "UP";
+    case LEOSIM_LINK_DOWN:
+        return "DOWN";
+    case LEOSIM_LINK_DEGRADED:
+        return "DEGRADED";
+    default:
+        return "UNKNOWN";
+    }
+}
 } // namespace
 
 NS_LOG_COMPONENT_DEFINE("LeoSimVisualizationHelper");
@@ -1275,6 +1309,142 @@ LeoSimVisualizationHelper::FinalizeBeamLogging()
     {
         m_choFileStream.close();
         NS_LOG_INFO("Closed CHO config file");
+    }
+}
+
+void
+LeoSimVisualizationHelper::SetWeatherFile(const std::string& filename)
+{
+    m_weatherFile = filename;
+}
+
+void
+LeoSimVisualizationHelper::SetAttenuationFile(const std::string& filename)
+{
+    m_attenuationFile = filename;
+}
+
+void
+LeoSimVisualizationHelper::InitWeatherLogging()
+{
+    if (!m_weatherFile.empty())
+    {
+        std::ofstream wf(m_weatherFile, std::ios::out | std::ios::trunc);
+        if (wf.is_open())
+        {
+            wf << "time,node_id,state,rain_rate_mmh,cloud_lwc,temp_c,pressure_hpa,humidity"
+               << std::endl;
+        }
+        else
+        {
+            NS_LOG_ERROR("Could not open weather file: " << m_weatherFile);
+        }
+    }
+
+    if (!m_attenuationFile.empty())
+    {
+        std::ofstream af(m_attenuationFile, std::ios::out | std::ios::trunc);
+        if (af.is_open())
+        {
+            af << "time,ue_id,sat_id,elevation_deg,rain_dB,cloud_dB,gas_dB,scint_dB,total_dB,link_state"
+               << std::endl;
+        }
+        else
+        {
+            NS_LOG_ERROR("Could not open attenuation file: " << m_attenuationFile);
+        }
+    }
+}
+
+void
+LeoSimVisualizationHelper::LogWeatherState(Ptr<LeoSimWeatherModel> model,
+                                           const NodeContainer& groundNodes,
+                                           double simTime)
+{
+    if (!model)
+    {
+        NS_LOG_WARN("Weather model not set; skipping weather-state logging");
+        return;
+    }
+    if (m_weatherFile.empty())
+    {
+        return;
+    }
+
+    std::ofstream wf(m_weatherFile, std::ios::out | std::ios::app);
+    if (!wf.is_open())
+    {
+        NS_LOG_ERROR("Could not open weather file for appending: " << m_weatherFile);
+        return;
+    }
+
+    wf << std::fixed << std::setprecision(4);
+    for (uint32_t i = 0; i < groundNodes.GetN(); ++i)
+    {
+        Ptr<Node> node = groundNodes.Get(i);
+        if (!node)
+        {
+            continue;
+        }
+        uint32_t nodeId = node->GetId();
+        LeoSimWeatherState state = model->GetWeatherState(nodeId);
+        LeoSimWeatherParams p = model->GetWeatherParams(nodeId);
+
+        wf << simTime << ',' << nodeId << ',' << WeatherStateToString(state) << ','
+           << p.rainRateMmh << ',' << p.cloudLiquidWater << ',' << p.temperatureCelsius << ','
+           << p.pressureHPa << ',' << p.humidity << std::endl;
+    }
+}
+
+void
+LeoSimVisualizationHelper::LogAttenuationState(Ptr<LeoSimChannelModel> channelModel,
+                                               const NodeContainer& ueNodes,
+                                               const NodeContainer& satNodes,
+                                               double simTime)
+{
+    (void)(satNodes); // reserved for future use
+
+    if (!channelModel)
+    {
+        NS_LOG_WARN("Channel model not set; skipping attenuation-state logging");
+        return;
+    }
+    if (m_attenuationFile.empty())
+    {
+        return;
+    }
+
+    std::ofstream af(m_attenuationFile, std::ios::out | std::ios::app);
+    if (!af.is_open())
+    {
+        NS_LOG_ERROR("Could not open attenuation file for appending: " << m_attenuationFile);
+        return;
+    }
+
+    af << std::fixed << std::setprecision(4);
+    for (uint32_t i = 0; i < ueNodes.GetN(); ++i)
+    {
+        Ptr<Node> ue = ueNodes.Get(i);
+        if (!ue)
+        {
+            continue;
+        }
+        uint32_t ueId = ue->GetId();
+        auto links = channelModel->GetLinksForNode(ueId);
+        for (const auto& lq : links)
+        {
+            // Skip links that are not UP or DEGRADED
+            if (lq.linkState != LEOSIM_LINK_UP && lq.linkState != LEOSIM_LINK_DEGRADED)
+            {
+                continue;
+            }
+            const LeoSimAttenuationResult& a = lq.weatherAtten;
+            af << simTime << ',' << ueId << ',' << lq.peerNodeId << ','
+               << lq.elevationAngle << ',' << a.rainAttenuation_dB << ','
+               << a.cloudAttenuation_dB << ',' << a.gaseousAttenuation_dB << ','
+               << a.scintillationSample_dB << ',' << a.totalAttenuation_dB << ','
+               << LinkStateToString(lq.linkState) << std::endl;
+        }
     }
 }
 

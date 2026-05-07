@@ -19,6 +19,7 @@
 #define LEOSIM_CHANNEL_MODEL_H
 
 #include "leosim-operator-model.h"
+#include "leosim-weather-model.h"
 
 #include "ns3/object.h"
 #include "ns3/ptr.h"
@@ -69,6 +70,7 @@ struct LeoSimChannelQuality
     LeoSimLinkState linkState; //!< Current link state
     LeoSimLinkType linkType;   //!< Link type (ground or ISL)
     Time lastUpdate;           //!< Time of last update
+    LeoSimAttenuationResult weatherAtten; //!< Last weather attenuation breakdown
 };
 
 /**
@@ -379,6 +381,35 @@ class LeoSimChannelModel : public Object
     std::vector<LinkSnapshot> GetLinksByType(LeoSimLinkType linkType, bool includeDown) const;
 
     /**
+     * \brief Set the weather model for atmospheric attenuation
+     * \param model LeoSimWeatherModel instance
+     */
+    void SetWeatherModel(Ptr<LeoSimWeatherModel> model);
+
+    /**
+     * \brief Set the rain fade degradation threshold
+     * \param threshDb Rain attenuation (dB) above which link is marked DEGRADED
+     */
+    void SetRainFadeThresholdDb(double threshDb);
+
+    /**
+     * \brief Set the SNR floor below which a link is forced DOWN
+     * \param snrDb SNR floor in dB
+     */
+    void SetSnrFloorDb(double snrDb);
+
+    /**
+     * \brief Get the last computed attenuation for a ground-satellite pair
+     * \param groundNodeId Ground node identifier
+     * \param satNodeId Satellite node identifier
+     * \return LeoSimAttenuationResult from the most recent computation,
+     *         or a zero-valued result if no weather model is set or the pair
+     *         has not yet been computed
+     */
+    LeoSimAttenuationResult GetLastAttenuation(uint32_t groundNodeId,
+                                               uint32_t satNodeId) const;
+
+    /**
      * \brief Set the operator model used for sharing-aware queries
      * \param model Operator model instance
      */
@@ -503,6 +534,11 @@ class LeoSimChannelModel : public Object
     double m_islAntennaGain;        //!< ISL antenna gain (dB)
     double m_islFrequency;          //!< ISL frequency (Hz)
     Ptr<LeoSimOperatorModel> m_operatorModel; //!< Optional operator sharing model
+    Ptr<LeoSimWeatherModel> m_weatherModel;   //!< Optional atmospheric weather model
+    std::map<std::pair<uint32_t,uint32_t>, LeoSimAttenuationResult>
+        m_lastAttenuation; //!< Cache of most recent per-link attenuation results
+    double m_rainFadeThresholdDb; //!< Rain attenuation threshold for DEGRADED state (dB)
+    double m_snrFloorDb;          //!< SNR floor for forced DOWN state (dB)
 
     // Update scheduling
     EventId m_updateEvent;          //!< Scheduled update event

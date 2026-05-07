@@ -13,6 +13,7 @@ build_lib(
     model/leosim-channel-model.cc
     model/leosim-isl-routing-model.cc
     model/leosim-routing-calculator.cc
+    model/leosim-weather-model.cc
     helper/leosim-helper.cc
     helper/leosim-loader-helper.cc
     helper/leosim-mobility-helper.cc
@@ -24,6 +25,7 @@ build_lib(
     helper/leosim-traffic-generator-helper.cc
     model/leosim-operator-model.cc
     helper/leosim-operator-helper.cc
+    helper/leosim-weather-helper.cc
     
   HEADER_FILES
     model/leosim.h
@@ -39,6 +41,7 @@ build_lib(
     model/leosim-channel-model.h
     model/leosim-isl-routing-model.h
     model/leosim-routing-calculator.h
+    model/leosim-weather-model.h
     helper/leosim-helper.h
     helper/leosim-loader-helper.h
     helper/leosim-mobility-helper.h
@@ -50,6 +53,7 @@ build_lib(
     helper/leosim-traffic-generator-helper.h
     model/leosim-operator-model.h
     helper/leosim-operator-helper.h
+    helper/leosim-weather-helper.h
     
   LIBRARIES_TO_LINK
     ${libcore}
