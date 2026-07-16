@@ -51,7 +51,7 @@ LeoSimOperatorModel::RegisterNode(uint32_t nodeId,
 
     if (m_verbose)
     {
-        NS_LOG_INFO("Registered node " << nodeId << " as operator " << opId);
+        NS_LOG_DEBUG("Registered node " << nodeId << " as operator " << opId);
     }
 }
 
@@ -300,14 +300,14 @@ LeoSimOperatorModel::PrintSummary() const
 {
     const auto operators = GetAllOperators();
 
-    NS_LOG_INFO("Registered nodes: " << m_nodeInfo.size());
-    NS_LOG_INFO("Operators: " << operators.size());
-    NS_LOG_INFO("Sharing agreements: " << m_sharingMatrix.size());
+    NS_LOG_DEBUG("Registered nodes: " << m_nodeInfo.size());
+    NS_LOG_DEBUG("Operators: " << operators.size());
+    NS_LOG_DEBUG("Sharing agreements: " << m_sharingMatrix.size());
 
     for (const auto& kv : m_sharingMatrix)
     {
         const LeoSimSharingEntry& e = kv.second;
-        NS_LOG_INFO("  " << e.operatorA << " <-> " << e.operatorB << ": DL=" << e.alphaDl
+        NS_LOG_DEBUG("  " << e.operatorA << " <-> " << e.operatorB << ": DL=" << e.alphaDl
                            << " UL=" << e.alphaUl << " ISL=" << e.alphaIsl);
     }
 }

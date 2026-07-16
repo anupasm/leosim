@@ -22,13 +22,16 @@
 #include "ns3/object.h"
 #include "ns3/node-container.h"
 #include "ns3/nstime.h"
+#include "ns3/event-id.h"
+#include "ns3/leosim-channel-model.h"
+#include "ns3/leosim-routing-calculator.h"
+
+#include <vector>
 
 namespace ns3
 {
 
-class LeoSimChannelModel;
 class LeoSimRoutingCalculator;
-class EventId;
 
 /**
  * \ingroup leosim
@@ -98,6 +101,22 @@ class LeoSimRoutingCalculatorHelper
                              bool verbose = false);
 
     /**
+     * \brief Install a computed route into the source node's IPv4 static routing table.
+     * \param route Computed LeoSim route. The first path node is the route source.
+     * \param verbose Enable verbose output.
+     * \return True if at least one host route was installed.
+     */
+    bool InstallRoute(const LeoSimRoute& route, bool verbose = false);
+
+    /**
+     * \brief Install multiple computed routes.
+     * \param routes Routes to install.
+     * \param verbose Enable verbose output.
+     * \return True if every valid route was installed.
+     */
+    bool InstallRoutes(const std::vector<LeoSimRoute>& routes, bool verbose = false);
+
+    /**
      * \brief Enable dynamic periodic routing updates
      * \param calculator The routing calculator to use for computing routes
      * \param sources Source nodes (UEs, servers, etc.)
@@ -118,6 +137,43 @@ class LeoSimRoutingCalculatorHelper
                               double stopTime = 0.0,
                               bool verbose = false);
 
+    /**
+     * \brief Enable reactive routing updates triggered by link state changes
+     * \param calculator The routing calculator to use
+     * \param sources Source nodes
+     * \param destinations Destination nodes
+     * \param groundChannelModel Ground channel model (satellite-to-ground links)
+     * \param islChannelModel ISL channel model (may be null if ISL disabled)
+     * \param debounceInterval Minimum time between triggered updates (default 200ms)
+     * \param verbose Enable verbose output
+     *
+     * Connects to the link-state-change trace on both channel models.  Whenever
+     * any link transitions to LEOSIM_LINK_DOWN the routing tables are recomputed
+     * after \p debounceInterval so that multiple rapid changes collapse into a
+     * single update.  Use together with EnableDynamicRouting for combined
+     * periodic + reactive behaviour.
+     */
+    void EnableReactiveLinkTriggeredRouting(Ptr<LeoSimRoutingCalculator> calculator,
+                                            const NodeContainer& sources,
+                                            const NodeContainer& destinations,
+                                            Ptr<LeoSimChannelModel> groundChannelModel,
+                                            Ptr<LeoSimChannelModel> islChannelModel = nullptr,
+                                            Time debounceInterval = MilliSeconds(200),
+                                            bool verbose = false);
+
+    /**
+     * \brief Request a debounced route refresh using the reactive-routing context.
+     *
+     * This is used for non-channel topology changes, such as beam-manager serving
+     * access changes, that should invalidate installed routes immediately.
+     */
+    void RequestRouteRefresh();
+
+    /**
+     * \brief Return true when a periodic dynamic routing update is scheduled.
+     */
+    bool HasPendingDynamicRoutingUpdate() const;
+
   private:
     /**
      * \brief Internal method to perform routing update and reschedule
@@ -128,6 +184,26 @@ class LeoSimRoutingCalculatorHelper
                                    Time updateInterval,
                                    double stopTime,
                                    bool verbose);
+
+    /**
+     * \brief Callback fired when a link changes state (used for reactive routing)
+     */
+    void OnLinkStateChanged(Ptr<Node> nodeA,
+                Ptr<Node> nodeB,
+                LeoSimLinkState newState);
+
+    /**
+     * \brief Perform the debounced reactive route update
+     */
+    void DoReactiveUpdate();
+
+    Ptr<LeoSimRoutingCalculator> m_reactiveCalculator;
+    NodeContainer m_reactiveSources;
+    NodeContainer m_reactiveDestinations;
+    Time m_reactiveDebounceInterval;
+    bool m_reactiveVerbose = false;
+    EventId m_dynamicRoutingUpdate;       //!< Pending periodic dynamic routing event
+    EventId m_pendingReactiveUpdate; //!< Pending debounced reactive update event
 };
 
 } // namespace ns3

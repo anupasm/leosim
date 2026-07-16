@@ -16,6 +16,8 @@
  */
 
 #include "leosim-routing-calculator.h"
+#include "leosim-beam-manager.h"
+#include "leosim-mobility-model.h"
 
 #include "ns3/log.h"
 #include "ns3/simulator.h"
@@ -28,8 +30,70 @@
 namespace ns3
 {
 
+namespace
+{
+
+bool
+IsGroundNode(const Ptr<Node>& node)
+{
+    if (!node)
+    {
+        return false;
+    }
+
+    Ptr<LeoSimMobilityModel> mobility = node->GetObject<LeoSimMobilityModel>();
+    if (!mobility)
+    {
+        return false;
+    }
+
+    LeoSimNodeType type = mobility->GetNodeType();
+    return (type == LEOSIM_UE || type == LEOSIM_GATEWAY);
+}
+
+} // namespace
+
 NS_LOG_COMPONENT_DEFINE("LeoSimRoutingCalculator");
 NS_OBJECT_ENSURE_REGISTERED(LeoSimRoutingCalculator);
+NS_OBJECT_ENSURE_REGISTERED(LeoSimRouteProvider);
+NS_OBJECT_ENSURE_REGISTERED(LeoSimDijkstraRoutingModel);
+
+TypeId
+LeoSimRouteProvider::GetTypeId()
+{
+    static TypeId tid = TypeId("ns3::LeoSimRouteProvider")
+                            .SetParent<Object>()
+                            .SetGroupName("LeoSim");
+    return tid;
+}
+
+TypeId
+LeoSimDijkstraRoutingModel::GetTypeId()
+{
+    static TypeId tid = TypeId("ns3::LeoSimDijkstraRoutingModel")
+                            .SetParent<LeoSimRouteProvider>()
+                            .SetGroupName("LeoSim")
+                            .AddConstructor<LeoSimDijkstraRoutingModel>();
+    return tid;
+}
+
+LeoSimRoute
+LeoSimDijkstraRoutingModel::ComputeRoute(const LeoSimRoutingRequest& request,
+                                         const LeoSimRoutingContext& context)
+{
+    if (!context.calculator)
+    {
+        LeoSimRoute invalidRoute;
+        invalidRoute.valid = false;
+        return invalidRoute;
+    }
+
+    return context.calculator->DijkstrasAlgorithm(request.source,
+                                                  request.destination,
+                                                  request.metric,
+                                                  request.pathType,
+                                                  request.minSnr);
+}
 
 TypeId
 LeoSimRoutingCalculator::GetTypeId()
@@ -42,11 +106,15 @@ LeoSimRoutingCalculator::GetTypeId()
 }
 
 LeoSimRoutingCalculator::LeoSimRoutingCalculator()
-    : m_verbose(false),
-      m_defaultPathType(LEOSIM_PATH_ANY),
+        : m_defaultPathType(LEOSIM_PATH_ANY),
+          m_accessLinkPolicy(LEOSIM_ACCESS_SERVING_ONLY),
+          m_multiConnectivityMaxLinks(1),
+          m_accessAuthorityEnabled(true),
+          m_verbose(false),
       m_topologyCacheTTL(Seconds(0.1))
 {
     NS_LOG_FUNCTION(this);
+    m_routeProvider = CreateObject<LeoSimDijkstraRoutingModel>();
 }
 
 LeoSimRoutingCalculator::~LeoSimRoutingCalculator()
@@ -59,6 +127,7 @@ LeoSimRoutingCalculator::SetChannelModel(Ptr<LeoSimChannelModel> channelModel)
 {
     NS_LOG_FUNCTION(this << channelModel);
     m_channelModel = channelModel;
+    m_cachedTopology.clear();
 }
 
 Ptr<LeoSimChannelModel>
@@ -72,12 +141,87 @@ LeoSimRoutingCalculator::SetIslChannelModel(Ptr<LeoSimChannelModel> islChannelMo
 {
     NS_LOG_FUNCTION(this << islChannelModel);
     m_islChannelModel = islChannelModel;
+    m_cachedTopology.clear();
 }
 
 Ptr<LeoSimChannelModel>
 LeoSimRoutingCalculator::GetIslChannelModel() const
 {
     return m_islChannelModel;
+}
+
+void
+LeoSimRoutingCalculator::SetBeamManager(Ptr<LeoSimBeamManager> beamManager)
+{
+    NS_LOG_FUNCTION(this << beamManager);
+    m_beamManager = beamManager;
+    m_cachedTopology.clear();
+}
+
+void
+LeoSimRoutingCalculator::SetAccessLinkPolicy(AccessLinkPolicy policy)
+{
+    NS_LOG_FUNCTION(this << policy);
+    m_accessLinkPolicy = policy;
+    m_cachedTopology.clear();
+}
+
+void
+LeoSimRoutingCalculator::SetAccessAuthorityEnabled(bool enabled)
+{
+    NS_LOG_FUNCTION(this << enabled);
+    if (m_accessAuthorityEnabled != enabled)
+    {
+        m_accessAuthorityEnabled = enabled;
+        m_cachedTopology.clear();
+    }
+}
+
+bool
+LeoSimRoutingCalculator::IsAccessAuthorityEnabled() const
+{
+    return m_accessAuthorityEnabled;
+}
+
+void
+LeoSimRoutingCalculator::SetRouteProvider(Ptr<LeoSimRouteProvider> provider)
+{
+    NS_LOG_FUNCTION(this << provider);
+    if (provider)
+    {
+        m_routeProvider = provider;
+    }
+    else
+    {
+        m_routeProvider = CreateObject<LeoSimDijkstraRoutingModel>();
+    }
+}
+
+Ptr<LeoSimRouteProvider>
+LeoSimRoutingCalculator::GetRouteProvider() const
+{
+    return m_routeProvider;
+}
+
+void
+LeoSimRoutingCalculator::SetEdgeCostCallback(LeoSimEdgeCostCallback callback)
+{
+    NS_LOG_FUNCTION(this);
+    m_edgeCostCallback = callback;
+}
+
+LeoSimEdgeCostCallback
+LeoSimRoutingCalculator::GetEdgeCostCallback() const
+{
+    return m_edgeCostCallback;
+}
+
+void
+LeoSimRoutingCalculator::SetMultiConnectivityMaxLinks(uint32_t maxLinks)
+{
+    NS_LOG_FUNCTION(this << maxLinks);
+    m_multiConnectivityMaxLinks = std::max<uint32_t>(1, maxLinks);
+    m_cachedTopology.clear();
 }
 
 void
@@ -92,6 +236,7 @@ LeoSimRoutingCalculator::SetPathType(PathType pathType)
 {
     NS_LOG_FUNCTION(this << pathType);
     m_defaultPathType = pathType;
+    m_cachedTopology.clear();
 }
 
 void
@@ -99,6 +244,92 @@ LeoSimRoutingCalculator::SetVerbose(bool verbose)
 {
     NS_LOG_FUNCTION(this << verbose);
     m_verbose = verbose;
+}
+
+LeoSimRoutingRequest
+LeoSimRoutingCalculator::BuildRoutingRequest(Ptr<Node> source,
+                                             Ptr<Node> destination,
+                                             RoutingMetric metric,
+                                             PathType pathType,
+                                             double minSnr) const
+{
+    LeoSimRoutingRequest request;
+    request.source = source;
+    request.destination = destination;
+    request.time = Simulator::Now();
+    request.metric = metric;
+    request.pathType = pathType;
+    request.minSnr = minSnr;
+    return request;
+}
+
+LeoSimRoutingContext
+LeoSimRoutingCalculator::BuildRoutingContext(PathType pathType)
+{
+    LeoSimRoutingContext context;
+    context.channelModel = m_channelModel;
+    context.islChannelModel = m_islChannelModel;
+    context.beamManager = m_beamManager;
+    context.operatorModel = m_operatorModel;
+    context.accessPolicy = m_accessLinkPolicy;
+    context.multiConnectivityMaxLinks = m_multiConnectivityMaxLinks;
+    context.accessAuthorityEnabled = m_accessAuthorityEnabled;
+    context.topology = GetTopology(pathType);
+    context.calculator = GetObject<LeoSimRoutingCalculator>();
+    return context;
+}
+
+bool
+LeoSimRoutingCalculator::ValidateRoute(const LeoSimRoute& route,
+                                       const LeoSimRoutingRequest& request)
+{
+    if (!route.valid || route.path.empty())
+    {
+        return false;
+    }
+
+    if (route.path.front() != request.source || route.path.back() != request.destination)
+    {
+        NS_LOG_WARN("Route provider returned a path with mismatched endpoints");
+        return false;
+    }
+
+    if (route.path.size() == 1)
+    {
+        return request.source == request.destination;
+    }
+
+    for (size_t i = 0; i + 1 < route.path.size(); ++i)
+    {
+        Ptr<Node> current = route.path[i];
+        Ptr<Node> next = route.path[i + 1];
+
+        if (!current || !next)
+        {
+            return false;
+        }
+
+        if (request.pathType == LEOSIM_PATH_SAME_OPERATOR_ONLY && m_operatorModel &&
+            !m_operatorModel->IsSameOperator(current->GetId(), next->GetId()))
+        {
+            NS_LOG_WARN("Route provider returned a cross-operator hop for SAME_OPERATOR_ONLY");
+            return false;
+        }
+
+        if (!IsLinkAllowed(current, next, request.pathType))
+        {
+            NS_LOG_WARN("Route provider returned an unavailable or disallowed hop");
+            return false;
+        }
+
+        if (request.minSnr >= 0 && !MeetsSnrConstraint(current, next, request.minSnr))
+        {
+            NS_LOG_WARN("Route provider returned a hop below the requested SNR constraint");
+            return false;
+        }
+    }
+
+    return true;
 }
 
 LeoSimRoute
@@ -134,7 +365,19 @@ LeoSimRoutingCalculator::ComputeRoute(Ptr<Node> source,
         return sameNodeRoute;
     }
 
-    return DijkstrasAlgorithm(source, destination, metric, pathType, -1.0);
+    LeoSimRoutingRequest request = BuildRoutingRequest(source, destination, metric, pathType, -1.0);
+    LeoSimRoutingContext context = BuildRoutingContext(pathType);
+    Ptr<LeoSimRouteProvider> provider = m_routeProvider;
+    if (!provider)
+    {
+        provider = CreateObject<LeoSimDijkstraRoutingModel>();
+    }
+    LeoSimRoute route = provider->ComputeRoute(request, context);
+    if (!ValidateRoute(route, request))
+    {
+        route.valid = false;
+    }
+    return route;
 }
 
 LeoSimRoute
@@ -153,7 +396,24 @@ LeoSimRoutingCalculator::ComputeRouteWithSnrConstraint(Ptr<Node> source,
         return invalidRoute;
     }
 
-    return DijkstrasAlgorithm(source, destination, metric, LEOSIM_PATH_ANY, minSnr);
+    PathType pathType = m_defaultPathType;
+    LeoSimRoutingRequest request = BuildRoutingRequest(source,
+                                                       destination,
+                                                       metric,
+                                                       pathType,
+                                                       minSnr);
+    LeoSimRoutingContext context = BuildRoutingContext(pathType);
+    Ptr<LeoSimRouteProvider> provider = m_routeProvider;
+    if (!provider)
+    {
+        provider = CreateObject<LeoSimDijkstraRoutingModel>();
+    }
+    LeoSimRoute route = provider->ComputeRoute(request, context);
+    if (!ValidateRoute(route, request))
+    {
+        route.valid = false;
+    }
+    return route;
 }
 
 std::vector<LeoSimRoute>
@@ -196,7 +456,7 @@ LeoSimRoutingCalculator::HasDirectLink(Ptr<Node> source,
     }
 
     // Check if link is available and is of the correct type
-    if (!m_channelModel->IsLinkUp(source, destination))
+    if (!IsLinkAvailable(source, destination))
     {
         return false;
     }
@@ -204,9 +464,13 @@ LeoSimRoutingCalculator::HasDirectLink(Ptr<Node> source,
     // If any link type is acceptable, just check availability
     if (linkType == LEOSIM_LINK_ISL || linkType == LEOSIM_LINK_SATELLITE_TO_GROUND)
     {
-        LeoSimChannelQuality quality = m_channelModel->GetChannelQuality(source, destination);
+        LeoSimChannelQuality quality = GetLinkQuality(source, destination);
         if (quality.linkType == linkType)
         {
+            if (quality.linkType == LEOSIM_LINK_SATELLITE_TO_GROUND)
+            {
+                return IsAccessLinkAllowed(source, destination);
+            }
             return true;
         }
     }
@@ -226,18 +490,28 @@ LeoSimRoutingCalculator::GetNeighbors(Ptr<Node> node, LeoSimLinkType linkType)
         return neighbors;
     }
 
-    std::vector<std::pair<Ptr<Node>, Ptr<Node>>> activeLinks = m_channelModel->GetActiveLinks();
+    std::vector<std::pair<Ptr<Node>, Ptr<Node>>> activeLinks = GetActiveLinks();
 
     for (const auto& link : activeLinks)
     {
-        LeoSimChannelQuality quality = m_channelModel->GetChannelQuality(link.first, link.second);
+        LeoSimChannelQuality quality = GetLinkQuality(link.first, link.second);
 
         if (link.first == node && quality.linkType == linkType)
         {
+            if (quality.linkType == LEOSIM_LINK_SATELLITE_TO_GROUND &&
+                !IsAccessLinkAllowed(link.first, link.second))
+            {
+                continue;
+            }
             neighbors.insert(link.second);
         }
         else if (link.second == node && quality.linkType == linkType)
         {
+            if (quality.linkType == LEOSIM_LINK_SATELLITE_TO_GROUND &&
+                !IsAccessLinkAllowed(link.first, link.second))
+            {
+                continue;
+            }
             neighbors.insert(link.first);
         }
     }
@@ -273,30 +547,43 @@ LeoSimRoutingCalculator::GetTopology(PathType pathType)
 
     // Check if cache is still valid (optional optimization)
     Time now = Simulator::Now();
-    if (m_lastTopologyCacheUpdate + m_topologyCacheTTL > now && !m_cachedTopology.empty())
     {
-        return m_cachedTopology;
+        std::lock_guard<std::mutex> lock(m_topologyCacheMutex);
+        if (m_lastTopologyCacheUpdate + m_topologyCacheTTL > now && !m_cachedTopology.empty())
+        {
+            return m_cachedTopology;
+        }
     }
 
-    // Get active links from ground channel model
     std::vector<std::pair<Ptr<Node>, Ptr<Node>>> activeLinks = m_channelModel->GetActiveLinks();
-
 
     for (const auto& link : activeLinks)
     {
         Ptr<Node> node1 = link.first;
         Ptr<Node> node2 = link.second;
+        LeoSimChannelQuality quality = GetLinkQuality(node1, node2);
+
+        if (quality.linkState == LEOSIM_LINK_DOWN)
+        {
+            continue;
+        }
 
         if (pathType != LEOSIM_PATH_ANY)
         {
-            LeoSimChannelQuality quality = m_channelModel->GetChannelQuality(node1, node2);
-
             if (pathType == LEOSIM_PATH_ISL_ONLY && quality.linkType != LEOSIM_LINK_ISL)
             {
                 continue;
             }
             if (pathType == LEOSIM_PATH_GROUND_ONLY &&
                 quality.linkType != LEOSIM_LINK_SATELLITE_TO_GROUND)
+            {
+                continue;
+            }
+        }
+
+        if (quality.linkType == LEOSIM_LINK_SATELLITE_TO_GROUND)
+        {
+            if (!IsAccessLinkAllowed(node1, node2))
             {
                 continue;
             }
@@ -315,11 +602,15 @@ LeoSimRoutingCalculator::GetTopology(PathType pathType)
         {
             Ptr<Node> node1 = link.first;
             Ptr<Node> node2 = link.second;
+            LeoSimChannelQuality quality = m_islChannelModel->GetChannelQuality(node1, node2);
+
+            if (quality.linkState == LEOSIM_LINK_DOWN)
+            {
+                continue;
+            }
 
             if (pathType != LEOSIM_PATH_ANY)
             {
-                LeoSimChannelQuality quality = m_islChannelModel->GetChannelQuality(node1, node2);
-
                 if (pathType == LEOSIM_PATH_GROUND_ONLY && quality.linkType != LEOSIM_LINK_SATELLITE_TO_GROUND)
                 {
                     continue;
@@ -332,21 +623,10 @@ LeoSimRoutingCalculator::GetTopology(PathType pathType)
         }
     }
 
-    m_cachedTopology = topology;
-    m_lastTopologyCacheUpdate = now;
-
-    if (m_verbose)
     {
-        std::cout << "Final topology:" << std::endl;
-        for (const auto& pair : topology)
-        {
-            std::cout << "  Node " << pair.first->GetId() << " connects to: ";
-            for (const auto& neighbor : pair.second)
-            {
-                std::cout << neighbor->GetId() << " ";
-            }
-            std::cout << std::endl;
-        }
+        std::lock_guard<std::mutex> lock(m_topologyCacheMutex);
+        m_cachedTopology = topology;
+        m_lastTopologyCacheUpdate = now;
     }
 
     return topology;
@@ -367,8 +647,8 @@ LeoSimRoutingCalculator::GetLinkQuality(Ptr<Node> source, Ptr<Node> destination)
     // Check ground channel model first
     LeoSimChannelQuality quality = m_channelModel->GetChannelQuality(source, destination);
     
-    // If ground link is up, return it
-    if (quality.linkState == LEOSIM_LINK_UP)
+    // If ground link is visible, return it
+    if (quality.linkState == LEOSIM_LINK_UP || quality.linkState == LEOSIM_LINK_DEGRADED)
     {
         return quality;
     }
@@ -377,7 +657,7 @@ LeoSimRoutingCalculator::GetLinkQuality(Ptr<Node> source, Ptr<Node> destination)
     if (m_islChannelModel)
     {
         LeoSimChannelQuality islQuality = m_islChannelModel->GetChannelQuality(source, destination);
-        if (islQuality.linkState == LEOSIM_LINK_UP)
+        if (islQuality.linkState == LEOSIM_LINK_UP || islQuality.linkState == LEOSIM_LINK_DEGRADED)
         {
             return islQuality;
         }
@@ -400,7 +680,12 @@ LeoSimRoutingCalculator::IsLinkAvailable(Ptr<Node> source, Ptr<Node> destination
     bool groundLink = m_channelModel->IsLinkUp(source, destination);
     if (groundLink)
     {
-        return true;
+        LeoSimChannelQuality quality = m_channelModel->GetChannelQuality(source, destination);
+        if (quality.linkType == LEOSIM_LINK_SATELLITE_TO_GROUND)
+        {
+            return IsAccessLinkAllowed(source, destination);
+        }
+        return quality.linkType == LEOSIM_LINK_ISL;
     }
 
     // Check if link exists in ISL channel model (if set)
@@ -410,6 +695,122 @@ LeoSimRoutingCalculator::IsLinkAvailable(Ptr<Node> source, Ptr<Node> destination
     }
 
     return false;
+}
+
+bool
+LeoSimRoutingCalculator::IsAccessLinkAllowed(Ptr<Node> source, Ptr<Node> destination)
+{
+    if (!m_accessAuthorityEnabled)
+    {
+        return true;
+    }
+
+    LeoSimAccessLinkState state = GetAccessLinkState(source, destination);
+    return state == LEOSIM_ACCESS_NOT_APPLICABLE ||
+           state == LEOSIM_ACCESS_SERVING ||
+           (m_accessLinkPolicy == LEOSIM_ACCESS_SERVING_AND_CHO &&
+            state == LEOSIM_ACCESS_PREPARED) ||
+           (m_accessLinkPolicy == LEOSIM_ACCESS_MULTI_CONNECTIVITY &&
+            state == LEOSIM_ACCESS_MULTI_CONNECTIVITY_CANDIDATE);
+}
+
+LeoSimRoutingCalculator::LeoSimAccessLinkState
+LeoSimRoutingCalculator::GetAccessLinkState(Ptr<Node> source, Ptr<Node> destination)
+{
+    if (!source || !destination)
+    {
+        return LEOSIM_ACCESS_CHANNEL_DOWN;
+    }
+
+    Ptr<Node> groundNode = nullptr;
+    Ptr<Node> satNode = nullptr;
+
+    if (IsGroundNode(source))
+    {
+        groundNode = source;
+        satNode = destination;
+    }
+    else if (IsGroundNode(destination))
+    {
+        groundNode = destination;
+        satNode = source;
+    }
+
+    if (!groundNode || !satNode)
+    {
+        return LEOSIM_ACCESS_NOT_APPLICABLE;
+    }
+
+    LeoSimChannelQuality quality = GetLinkQuality(source, destination);
+    if (quality.linkState != LEOSIM_LINK_UP && quality.linkState != LEOSIM_LINK_DEGRADED)
+    {
+        return LEOSIM_ACCESS_CHANNEL_DOWN;
+    }
+
+    if (!m_beamManager)
+    {
+        return LEOSIM_ACCESS_SERVING;
+    }
+
+    const uint32_t groundId = groundNode->GetId();
+    const uint32_t satId = satNode->GetId();
+
+    if (m_beamManager->IsServingAccessLink(groundId, satId))
+    {
+        return LEOSIM_ACCESS_SERVING;
+    }
+
+    LeoSimBeamRecord current = m_beamManager->GetCurrentBeam(groundId);
+    if (current.satelliteNodeId == satId)
+    {
+        return LEOSIM_ACCESS_BEAM_DARK;
+    }
+
+    const auto prepared = m_beamManager->GetPreparedCandidateBeams(groundId);
+    auto preparedIt = std::find_if(prepared.begin(),
+                                   prepared.end(),
+                                   [satId](const LeoSimBeamRecord& rec) {
+                                       return rec.satelliteNodeId == satId;
+                                   });
+    if (preparedIt != prepared.end())
+    {
+        return preparedIt->beamActive ? LEOSIM_ACCESS_PREPARED : LEOSIM_ACCESS_BEAM_DARK;
+    }
+
+    const auto ranked = m_beamManager->GetRankedCandidates(groundId);
+    uint32_t accepted = 0;
+    bool hasEligibleBeam = false;
+    for (const auto& candidate : ranked)
+    {
+        const LeoSimBeamRecord& rec = candidate.beamRecord;
+        if (!rec.beamActive)
+        {
+            if (rec.satelliteNodeId == satId)
+            {
+                return LEOSIM_ACCESS_BEAM_DARK;
+            }
+            continue;
+        }
+
+        const bool withinMultiConnectivityLimit = accepted < m_multiConnectivityMaxLinks;
+        ++accepted;
+
+        if (rec.satelliteNodeId != satId)
+        {
+            continue;
+        }
+
+        hasEligibleBeam = true;
+        if (m_accessLinkPolicy == LEOSIM_ACCESS_MULTI_CONNECTIVITY &&
+            withinMultiConnectivityLimit)
+        {
+            return LEOSIM_ACCESS_MULTI_CONNECTIVITY_CANDIDATE;
+        }
+
+        break;
+    }
+
+    return hasEligibleBeam ? LEOSIM_ACCESS_NOT_SELECTED : LEOSIM_ACCESS_NO_ELIGIBLE_BEAM;
 }
 
 std::vector<std::pair<Ptr<Node>, Ptr<Node>>>
@@ -424,8 +825,9 @@ LeoSimRoutingCalculator::GetActiveIslLinks()
         return islLinks;
     }
 
+    Ptr<LeoSimChannelModel> islModel = m_islChannelModel ? m_islChannelModel : m_channelModel;
     std::vector<LeoSimChannelModel::LinkSnapshot> links =
-        m_channelModel->GetLinksByType(LEOSIM_LINK_ISL, false);
+        islModel->GetLinksByType(LEOSIM_LINK_ISL, false);
 
     for (const auto& link : links)
     {
@@ -452,7 +854,10 @@ LeoSimRoutingCalculator::GetActiveGroundLinks()
 
     for (const auto& link : links)
     {
-        groundLinks.push_back(std::make_pair(link.node1, link.node2));
+        if (IsAccessLinkAllowed(link.node1, link.node2))
+        {
+            groundLinks.push_back(std::make_pair(link.node1, link.node2));
+        }
     }
 
     return groundLinks;
@@ -468,7 +873,41 @@ LeoSimRoutingCalculator::GetActiveLinks()
         return std::vector<std::pair<Ptr<Node>, Ptr<Node>>>();
     }
 
-    return m_channelModel->GetActiveLinks();
+    std::vector<std::pair<Ptr<Node>, Ptr<Node>>> filteredLinks;
+    std::set<std::pair<uint32_t, uint32_t>> seenLinks;
+    auto appendIfNew = [&filteredLinks, &seenLinks](Ptr<Node> a, Ptr<Node> b) {
+        if (!a || !b)
+        {
+            return;
+        }
+        auto key = std::make_pair(std::min(a->GetId(), b->GetId()),
+                                  std::max(a->GetId(), b->GetId()));
+        if (seenLinks.insert(key).second)
+        {
+            filteredLinks.push_back(std::make_pair(a, b));
+        }
+    };
+
+    for (const auto& link : m_channelModel->GetActiveLinks())
+    {
+        LeoSimChannelQuality quality = GetLinkQuality(link.first, link.second);
+        if (quality.linkType == LEOSIM_LINK_SATELLITE_TO_GROUND &&
+            !IsAccessLinkAllowed(link.first, link.second))
+        {
+            continue;
+        }
+        appendIfNew(link.first, link.second);
+    }
+
+    if (m_islChannelModel)
+    {
+        for (const auto& link : m_islChannelModel->GetActiveLinks())
+        {
+            appendIfNew(link.first, link.second);
+        }
+    }
+
+    return filteredLinks;
 }
 
 uint32_t
@@ -481,7 +920,7 @@ LeoSimRoutingCalculator::GetNumActiveLinks()
         return 0;
     }
 
-    return m_channelModel->GetActiveLinks().size();
+    return GetActiveLinks().size();
 }
 
 uint32_t
@@ -494,8 +933,9 @@ LeoSimRoutingCalculator::GetNumActiveIslLinks()
         return 0;
     }
 
+    Ptr<LeoSimChannelModel> islModel = m_islChannelModel ? m_islChannelModel : m_channelModel;
     std::vector<LeoSimChannelModel::LinkSnapshot> links =
-        m_channelModel->GetLinksByType(LEOSIM_LINK_ISL, false);
+        islModel->GetLinksByType(LEOSIM_LINK_ISL, false);
     return links.size();
 }
 
@@ -509,9 +949,7 @@ LeoSimRoutingCalculator::GetNumActiveGroundLinks()
         return 0;
     }
 
-    std::vector<LeoSimChannelModel::LinkSnapshot> links =
-        m_channelModel->GetLinksByType(LEOSIM_LINK_SATELLITE_TO_GROUND, false);
-    return links.size();
+    return GetActiveGroundLinks().size();
 }
 
 double
@@ -520,6 +958,11 @@ LeoSimRoutingCalculator::GetLinkMetricValue(Ptr<Node> source,
                                              RoutingMetric metric)
 {
     LeoSimChannelQuality quality = GetLinkQuality(source, destination);
+
+    if (!m_edgeCostCallback.IsNull())
+    {
+        return m_edgeCostCallback(source, destination, quality);
+    }
 
     switch (metric)
     {
@@ -582,7 +1025,7 @@ LeoSimRoutingCalculator::MeetsSnrConstraint(Ptr<Node> source, Ptr<Node> destinat
         return true; // No constraint
     }
 
-    LeoSimChannelQuality quality = m_channelModel->GetChannelQuality(source, destination);
+    LeoSimChannelQuality quality = GetLinkQuality(source, destination);
     return quality.snr >= minSnr;
 }
 
@@ -640,48 +1083,47 @@ LeoSimRoutingCalculator::DijkstrasAlgorithm(Ptr<Node> source,
     // Dijkstra's algorithm
     std::map<Ptr<Node>, double> distances;
     std::map<Ptr<Node>, Ptr<Node>> previous;
-    std::set<Ptr<Node>> unvisited;
+    std::set<Ptr<Node>> settled;
+    using QueueEntry = std::pair<double, Ptr<Node>>;
+    std::priority_queue<QueueEntry, std::vector<QueueEntry>, std::greater<QueueEntry>> queue;
 
     // Initialize distances
     for (const auto& node : topology)
     {
         distances[node.first] = std::numeric_limits<double>::max();
-        unvisited.insert(node.first);
     }
 
     // Also check if source and destination are in topology
-    if (unvisited.find(source) == unvisited.end())
+    if (distances.find(source) == distances.end())
     {
-        unvisited.insert(source);
         distances[source] = std::numeric_limits<double>::max();
     }
-    if (unvisited.find(destination) == unvisited.end())
+    if (distances.find(destination) == distances.end())
     {
-        unvisited.insert(destination);
         distances[destination] = std::numeric_limits<double>::max();
     }
 
     distances[source] = 0;
+    queue.push(std::make_pair(0.0, source));
 
-    while (!unvisited.empty())
+    while (!queue.empty())
     {
-        // Find unvisited node with minimum distance
-        Ptr<Node> current = nullptr;
-        double minDistance = std::numeric_limits<double>::max();
+        const QueueEntry entry = queue.top();
+        queue.pop();
 
-        for (const auto& node : unvisited)
+        Ptr<Node> current = entry.second;
+        const double currentDistance = entry.first;
+        if (current == nullptr)
         {
-            if (distances[node] < minDistance)
-            {
-                minDistance = distances[node];
-                current = node;
-            }
+            continue;
         }
-
-        if (current == nullptr || minDistance == std::numeric_limits<double>::max())
+        if (settled.find(current) != settled.end())
         {
-            // No path found
-            break;
+            continue;
+        }
+        if (currentDistance > distances[current])
+        {
+            continue;
         }
 
         if (current == destination)
@@ -690,14 +1132,14 @@ LeoSimRoutingCalculator::DijkstrasAlgorithm(Ptr<Node> source,
             break;
         }
 
-        unvisited.erase(current);
+        settled.insert(current);
 
         // Check neighbors
         if (topology.find(current) != topology.end())
         {
             for (const auto& neighbor : topology[current])
             {
-                if (unvisited.find(neighbor) == unvisited.end())
+                if (settled.find(neighbor) != settled.end())
                 {
                     continue;
                 }
@@ -753,6 +1195,7 @@ LeoSimRoutingCalculator::DijkstrasAlgorithm(Ptr<Node> source,
                 {
                     distances[neighbor] = newDistance;
                     previous[neighbor] = current;
+                    queue.push(std::make_pair(newDistance, neighbor));
                 }
             }
         }
@@ -821,7 +1264,7 @@ LeoSimRoutingCalculator::ReconstructRoute(Ptr<Node> source,
         Ptr<Node> hop_source = path[i];
         Ptr<Node> hop_dest = path[i + 1];
 
-        LeoSimChannelQuality quality = m_channelModel->GetChannelQuality(hop_source, hop_dest);
+        LeoSimChannelQuality quality = GetLinkQuality(hop_source, hop_dest);
 
         route.totalPathLoss += quality.pathLoss;
         route.totalDistance += quality.distance;
@@ -842,7 +1285,7 @@ LeoSimRoutingCalculator::ReconstructRoute(Ptr<Node> source,
 
     if (m_verbose)
     {
-        NS_LOG_INFO("Route from " << source->GetId() << " to " << destination->GetId() << ": "
+        NS_LOG_DEBUG("Route from " << source->GetId() << " to " << destination->GetId() << ": "
                     << route.hopCount << " hops, "
                     << "PathLoss=" << route.totalPathLoss << "dB, "
                     << "Distance=" << route.totalDistance << "m, "
@@ -890,8 +1333,9 @@ LeoSimRoutingCalculator::InvalidateRoutesForNode(uint32_t nodeId)
 
         // Lambda to trigger recompute of the route
         Simulator::ScheduleNow([this, sourceId, destId]() {
-            Ptr<Node> sourceNode = (sourceId < 10000) ? NodeList::GetNode(sourceId) : nullptr;
-            Ptr<Node> destNode = (destId < 10000) ? NodeList::GetNode(destId) : nullptr;
+            const uint32_t nodeCount = NodeList::GetNNodes();
+            Ptr<Node> sourceNode = (sourceId < nodeCount) ? NodeList::GetNode(sourceId) : nullptr;
+            Ptr<Node> destNode = (destId < nodeCount) ? NodeList::GetNode(destId) : nullptr;
 
             if (sourceNode && destNode)
             {
@@ -905,7 +1349,7 @@ LeoSimRoutingCalculator::InvalidateRoutesForNode(uint32_t nodeId)
         });
     }
 
-    NS_LOG_INFO("Invalidated " << routesToInvalidate.size() << " routes containing node "
+    NS_LOG_DEBUG("Invalidated " << routesToInvalidate.size() << " routes containing node "
                                << nodeId);
 }
 
@@ -943,7 +1387,7 @@ LeoSimRoutingCalculator::ForceRouteUpdate(uint32_t ueNodeId, uint32_t newSatId)
 
     // TODO: Update ns-3 Ipv4StaticRouting tables with new routes
     // This would require access to routing protocol helpers and is application-specific
-    NS_LOG_INFO("Force-updated bidirectional routes for UE " << ueNodeId << " via satellite "
+    NS_LOG_DEBUG("Force-updated bidirectional routes for UE " << ueNodeId << " via satellite "
                                                              << newSatId);
 }
 
@@ -991,7 +1435,7 @@ LeoSimRoutingCalculator::PreComputeRouteForNode(uint32_t ueNodeId, uint32_t cand
                                                                       << " to UE " << ueNodeId);
     }
 
-    NS_LOG_INFO("Pre-computed bidirectional routes for UE " << ueNodeId
+    NS_LOG_DEBUG("Pre-computed bidirectional routes for UE " << ueNodeId
                                                             << " via candidate satellite "
                                                             << candidateSatId);
 }

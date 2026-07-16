@@ -656,7 +656,7 @@ LeoSimWeatherModel::AdvanceMarkovStates()
             DrawWeatherParams(nodeId, newState);
 
             if (m_verbose)
-                NS_LOG_INFO("[Weather] Node " << nodeId << " state: "
+                NS_LOG_DEBUG("[Weather] Node " << nodeId << " state: "
                     << oldState << " -> " << newState
                     << " at t=" << Simulator::Now().GetSeconds() << "s");
 
@@ -757,7 +757,7 @@ LeoSimWeatherModel::LoadWeatherTraceFromCsv(const std::string& file)
                   [](const auto& a, const auto& b) { return a.first < b.first; });
 
     m_useTrace = true;
-    NS_LOG_INFO("[Weather] Loaded trace from " << file
+    NS_LOG_DEBUG("[Weather] Loaded trace from " << file
         << " for " << m_traces.size() << " node(s)");
 }
 
@@ -830,7 +830,7 @@ LeoSimWeatherModel::AdvanceFromTrace(uint32_t nodeId)
 
     if (interp.state != prevState) {
         if (m_verbose)
-            NS_LOG_INFO("[Weather] Node " << nodeId << " trace state: "
+            NS_LOG_DEBUG("[Weather] Node " << nodeId << " trace state: "
                 << prevState << " -> " << interp.state
                 << " at t=" << now << "s");
         if (!m_weatherChangeCallback.IsNull())

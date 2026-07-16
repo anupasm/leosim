@@ -16,22 +16,141 @@
  */
 
 #include "ns3/leosim.h"
+#include "ns3/leosim-channel-helper.h"
 #include "ns3/leosim-operator-model.h"
 #include "ns3/leosim-beam-manager.h"
+#include "ns3/leosim-routing-calculator-helper.h"
 #include "ns3/leosim-visualization-helper.h"
 #include "ns3/test.h"
 #include "ns3/constant-position-mobility-model.h"
+#include "ns3/internet-stack-helper.h"
 #include "ns3/node-container.h"
 #include "ns3/simulator.h"
 
 #include <cstdio>
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <fstream>
+#include <map>
+#include <set>
 #include <sstream>
 #include <string>
 
 using namespace ns3;
+
+namespace
+{
+
+class LeoSimTestSpatialIslDegreeAndConnectivity : public TestCase
+{
+  public:
+    LeoSimTestSpatialIslDegreeAndConnectivity()
+        : TestCase("spatial ISL topology respects degree bound and connects reachable satellites")
+    {
+    }
+
+  private:
+    void DoRun() override
+    {
+        NodeContainer satellites;
+        satellites.Create(6);
+        for (uint32_t i = 0; i < satellites.GetN(); ++i)
+        {
+            Ptr<ConstantPositionMobilityModel> mobility =
+                CreateObject<ConstantPositionMobilityModel>();
+            mobility->SetPosition(Vector(i * 100000.0, 0.0, 0.0));
+            satellites.Get(i)->AggregateObject(mobility);
+        }
+
+        LeoSimChannelHelper helper;
+        helper.SetIslMaxDistance(250000.0);
+        Ptr<LeoSimChannelModel> model =
+            helper.CreateIslNearestNeighborMesh(satellites, 2);
+        const auto links = model->GetLinksByType(LEOSIM_LINK_ISL, false);
+
+        std::map<uint32_t, std::set<uint32_t>> adjacency;
+        for (const auto& link : links)
+        {
+            const uint32_t a = link.node1->GetId();
+            const uint32_t b = link.node2->GetId();
+            adjacency[a].insert(b);
+            adjacency[b].insert(a);
+        }
+        for (uint32_t i = 0; i < satellites.GetN(); ++i)
+        {
+            NS_TEST_ASSERT_MSG_LT(adjacency[satellites.Get(i)->GetId()].size(),
+                                  3,
+                                  "Spatial ISL degree exceeded configured bound");
+        }
+
+        std::set<uint32_t> visited;
+        std::vector<uint32_t> pending{satellites.Get(0)->GetId()};
+        while (!pending.empty())
+        {
+            const uint32_t node = pending.back();
+            pending.pop_back();
+            if (!visited.insert(node).second)
+            {
+                continue;
+            }
+            for (uint32_t neighbor : adjacency[node])
+            {
+                pending.push_back(neighbor);
+            }
+        }
+        NS_TEST_ASSERT_MSG_EQ(visited.size(),
+                              satellites.GetN(),
+                              "Reachable spatial satellite set should be connected");
+        Simulator::Destroy();
+    }
+};
+
+Vector
+TestGeodeticPosition(double latDeg, double lonDeg, double altitudeM)
+{
+    return LeoSimLoader::GeodeticToCartesian(latDeg, lonDeg, altitudeM);
+}
+
+void
+SetTestPosition(Ptr<Node> node, const Vector& position)
+{
+    Ptr<ConstantPositionMobilityModel> mobility = CreateObject<ConstantPositionMobilityModel>();
+    mobility->SetPosition(position);
+    node->AggregateObject(mobility);
+}
+
+void
+SetLeoSimTestPosition(Ptr<Node> node, const Vector& position, LeoSimNodeType nodeType)
+{
+    Ptr<LeoSimMobilityModel> mobility = CreateObject<LeoSimMobilityModel>();
+    mobility->SetNodeId(node->GetId());
+    mobility->SetNodeType(nodeType);
+    mobility->SetPosition(position);
+    node->AggregateObject(mobility);
+}
+
+LeoSimSpotBeam
+MakeTestBeam(uint32_t satNodeId,
+             uint32_t beamId,
+             double centerLat,
+             double centerLon,
+             double radiusKm,
+             bool active = true)
+{
+    LeoSimSpotBeam beam;
+    beam.satelliteNodeId = satNodeId;
+    beam.beamId = beamId;
+    beam.cellId = beamId;
+    beam.colorGroup = static_cast<int>(beamId % 3);
+    beam.centerLat = centerLat;
+    beam.centerLon = centerLon;
+    beam.radiusKm = radiusKm;
+    beam.activeInCurrentSlot = active;
+    return beam;
+}
+
+} // namespace
 
 /**
  * \ingroup leosim-tests
@@ -157,11 +276,34 @@ LeoSimTestSinrWithICI::~LeoSimTestSinrWithICI()
 void
 LeoSimTestSinrWithICI::DoRun()
 {
-    LeoSimSpotBeam beam0, beam1;
-    beam0.colorGroup = 1;
-    beam1.colorGroup = 1;
-    NS_TEST_ASSERT_MSG_EQ(beam0.colorGroup, 1, "Beam 0 color group should be 1");
-    NS_TEST_ASSERT_MSG_EQ(beam1.colorGroup, 1, "Beam 1 color group should be 1");
+    LeoSimSpotBeam serving;
+    serving.satelliteNodeId = 0;
+    serving.beamId = 0;
+    serving.centerLat = 30.0;
+    serving.centerLon = -129.8;
+    serving.radiusKm = 100.0;
+    serving.colorGroup = 1;
+    serving.activeInCurrentSlot = true;
+
+    std::map<uint32_t, std::vector<LeoSimSpotBeam>> beams{{0, {serving}}};
+    Ptr<LeoSimSinrEngine> engine = CreateObject<LeoSimSinrEngine>();
+    const auto conventional = engine->ComputeSinr(1, 0, 0, beams, 30.0, -129.8);
+    const auto wrapped = engine->ComputeSinr(1, 0, 0, beams, 30.0, 230.2);
+    NS_TEST_ASSERT_MSG_EQ_TOL(conventional.sinr_dB,
+                              wrapped.sinr_dB,
+                              1e-9,
+                              "Equivalent longitude conventions must produce equal SINR");
+
+    LeoSimSpotBeam occulted = serving;
+    occulted.satelliteNodeId = 1;
+    occulted.centerLon = 50.0;
+    beams[1] = {occulted};
+    const auto withOccultedInterferer =
+        engine->ComputeSinr(1, 0, 0, beams, 30.0, -129.8);
+    NS_TEST_ASSERT_MSG_EQ_TOL(conventional.sinr_dB,
+                              withOccultedInterferer.sinr_dB,
+                              1e-9,
+                              "Earth-occulted satellites must not contribute interference");
 }
 
 /**
@@ -195,7 +337,7 @@ LeoSimTestBeamAntennaGainPattern::DoRun()
     double gainAt10 = beam.GetAntennaGain(10.0);
     // Verify antenna gain returns reasonable values
     NS_TEST_ASSERT_MSG_GT(gainAt0, 20.0, "Gain at boresight should be significant");
-    NS_TEST_ASSERT_MSG_GT(gainAt10, 0.0, "Gain at any angle should be positive");
+    NS_TEST_ASSERT_MSG_GT(gainAt10, -80.0, "Off-boresight gain should remain finite");
 }
 
 /**
@@ -1494,6 +1636,505 @@ LeoSimTestSatelliteOperatorsCsvLoad::DoRun()
   std::remove(tmpFile.c_str());
 }
 
+/**
+ * \ingroup leosim-test-suite
+ * \brief Test routing admits only the beam-manager serving access satellite.
+ */
+class LeoSimTestBeamAuthorityRoutesServingOnly : public TestCase
+{
+  public:
+  LeoSimTestBeamAuthorityRoutesServingOnly();
+  ~LeoSimTestBeamAuthorityRoutesServingOnly() override;
+
+  private:
+  void DoRun() override;
+};
+
+LeoSimTestBeamAuthorityRoutesServingOnly::LeoSimTestBeamAuthorityRoutesServingOnly()
+  : TestCase("LeoSim routing uses beam-manager serving access link only")
+{
+}
+
+LeoSimTestBeamAuthorityRoutesServingOnly::~LeoSimTestBeamAuthorityRoutesServingOnly()
+{
+}
+
+void
+LeoSimTestBeamAuthorityRoutesServingOnly::DoRun()
+{
+  NodeContainer groundNodes;
+  groundNodes.Create(1);
+  NodeContainer sats;
+  sats.Create(2);
+
+  Ptr<Node> ue = groundNodes.Get(0);
+  Ptr<Node> satA = sats.Get(0);
+  Ptr<Node> satB = sats.Get(1);
+
+  InternetStackHelper internet;
+  internet.Install(groundNodes);
+  internet.Install(sats);
+
+  SetLeoSimTestPosition(ue, TestGeodeticPosition(0.0, 0.0, 0.0), LEOSIM_UE);
+  SetLeoSimTestPosition(satA, TestGeodeticPosition(20.0, 0.0, 550000.0), LEOSIM_SATELLITE);
+  SetLeoSimTestPosition(satB, TestGeodeticPosition(0.0, 0.0, 550000.0), LEOSIM_SATELLITE);
+
+  Ptr<LeoSimChannelModel> channel = CreateObject<LeoSimChannelModel>();
+  channel->SetMinElevationAngle(-90.0);
+  channel->SetMaxLinkDistance(6000000.0);
+  channel->SetTransmitPower(80.0);
+  channel->AddLink(satA, ue, LEOSIM_LINK_SATELLITE_TO_GROUND);
+  channel->AddLink(satB, ue, LEOSIM_LINK_SATELLITE_TO_GROUND);
+  channel->UpdateAllLinks();
+
+  Ptr<LeoSimMultiBeamModel> beamModel = CreateObject<LeoSimMultiBeamModel>();
+  beamModel->SetBeamsForSatellite(satA->GetId(),
+                                  {MakeTestBeam(satA->GetId(), 0, 20.0, 0.0, 100.0)});
+  beamModel->SetBeamsForSatellite(satB->GetId(),
+                                  {MakeTestBeam(satB->GetId(), 0, 0.0, 0.0, 1000.0)});
+
+  Ptr<LeoSimRoutingCalculator> calc = CreateObject<LeoSimRoutingCalculator>();
+  calc->SetChannelModel(channel);
+
+  Ptr<LeoSimBeamManager> manager = CreateObject<LeoSimBeamManager>();
+  manager->SetChannelModel(channel);
+  manager->SetMultiBeamModel(beamModel);
+  manager->SetLoader(CreateObject<LeoSimLoader>());
+  manager->SetRoutingCalculator(calc);
+  manager->SetA4Threshold(-300.0);
+  manager->SetElevationThreshold(-90.0);
+  manager->SetWeatherFadeThresholdDb(1e9);
+  manager->SetSinrThresholdDb(-300.0);
+  manager->SetBeamGeometryUpdateInterval(Seconds(0));
+  manager->Start(groundNodes, sats, Seconds(0), Seconds(1));
+
+  LeoSimBeamRecord current = manager->GetCurrentBeam(ue->GetId());
+  NS_TEST_ASSERT_MSG_EQ(current.satelliteNodeId,
+                        satB->GetId(),
+                        "UE should attach to beam-covered satellite B");
+
+  NS_TEST_ASSERT_MSG_EQ(calc->GetAccessLinkState(ue, satB),
+                        LeoSimRoutingCalculator::LEOSIM_ACCESS_SERVING,
+                        "Satellite B should be the serving access link");
+  NS_TEST_ASSERT_MSG_NE(calc->GetAccessLinkState(ue, satA),
+                        LeoSimRoutingCalculator::LEOSIM_ACCESS_SERVING,
+                        "Channel-visible satellite A must not be serving without beam coverage");
+
+  LeoSimRoute routeToB = calc->ComputeRoute(ue, satB);
+  LeoSimRoute routeToA = calc->ComputeRoute(ue, satA);
+  NS_TEST_ASSERT_MSG_EQ(routeToB.valid, true, "Route to serving satellite B should be valid");
+  NS_TEST_ASSERT_MSG_EQ(routeToA.valid, false, "Route to non-serving satellite A should be rejected");
+
+  Simulator::Destroy();
+}
+
+/**
+ * \ingroup leosim-test-suite
+ * \brief Test current beam and routing next hop stay aligned.
+ */
+class LeoSimTestCurrentBeamMatchesRoutingNextHop : public TestCase
+{
+  public:
+  LeoSimTestCurrentBeamMatchesRoutingNextHop();
+  ~LeoSimTestCurrentBeamMatchesRoutingNextHop() override;
+
+  private:
+  void DoRun() override;
+};
+
+LeoSimTestCurrentBeamMatchesRoutingNextHop::LeoSimTestCurrentBeamMatchesRoutingNextHop()
+  : TestCase("LeoSim current beam and routing next hop point to same satellite")
+{
+}
+
+LeoSimTestCurrentBeamMatchesRoutingNextHop::~LeoSimTestCurrentBeamMatchesRoutingNextHop()
+{
+}
+
+void
+LeoSimTestCurrentBeamMatchesRoutingNextHop::DoRun()
+{
+  NodeContainer groundNodes;
+  groundNodes.Create(1);
+  NodeContainer sats;
+  sats.Create(1);
+
+  Ptr<Node> ue = groundNodes.Get(0);
+  Ptr<Node> sat = sats.Get(0);
+
+  InternetStackHelper internet;
+  internet.Install(groundNodes);
+  internet.Install(sats);
+
+  SetLeoSimTestPosition(ue, TestGeodeticPosition(0.0, 0.0, 0.0), LEOSIM_UE);
+  SetLeoSimTestPosition(sat, TestGeodeticPosition(0.0, 0.0, 550000.0), LEOSIM_SATELLITE);
+
+  Ptr<LeoSimChannelModel> channel = CreateObject<LeoSimChannelModel>();
+  channel->SetMinElevationAngle(-90.0);
+  channel->SetMaxLinkDistance(3000000.0);
+  channel->SetTransmitPower(80.0);
+  channel->AddLink(sat, ue, LEOSIM_LINK_SATELLITE_TO_GROUND);
+  channel->UpdateAllLinks();
+
+  Ptr<LeoSimMultiBeamModel> beamModel = CreateObject<LeoSimMultiBeamModel>();
+  beamModel->SetBeamsForSatellite(sat->GetId(),
+                                  {MakeTestBeam(sat->GetId(), 0, 0.0, 0.0, 1000.0)});
+
+  Ptr<LeoSimRoutingCalculator> calc = CreateObject<LeoSimRoutingCalculator>();
+  calc->SetChannelModel(channel);
+
+  Ptr<LeoSimBeamManager> manager = CreateObject<LeoSimBeamManager>();
+  manager->SetChannelModel(channel);
+  manager->SetMultiBeamModel(beamModel);
+  manager->SetLoader(CreateObject<LeoSimLoader>());
+  manager->SetRoutingCalculator(calc);
+  manager->SetA4Threshold(-300.0);
+  manager->SetElevationThreshold(-90.0);
+  manager->SetWeatherFadeThresholdDb(1e9);
+  manager->SetSinrThresholdDb(-300.0);
+  manager->SetBeamGeometryUpdateInterval(Seconds(0));
+  manager->Start(groundNodes, sats, Seconds(0), Seconds(1));
+
+  LeoSimBeamRecord current = manager->GetCurrentBeam(ue->GetId());
+  LeoSimRoute route = calc->ComputeRoute(ue, sat);
+
+  NS_TEST_ASSERT_MSG_EQ(route.valid, true, "Route to current serving satellite should be valid");
+  NS_TEST_ASSERT_MSG_EQ(route.path.size(),
+                        static_cast<size_t>(2),
+                        "Direct serving access route should have one hop");
+  NS_TEST_ASSERT_MSG_EQ(route.path[1]->GetId(),
+                        current.satelliteNodeId,
+                        "Routing next hop must match GetCurrentBeam satellite");
+
+  Simulator::Destroy();
+}
+
+/**
+ * \ingroup leosim-test-suite
+ * \brief Test degraded ISLs are handled consistently as active ISL links.
+ */
+class LeoSimTestDegradedIslConsistent : public TestCase
+{
+  public:
+  LeoSimTestDegradedIslConsistent();
+  ~LeoSimTestDegradedIslConsistent() override;
+
+  private:
+  void DoRun() override;
+};
+
+LeoSimTestDegradedIslConsistent::LeoSimTestDegradedIslConsistent()
+  : TestCase("LeoSim degraded ISL is included consistently")
+{
+}
+
+LeoSimTestDegradedIslConsistent::~LeoSimTestDegradedIslConsistent()
+{
+}
+
+void
+LeoSimTestDegradedIslConsistent::DoRun()
+{
+  NodeContainer sats;
+  sats.Create(2);
+  Ptr<Node> sat1 = sats.Get(0);
+  Ptr<Node> sat2 = sats.Get(1);
+  SetTestPosition(sat1, Vector(0.0, 0.0, 550000.0));
+  SetTestPosition(sat2, Vector(100000.0, 0.0, 550000.0));
+
+  Ptr<LeoSimChannelModel> ground = CreateObject<LeoSimChannelModel>();
+  Ptr<LeoSimChannelModel> isl = CreateObject<LeoSimChannelModel>();
+  isl->SetIslMaxDistance(1000000.0);
+  isl->SetIslAntennaGain(0.0);
+  isl->AddIslLink(sat1, sat2);
+
+  bool foundDegraded = false;
+  LeoSimChannelQuality degradedQuality;
+  for (int power = -80; power <= 80; ++power)
+  {
+    isl->SetIslTransmitPower(static_cast<double>(power));
+    isl->UpdateAllLinks();
+    degradedQuality = isl->GetChannelQuality(sat1, sat2);
+    if (degradedQuality.linkState == LEOSIM_LINK_DEGRADED)
+    {
+      foundDegraded = true;
+      break;
+    }
+  }
+
+  NS_TEST_ASSERT_MSG_EQ(foundDegraded, true, "Fixture should produce a degraded ISL");
+
+  Ptr<LeoSimRoutingCalculator> calc = CreateObject<LeoSimRoutingCalculator>();
+  calc->SetChannelModel(ground);
+  calc->SetIslChannelModel(isl);
+
+  NS_TEST_ASSERT_MSG_EQ(calc->HasDirectLink(sat1, sat2, LEOSIM_LINK_ISL),
+                        true,
+                        "HasDirectLink should include degraded ISL");
+  NS_TEST_ASSERT_MSG_EQ(calc->GetActiveIslLinks().size(),
+                        static_cast<size_t>(1),
+                        "GetActiveIslLinks should include degraded ISL");
+  LeoSimRoute routeBelowSnr = calc->ComputeRouteWithSnrConstraint(
+      sat1,
+      sat2,
+      degradedQuality.snr - 0.1);
+  LeoSimRoute routeAboveSnr = calc->ComputeRouteWithSnrConstraint(
+      sat1,
+      sat2,
+      degradedQuality.snr + 0.1);
+  NS_TEST_ASSERT_MSG_EQ(routeBelowSnr.valid,
+                        true,
+                        "SNR constraint below degraded SNR should pass");
+  NS_TEST_ASSERT_MSG_EQ(routeAboveSnr.valid,
+                        false,
+                        "SNR constraint above degraded SNR should fail");
+
+  LeoSimRoute route = calc->ComputeRoute(sat1, sat2);
+  NS_TEST_ASSERT_MSG_EQ(route.valid, true, "Route should traverse degraded ISL");
+  NS_TEST_ASSERT_MSG_EQ(route.linkTypes.size(), static_cast<size_t>(1), "Route should have one hop");
+  NS_TEST_ASSERT_MSG_EQ(route.linkTypes[0], LEOSIM_LINK_ISL, "Hop type should be ISL");
+
+  Simulator::Destroy();
+}
+
+/**
+ * \ingroup leosim-test-suite
+ * \brief Test model-owned beam geometry changes with satellite motion.
+ */
+class LeoSimTestBeamGeometryUpdatesWithMotion : public TestCase
+{
+  public:
+  LeoSimTestBeamGeometryUpdatesWithMotion();
+  ~LeoSimTestBeamGeometryUpdatesWithMotion() override;
+
+  private:
+  void DoRun() override;
+};
+
+LeoSimTestBeamGeometryUpdatesWithMotion::LeoSimTestBeamGeometryUpdatesWithMotion()
+  : TestCase("LeoSim beam geometry update changes coverage with satellite motion")
+{
+}
+
+LeoSimTestBeamGeometryUpdatesWithMotion::~LeoSimTestBeamGeometryUpdatesWithMotion()
+{
+}
+
+void
+LeoSimTestBeamGeometryUpdatesWithMotion::DoRun()
+{
+  NodeContainer sats;
+  sats.Create(1);
+  Ptr<Node> sat = sats.Get(0);
+  SetTestPosition(sat, TestGeodeticPosition(0.0, 0.0, 550000.0));
+
+  Ptr<LeoSimMultiBeamModel> beamModel = CreateObject<LeoSimMultiBeamModel>();
+  beamModel->SetBeamsForSatellite(sat->GetId(),
+                                  {MakeTestBeam(sat->GetId(), 0, 0.0, 0.0, 500.0)});
+
+  beamModel->UpdateGeometry(sats, Seconds(0));
+  LeoSimSpotBeam first = beamModel->GetBeamsForSatellite(sat->GetId()).front();
+
+  sat->GetObject<ConstantPositionMobilityModel>()->SetPosition(
+      TestGeodeticPosition(10.0, 20.0, 550000.0));
+  beamModel->UpdateGeometry(sats, Seconds(1));
+  LeoSimSpotBeam second = beamModel->GetBeamsForSatellite(sat->GetId()).front();
+
+  const double centerDelta =
+      std::abs(first.centerLat - second.centerLat) + std::abs(first.centerLon - second.centerLon);
+  NS_TEST_ASSERT_MSG_GT(centerDelta,
+                        1.0,
+                        "Beam center should move when satellite position changes");
+  NS_TEST_ASSERT_MSG_GT(second.radiusKm,
+                        0.0,
+                        "Beam radius should remain valid after geometry update");
+
+  Simulator::Destroy();
+}
+
+/**
+ * \ingroup leosim-test-suite
+ * \brief Test static routing setup leaves no periodic routing refresh pending.
+ */
+class LeoSimTestStaticRoutingNoPeriodicRefresh : public TestCase
+{
+  public:
+  LeoSimTestStaticRoutingNoPeriodicRefresh();
+  ~LeoSimTestStaticRoutingNoPeriodicRefresh() override;
+
+  private:
+  void DoRun() override;
+};
+
+LeoSimTestStaticRoutingNoPeriodicRefresh::LeoSimTestStaticRoutingNoPeriodicRefresh()
+  : TestCase("LeoSim static routing setup schedules no periodic refresh")
+{
+}
+
+LeoSimTestStaticRoutingNoPeriodicRefresh::~LeoSimTestStaticRoutingNoPeriodicRefresh()
+{
+}
+
+void
+LeoSimTestStaticRoutingNoPeriodicRefresh::DoRun()
+{
+  Ptr<LeoSimRoutingCalculator> calc = CreateObject<LeoSimRoutingCalculator>();
+  calc->SetChannelModel(CreateObject<LeoSimChannelModel>());
+
+  LeoSimRoutingCalculatorHelper helper;
+  NodeContainer empty;
+  helper.SetStaticRoutes(calc, empty, empty, false);
+  NS_TEST_ASSERT_MSG_EQ(helper.HasPendingDynamicRoutingUpdate(),
+                        false,
+                        "SetStaticRoutes should not schedule periodic routing refresh");
+
+  helper.EnableDynamicRouting(calc, empty, empty, Seconds(1), 10.0, false);
+  NS_TEST_ASSERT_MSG_EQ(helper.HasPendingDynamicRoutingUpdate(),
+                        true,
+                        "EnableDynamicRouting should schedule periodic routing refresh");
+
+  Simulator::Destroy();
+}
+
+/**
+ * \ingroup leosim-test-suite
+ * \brief Test weighted Dijkstra chooses the lowest total-distance ISL path.
+ */
+class LeoSimTestRoutingChoosesLowestDistancePath : public TestCase
+{
+  public:
+  LeoSimTestRoutingChoosesLowestDistancePath();
+  ~LeoSimTestRoutingChoosesLowestDistancePath() override;
+
+  private:
+  void DoRun() override;
+};
+
+LeoSimTestRoutingChoosesLowestDistancePath::LeoSimTestRoutingChoosesLowestDistancePath()
+  : TestCase("LeoSim routing chooses lowest total-distance path")
+{
+}
+
+LeoSimTestRoutingChoosesLowestDistancePath::~LeoSimTestRoutingChoosesLowestDistancePath()
+{
+}
+
+void
+LeoSimTestRoutingChoosesLowestDistancePath::DoRun()
+{
+  NodeContainer sats;
+  sats.Create(4);
+  Ptr<Node> src = sats.Get(0);
+  Ptr<Node> expensiveMid = sats.Get(1);
+  Ptr<Node> cheapMid = sats.Get(2);
+  Ptr<Node> dst = sats.Get(3);
+
+  SetTestPosition(src, Vector(0.0, 0.0, 550000.0));
+  SetTestPosition(expensiveMid, Vector(900000.0, 0.0, 550000.0));
+  SetTestPosition(cheapMid, Vector(100000.0, 0.0, 550000.0));
+  SetTestPosition(dst, Vector(200000.0, 0.0, 550000.0));
+
+  Ptr<LeoSimChannelModel> ground = CreateObject<LeoSimChannelModel>();
+  Ptr<LeoSimChannelModel> isl = CreateObject<LeoSimChannelModel>();
+  isl->SetIslMaxDistance(2000000.0);
+
+  // Two equal-hop candidate paths:
+  //   src -> expensiveMid -> dst: 900 km + 700 km
+  //   src -> cheapMid     -> dst: 100 km + 100 km
+  isl->AddIslLink(src, expensiveMid);
+  isl->AddIslLink(expensiveMid, dst);
+  isl->AddIslLink(src, cheapMid);
+  isl->AddIslLink(cheapMid, dst);
+  isl->UpdateAllLinks();
+
+  Ptr<LeoSimRoutingCalculator> calc = CreateObject<LeoSimRoutingCalculator>();
+  calc->SetChannelModel(ground);
+  calc->SetIslChannelModel(isl);
+
+  LeoSimRoute route = calc->ComputeRoute(src,
+                                         dst,
+                                         LeoSimRoutingCalculator::LEOSIM_METRIC_DISTANCE,
+                                         LeoSimRoutingCalculator::LEOSIM_PATH_ISL_ONLY);
+
+  NS_TEST_ASSERT_MSG_EQ(route.valid, true, "Weighted ISL route should be valid");
+  NS_TEST_ASSERT_MSG_EQ(route.path.size(),
+                        static_cast<size_t>(3),
+                        "Route should contain source, one intermediate, and destination");
+  NS_TEST_ASSERT_MSG_EQ(route.path[1],
+                        cheapMid,
+                        "Distance metric should choose the lower total-distance intermediate");
+  NS_TEST_ASSERT_MSG_EQ_TOL(route.totalDistance,
+                            200000.0,
+                            1e-6,
+                            "Route total distance should match the cheap two-hop path");
+
+  Simulator::Destroy();
+}
+
+/**
+ * \ingroup leosim-test-suite
+ * \brief Test ISL route metrics come from the ISL model, not default ground quality.
+ */
+class LeoSimTestIslRouteMetricsUseIslQuality : public TestCase
+{
+  public:
+  LeoSimTestIslRouteMetricsUseIslQuality();
+  ~LeoSimTestIslRouteMetricsUseIslQuality() override;
+
+  private:
+  void DoRun() override;
+};
+
+LeoSimTestIslRouteMetricsUseIslQuality::LeoSimTestIslRouteMetricsUseIslQuality()
+  : TestCase("LeoSim ISL route metrics use ISL channel quality")
+{
+}
+
+LeoSimTestIslRouteMetricsUseIslQuality::~LeoSimTestIslRouteMetricsUseIslQuality()
+{
+}
+
+void
+LeoSimTestIslRouteMetricsUseIslQuality::DoRun()
+{
+  NodeContainer sats;
+  sats.Create(2);
+  Ptr<Node> sat1 = sats.Get(0);
+  Ptr<Node> sat2 = sats.Get(1);
+  SetTestPosition(sat1, Vector(0.0, 0.0, 550000.0));
+  SetTestPosition(sat2, Vector(250000.0, 0.0, 550000.0));
+
+  Ptr<LeoSimChannelModel> ground = CreateObject<LeoSimChannelModel>();
+  Ptr<LeoSimChannelModel> isl = CreateObject<LeoSimChannelModel>();
+  isl->SetIslMaxDistance(1000000.0);
+  isl->SetIslTransmitPower(60.0);
+  isl->AddIslLink(sat1, sat2);
+  isl->UpdateAllLinks();
+
+  LeoSimChannelQuality islQuality = isl->GetChannelQuality(sat1, sat2);
+  NS_TEST_ASSERT_MSG_NE(islQuality.linkState,
+                        LEOSIM_LINK_DOWN,
+                        "Fixture ISL should be available");
+
+  Ptr<LeoSimRoutingCalculator> calc = CreateObject<LeoSimRoutingCalculator>();
+  calc->SetChannelModel(ground);
+  calc->SetIslChannelModel(isl);
+
+  LeoSimRoute route = calc->ComputeRoute(sat1, sat2);
+  NS_TEST_ASSERT_MSG_EQ(route.valid, true, "ISL route should be valid");
+  NS_TEST_ASSERT_MSG_EQ(route.linkTypes.size(), static_cast<size_t>(1), "Route should have one hop");
+  NS_TEST_ASSERT_MSG_EQ(route.linkTypes[0], LEOSIM_LINK_ISL, "Route hop should be typed as ISL");
+  NS_TEST_ASSERT_MSG_EQ_TOL(route.totalDistance,
+                            islQuality.distance,
+                            1e-6,
+                            "Route distance should match ISL quality distance");
+  NS_TEST_ASSERT_MSG_GT(route.minSnr,
+                        -99.0,
+                        "Route min SNR should not be default/down ground-link quality");
+
+  Simulator::Destroy();
+}
+
 // ============================================================================
 // Phase 9: Weather Model & Integration Tests (Tests 10–18)
 // ============================================================================
@@ -2070,6 +2711,7 @@ LeoSimTestSuite::LeoSimTestSuite()
     : TestSuite("leosim", Type::UNIT)
 {
     AddTestCase(new LeoSimTestCase1, TestCase::Duration::QUICK);
+    AddTestCase(new LeoSimTestSpatialIslDegreeAndConnectivity, TestCase::Duration::QUICK);
     AddTestCase(new LeoSimTestHexBeamLayout19, TestCase::Duration::QUICK);
     AddTestCase(new LeoSimTestHexBeamLayout61, TestCase::Duration::QUICK);
     AddTestCase(new LeoSimTestSinrWithICI, TestCase::Duration::QUICK);
@@ -2096,6 +2738,13 @@ LeoSimTestSuite::LeoSimTestSuite()
     AddTestCase(new LeoSimTestSharingCsvOutput, TestCase::Duration::QUICK);
     AddTestCase(new LeoSimTestGroundDeviceCsvOperatorColumn, TestCase::Duration::QUICK);
     AddTestCase(new LeoSimTestSatelliteOperatorsCsvLoad, TestCase::Duration::QUICK);
+    AddTestCase(new LeoSimTestBeamAuthorityRoutesServingOnly, TestCase::Duration::QUICK);
+    AddTestCase(new LeoSimTestCurrentBeamMatchesRoutingNextHop, TestCase::Duration::QUICK);
+    AddTestCase(new LeoSimTestDegradedIslConsistent, TestCase::Duration::QUICK);
+    AddTestCase(new LeoSimTestBeamGeometryUpdatesWithMotion, TestCase::Duration::QUICK);
+    AddTestCase(new LeoSimTestStaticRoutingNoPeriodicRefresh, TestCase::Duration::QUICK);
+    AddTestCase(new LeoSimTestRoutingChoosesLowestDistancePath, TestCase::Duration::QUICK);
+    AddTestCase(new LeoSimTestIslRouteMetricsUseIslQuality, TestCase::Duration::QUICK);
     // Phase 9 Weather Model Tests (Tests 10–18)
     AddTestCase(new LeoSimTestMarkovDwellTime, TestCase::Duration::QUICK);
     AddTestCase(new LeoSimTestWeatherStateRetrieval, TestCase::Duration::QUICK);

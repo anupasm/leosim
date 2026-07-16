@@ -35,6 +35,10 @@ namespace ns3
  * \ingroup leosim
  * \brief ISL routing model for dynamic LEO satellite topology
  *
+ * \deprecated Use LeoSimRoutingCalculator with an ISL channel model instead.
+ * This legacy model is retained for out-of-tree users, but it is no longer
+ * part of the default leosim module build.
+ *
  * This model maintains a graph of Inter-Satellite Links (ISLs) and computes
  * paths between satellites considering the dynamic topology. It uses Dijkstra's
  * algorithm to find shortest paths based on hop count.

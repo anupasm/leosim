@@ -172,7 +172,7 @@ LeoSimWeatherHelper::Install(const NodeContainer& groundNodes, Time simTime)
 
     if (m_verbose)
     {
-        NS_LOG_INFO("Installed weather model for " << groundNodes.GetN()
+        NS_LOG_DEBUG("Installed weather model for " << groundNodes.GetN()
                                                     << " ground nodes"
                                                     << ", rainFadeThreshold="
                                                     << m_rainFadeThresholdDb

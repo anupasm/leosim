@@ -276,6 +276,12 @@ class LeoSimBeamManager : public Object
      * \param verbose True to enable debug logging
      */
     void SetVerbose(bool verbose);
+
+    /**
+     * \brief Set the interval between full beam decision cycles.
+     * \param interval Positive update interval
+     */
+    void SetUpdateInterval(Time interval);
     /** @} */
 
     /**
@@ -360,6 +366,12 @@ class LeoSimBeamManager : public Object
      * \param thresholdDb Attenuation threshold in dB
      */
     void SetWeatherFadeThresholdDb(double thresholdDb);
+
+    /**
+     * \brief Set the minimum beam SINR required for serving eligibility.
+     * \param thresholdDb SINR threshold in dB
+     */
+    void SetSinrThresholdDb(double thresholdDb);
     /** @} */
 
     /**
@@ -378,7 +390,25 @@ class LeoSimBeamManager : public Object
                           double wElevation,
                           double wActive,
                           double wOperatorCompat,
-                          double wWeather = 0.11);
+                          double wWeather = 0.14);
+
+    /**
+     * \name Single Best Link Mode Configuration
+     * @{
+     */
+
+    /**
+     * \brief Enable single-best-link mode for ground-satellite connections
+     *
+     * When enabled, only the single best beam (highest SINR) per satellite is
+     * established for UE connections. This implements state-of-the-art link
+     * selection where secondary/potential links are not considered during route
+     * calculation. This optimizes link quality and reduces routing complexity.
+     *
+     * \param enable True to enable single-best-link mode, false for standard multi-beam (default: false)
+     */
+    void SetSingleBestLinkMode(bool enable);
+    /** @} */
 
     /**
      * \name Conditional Handover (CHO) Configuration
@@ -485,7 +515,22 @@ class LeoSimBeamManager : public Object
      * \param ueNodeId UE node identifier
      * \return Current LeoSimBeamRecord, or empty if not connected
      */
-    LeoSimBeamRecord GetCurrentBeam(uint32_t ueNodeId);
+    LeoSimBeamRecord GetCurrentBeam(uint32_t ueNodeId) const;
+
+    /**
+     * \brief Check whether a satellite-ground pair is the selected serving access link.
+     * \param groundNodeId Ground node identifier.
+     * \param satNodeId Satellite node identifier.
+     * \return True when the beam manager currently authorizes this serving link.
+     */
+    bool IsServingAccessLink(uint32_t groundNodeId, uint32_t satNodeId) const;
+
+    /**
+     * \brief Get CHO-prepared candidate beams for a ground node.
+     * \param groundNodeId Ground node identifier.
+     * \return Valid prepared candidate beam records.
+     */
+    std::vector<LeoSimBeamRecord> GetPreparedCandidateBeams(uint32_t groundNodeId) const;
 
     /**
      * \brief Get ranked handover candidates for a UE
@@ -501,6 +546,40 @@ class LeoSimBeamManager : public Object
      * \return Time until satellite exits coverage, or negative if already out of coverage
      */
     double GetTimeToExit(uint32_t ueNodeId, uint32_t satNodeId);
+
+    /**
+     * \brief Set the multi-beam model for spot-beam topology and phased array steering.
+     * \param model Pointer to LeoSimMultiBeamModel instance.
+     *
+     * Must be called before Start().  The model owns the phased array
+     * configuration (LeoSimPhasedArrayConfig) and the per-satellite
+     * spot-beam lists.  SteerPhasedArrayBeams() uses this model to
+     * steer beams dynamically toward ground nodes.
+     */
+    void SetMultiBeamModel(Ptr<LeoSimMultiBeamModel> model);
+
+    /**
+     * \brief Get the multi-beam model for beam topology queries.
+     * \return Pointer to the multi-beam model (may be null if not configured).
+     */
+    Ptr<LeoSimMultiBeamModel> GetMultiBeamModel() const;
+
+    /**
+     * \brief Set the phased array beam steering update interval.
+     *
+     * Determines how often the phased array is re-steered toward the optimal
+     * ground node within the current update cycle.  Defaults to the same
+     * period as the beam manager update interval (100 ms).
+     *
+     * \param interval Steering update period.
+     */
+    void SetPhasedArraySteeringInterval(Time interval);
+
+    /**
+     * \brief Set the beam footprint geometry update interval.
+     * \param interval Geometry update period; non-positive disables periodic refresh.
+     */
+    void SetBeamGeometryUpdateInterval(Time interval);
     /** @} */
 
     /**
@@ -516,6 +595,11 @@ class LeoSimBeamManager : public Object
      * during the CHO state machine (PREPARING/EVALUATING/EXECUTING/CONNECTED).
      */
     void SetBeamStateCallback(Callback<void, uint32_t, LeoSimBeamRecord, double> callback);
+
+    /**
+     * \brief Set callback fired when serving access eligibility changes.
+     */
+    void SetAccessStateChangeCallback(Callback<void> callback);
 
     /**
      * \brief Set the callback for CHO candidate configuration (Phase 1)
@@ -560,9 +644,11 @@ class LeoSimBeamManager : public Object
     /**
      * \brief Rank beam candidates using TOPSIS multi-criteria decision analysis.
      *
-    * Criteria order matches SetTopsisWeights (w0..w8):
-    * - RSRP, SINR, TTE, satellite load, latency, elevation, beam-active,
-    *   operator compat, weather score
+    * Hard feasibility filters are applied by ScanVisibleSatellites() before
+    * ranking. Criteria order matches SetTopsisWeights (w0..w8):
+    * - Radio-access: RSRP, beam SINR, elevation, TTE, beam load
+    * - Policy/path: latency, operator compatibility, weather quality
+    * - Beam-active is retained for compatibility but normally hard-filtered.
      *
      * \param candidates Vector of LeoSimBeamRecord with full metrics to rank
      * \param ueNodeId UE node identifier for context logging
@@ -589,7 +675,7 @@ class LeoSimBeamManager : public Object
     Ptr<LeoSimMultiBeamModel> m_multiBeamModel;        //!< Multi-beam topology model
     LeoSimBeamConfig m_cfg;                            //!< Global multi-beam configuration
     double m_intraBeamHoDelayMs = 10.0;                //!< Intra-beam HO execution delay (ms)
-    double m_sinrThresholdDb = 3.0;                    //!< SINR threshold for HO/selection (dB)
+    double m_sinrThresholdDb = -10.0;                  //!< SINR outage floor for HO/selection (dB)
     bool m_verbose;                                    //!< Debug output enabled
 
     // Handover mode and configuration
@@ -610,7 +696,7 @@ class LeoSimBeamManager : public Object
     double m_weatherFadeThresholdDb = 15.0;              //!< Weather fade HO threshold (dB)
 
     // TOPSIS multi-criteria weighting
-    std::array<double, 9> m_topsisWeights = {0.16, 0.20, 0.16, 0.10, 0.08, 0.05, 0.04, 0.10, 0.11};
+    std::array<double, 9> m_topsisWeights = {0.18, 0.22, 0.14, 0.10, 0.08, 0.14, 0.00, 0.10, 0.14};
     //  {wRsrp, wSinr, wTte, wLoad, wLatency, wElevation, wActive, wOperatorCompat, wWeather}
 
     // CHO configuration
@@ -629,18 +715,22 @@ class LeoSimBeamManager : public Object
 
     // Per-UE state (indexed by UE Node ID)
     std::map<uint32_t, LeoSimBeamRecord> m_currentBeams; //!< Current serving beam per UE
+    std::map<uint32_t, LeoSimBeamRecord> m_retiredBeams; //!< Last serving beam before SEARCHING
     std::map<uint32_t, LeoSimBeamState> m_beamStates;    //!< Beam connection state per UE
     std::map<uint32_t, Time> m_tttStartTime;             //!< TTT timer start per UE
     std::map<uint32_t, EventId> m_tttEventIds;           //!< TTT scheduled event IDs per UE
     std::map<uint32_t, Time> m_t310StartTime;            //!< T310 timer start per UE
     std::map<uint32_t, uint32_t> m_t310Counter;          //!< T310 expiry counter per UE
     std::map<uint32_t, std::vector<LeoSimTopsisCandidate>> m_candidates; //!< Ranked candidates
+    std::map<uint32_t, std::vector<LeoSimBeamRecord>> m_visibleScanCache; //!< Per-update visibility results
+    bool m_visibleScanCacheEnabled = false;              //!< Restrict cache lifetime to UpdateCycle
     std::map<uint32_t, std::vector<uint32_t>> m_bufferedPackets; //!< Buffered packets per UE
     std::map<uint32_t, Time> m_lastHandoverTime;         //!< Last HO time per UE
     std::map<uint32_t, Ptr<LeoSimBeamHoppingManager>> m_beamHopManagers; //!< Per-satellite hopping managers
 
     // Per-candidate CHO configurations (indexed by [UE ID][sat ID])
     std::map<uint32_t, std::map<uint32_t, LeoSimChoConfig>> m_choConfigs;
+    std::map<uint32_t, std::map<uint32_t, LeoSimBeamRecord>> m_preparedCandidateBeams; //!< Prepared CHO beam records
 
     // Packet buffering during handover
     std::map<uint32_t, std::queue<Ptr<Packet>>> m_handoverBuffers; //!< Buffered packets per UE
@@ -656,17 +746,24 @@ class LeoSimBeamManager : public Object
     std::map<uint32_t, uint32_t> m_ueHandoverCount;      //!< HO count per UE
     uint32_t m_pingPongCount = 0;                        //!< Total ping-pong count
 
+    // Phased array steering state
+    Time m_phasedArraySteeringInterval{MilliSeconds(100)}; //!< Phased array re-steering period
+    EventId m_phasedArraySteeringEventId;                  //!< Scheduled steering event
+    Time m_beamGeometryUpdateInterval{MilliSeconds(100)};   //!< Beam footprint refresh period
+
     // Lifecycle
-    NodeContainer m_userEquipment;                       //!< Managed ground nodes (UEs/servers)
+    NodeContainer m_groundNodes;                         //!< Managed ground nodes (UEs/servers)
     NodeContainer m_satellites;                          //!< Satellite nodes
     Time m_simStart;                                     //!< Simulation start time
     Time m_simDuration;                                  //!< Simulation duration
     Time m_updateInterval = MilliSeconds(100);           //!< Beam manager update interval
     EventId m_updateEventId;                             //!< Scheduled update cycle event
+    EventId m_beamGeometryEventId;                       //!< Scheduled beam geometry update event
 
     // Callbacks
     Callback<void, LeoSimHandoverEvent> m_handoverCallback; //!< HO event callback
     Callback<void, uint32_t, LeoSimBeamRecord, double> m_beamStateCallback; //!< Serving beam state callback
+    Callback<void> m_accessStateChangeCallback; //!< Route refresh trigger for access changes
     Callback<void, uint32_t, uint32_t, std::vector<LeoSimTopsisCandidate>> m_choConfigCallback; //!< CHO config callback
 
     /** @} */
@@ -680,6 +777,11 @@ class LeoSimBeamManager : public Object
      * \brief Main update cycle called periodically
      */
     void UpdateCycle();
+
+    /**
+     * \brief Refresh model-owned beam footprints from current satellite positions.
+     */
+    void UpdateBeamGeometry();
 
     /**
      * \brief Update beam metrics (RSRP, SNR, path loss, latency) for all UE-satellite pairs
@@ -853,6 +955,21 @@ class LeoSimBeamManager : public Object
     void HandleBeamDark(uint32_t satId, uint32_t beamId);
 
     /**
+     * \brief Steer phased array antennas on all satellites toward optimal ground nodes.
+     *
+     * Called each update cycle (after channel metrics are refreshed) or on its own
+     * independent steering schedule.  For each satellite the method:
+     * 1. Selects the served UE that maximises the aggregate TOPSIS benefit
+     *    (i.e., the UE with the lowest current SINR that needs the most help).
+     * 2. Calls LeoSimMultiBeamModel::SteerBeam() to electronically point the
+     *    phased array toward that UE.
+     * 3. For every UE currently served by the satellite, computes the
+     *    direction-dependent array gain via LeoSimMultiBeamModel::CalculateGain()
+     *    and adds the beamforming gain contribution to the UE's stored RSRP.
+     */
+    void SteerPhasedArrayBeams();
+
+    /**
      * \brief Find serving beam for footprint-based beam steering
      * \param ueNodeId UE node identifier
      * \return Pointer to best-ranked serving satellite node, or nullptr if empty
@@ -905,6 +1022,16 @@ class LeoSimBeamManager : public Object
                           LeoSimHandoverEvent& evt,
                           Ptr<FlowMonitor> monitor,
                           Ptr<Ipv4FlowClassifier> classifier);
+
+    /**
+     * \brief Record a serving-satellite change in handover history/callbacks.
+     */
+    void RecordInterSatelliteHandover(uint32_t ueNodeId,
+                                      const LeoSimBeamRecord& source,
+                                      const LeoSimBeamRecord& target,
+                                      LeoSimHandoverTrigger trigger,
+                                      Time initiatedAt,
+                                      Time completedAt);
 
     /**
      * \brief Detect ping-pong handover pattern

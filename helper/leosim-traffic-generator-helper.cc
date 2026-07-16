@@ -100,7 +100,7 @@ LeoSimTrafficGeneratorHelper::InstallPingClient(Ptr<Node> sourceNode,
 
     if (m_verbose)
     {
-        NS_LOG_INFO("Installed ping client on Node " << sourceNode->GetId() << " -> " << destAddress
+        NS_LOG_DEBUG("Installed ping client on Node " << sourceNode->GetId() << " -> " << destAddress
                                                      << " (interval: " << m_pingInterval.As(Time::S)
                                                      << "s, payload: " << m_pingDataSize << " bytes)");
     }
@@ -127,7 +127,7 @@ LeoSimTrafficGeneratorHelper::InstallPingClients(NodeContainer sourceNodes,
 
     if (m_verbose)
     {
-        NS_LOG_INFO("Installed ping clients on " << sourceNodes.GetN() << " nodes -> "
+        NS_LOG_DEBUG("Installed ping clients on " << sourceNodes.GetN() << " nodes -> "
                                                  << destAddress);
     }
 
@@ -156,7 +156,7 @@ LeoSimTrafficGeneratorHelper::InstallBidirectionalPing(Ptr<Node> node1,
 
     if (m_verbose)
     {
-        NS_LOG_INFO("Installed bidirectional ping between Node " << node1->GetId() << " and Node "
+        NS_LOG_DEBUG("Installed bidirectional ping between Node " << node1->GetId() << " and Node "
                                                                  << node2->GetId());
     }
 
@@ -181,7 +181,7 @@ LeoSimTrafficGeneratorHelper::InstallUeToServerPing(NodeContainer ueNodes,
 
         if (m_verbose)
         {
-            NS_LOG_INFO("UE Node " << ueNodes.Get(i)->GetId() << " -> Server Node "
+            NS_LOG_DEBUG("UE Node " << ueNodes.Get(i)->GetId() << " -> Server Node "
                                    << serverNode->GetId() << " (" << serverAddress << ")");
         }
     }
@@ -213,7 +213,7 @@ LeoSimTrafficGeneratorHelper::InstallBidirectionalUeToServerPing(NodeContainer u
 
         if (m_verbose)
         {
-            NS_LOG_INFO("Bidirectional ping between UE Node " << ueNodes.Get(i)->GetId() << " ("
+            NS_LOG_DEBUG("Bidirectional ping between UE Node " << ueNodes.Get(i)->GetId() << " ("
                                                               << ueAddresses[i] << ") and Server "
                                                               << serverNode->GetId() << " ("
                                                               << serverAddress << ")");

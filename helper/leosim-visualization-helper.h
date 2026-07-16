@@ -22,6 +22,7 @@
 
 #include "ns3/leosim-channel-model.h"
 #include "ns3/leosim-beam-manager.h"
+#include "ns3/leosim-multi-beam-model.h"
 #include "ns3/leosim-operator-model.h"
 #include "ns3/leosim-weather-model.h"
 #include "ns3/node-container.h"
@@ -108,6 +109,12 @@ class LeoSimVisualizationHelper
      * and files are initialized, callbacks are installed immediately.
      */
     void SetBeamManager(Ptr<LeoSimBeamManager> beamManager);
+
+    /**
+     * \brief Set the multi-beam model for coverage logging
+     * \param multiBeamModel Pointer to the LeoSimMultiBeamModel
+     */
+    void SetMultiBeamModel(Ptr<LeoSimMultiBeamModel> multiBeamModel);
 
     /**
      * \brief Schedule position logging for all nodes
@@ -202,12 +209,16 @@ class LeoSimVisualizationHelper
     void SetMaxUesPerBeam(uint32_t maxUes);
 
     /**
-     * \brief Log current beam state for a UE
-     * \param ueId UE node ID
+     * \brief Log current serving beam state for a ground node
+     * \param groundId Ground node ID (UE or SERVER)
+     * \param groundType Ground node type string: UE or SERVER
      * \param rec Beam record with RSRP, SINR, elevation, etc.
      * \param topsisScore TOPSIS ranking score
      */
-    void LogBeamState(uint32_t ueId, const LeoSimBeamRecord& rec, double topsisScore);
+    void LogBeamState(uint32_t groundId,
+              const std::string& groundType,
+              const LeoSimBeamRecord& rec,
+              double topsisScore);
 
     /**
      * \brief Log handover event to file
@@ -272,6 +283,52 @@ class LeoSimVisualizationHelper
                               const NodeContainer& satNodes,
                               double simTime);
 
+    /**
+     * \brief Set the output file for satellite ground coverage data
+     * \param filename Path to coverage CSV file
+     */
+    void SetCoverageFile(const std::string& filename);
+
+    /**
+     * \brief Set the output file for link quality/out-of-threshold data
+     * \param filename Path to link quality CSV file
+     */
+    void SetLinkQualityFile(const std::string& filename);
+
+    /**
+     * \brief Set the output file for unified link/channel/beam state data
+     * \param filename Path to unified link-state CSV file
+     */
+    void SetUnifiedLinkStateFile(const std::string& filename);
+
+    /**
+     * \brief Set the output file for compact ground-to-serving-beam associations
+     * \param filename Path to association CSV file
+     */
+    void SetBeamAssociationFile(const std::string& filename);
+
+    /**
+     * \brief Initialize ground coverage and link quality logging files
+     */
+    void InitCoverageAndLinkQualityLogging();
+
+    /**
+     * \brief Log ground coverage for all satellites
+     * 
+     * For each satellite, logs all ground nodes (servers and UEs) that have 
+     * active links (UP or DEGRADED) to enable visualization of satellite footprints.
+     */
+    void LogSatelliteGroundCoverage();
+
+    /**
+     * \brief Log links that are out of threshold (DOWN or DEGRADED)
+     * 
+     * Logs detailed SNR and distance information for all links that are either
+     * DOWN (SNR <= 0 dB) or DEGRADED (0 < SNR <= 10 dB), useful for analyzing
+     * link quality degradation and failure modes.
+     */
+    void LogOutOfThresholdLinks();
+
   private:
     /**
      * \brief Log a single node position
@@ -300,6 +357,11 @@ class LeoSimVisualizationHelper
      */
     void LogGroundConnections();
 
+    /**
+     * \brief Log unified channel, link quality, and beam authority state.
+     */
+    void LogUnifiedLinkState();
+
     void LogServingBeamSnapshot();
 
     void OnPhyTx(std::string context, Ptr<const Packet> packet);
@@ -314,7 +376,7 @@ class LeoSimVisualizationHelper
     bool ParseContextIds(const std::string& context, int& nodeId, int& deviceId) const;
 
     void InstallBeamManagerCallbacks();
-    void OnBeamState(uint32_t ueId, LeoSimBeamRecord rec, double topsisScore);
+      void OnBeamState(uint32_t nodeId, LeoSimBeamRecord rec, double topsisScore);
     void OnHandoverEvent(LeoSimHandoverEvent evt);
     void OnChoConfig(uint32_t ueId,
              uint32_t servingSatId,
@@ -330,16 +392,25 @@ class LeoSimVisualizationHelper
     std::string m_sharingFile;
     std::string m_weatherFile;
     std::string m_attenuationFile;
+    std::string m_coverageFile;
+    std::string m_linkQualityFile;
+    std::string m_unifiedLinkStateFile;
+    std::string m_beamAssociationFile;
     std::ofstream m_posFile;
     std::ofstream m_linkFileStream;
     std::ofstream m_packetFileStream;
     std::ofstream m_beamFileStream;
     std::ofstream m_handoverFileStream;
     std::ofstream m_choFileStream;
+    std::ofstream m_coverageFileStream;
+    std::ofstream m_linkQualityFileStream;
+    std::ofstream m_unifiedLinkStateFileStream;
+    std::ofstream m_beamAssociationFileStream;
     LeoSimLoaderHelper* m_loaderHelper;
     Ptr<LeoSimChannelModel> m_channelModel;
     Ptr<LeoSimChannelModel> m_islChannelModel;
     Ptr<LeoSimBeamManager> m_beamManager;
+    Ptr<LeoSimMultiBeamModel> m_multiBeamModel;
     NodeContainer m_satellites;
     NodeContainer m_servers;
     NodeContainer m_ues;

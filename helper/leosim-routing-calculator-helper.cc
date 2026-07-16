@@ -19,14 +19,17 @@
 
 #include "ns3/leosim-routing-calculator.h"
 #include "ns3/leosim-channel-model.h"
+#include "ns3/leosim-task-profiler.h"
 #include "ns3/ipv4-static-routing.h"
 #include "ns3/ipv4.h"
 #include "ns3/ipv4-routing-helper.h"
 #include "ns3/ipv4-routing-table-entry.h"
 #include "ns3/log.h"
 #include "ns3/simulator.h"
+#include "ns3/event-id.h"
 
-#include <iostream>
+#include <algorithm>
+#include <vector>
 
 NS_LOG_COMPONENT_DEFINE("LeoSimRoutingCalculatorHelper");
 
@@ -34,6 +37,7 @@ namespace ns3
 {
 
 LeoSimRoutingCalculatorHelper::LeoSimRoutingCalculatorHelper()
+    : m_reactiveDebounceInterval(MilliSeconds(200))
 {
 }
 
@@ -69,6 +73,150 @@ LeoSimRoutingCalculatorHelper::CreateUnifiedRoutingCalculator(Ptr<LeoSimChannelM
     return calculator;
 }
 
+bool
+LeoSimRoutingCalculatorHelper::InstallRoute(const LeoSimRoute& route, bool verbose)
+{
+    if (!route.valid || route.path.size() < 2)
+    {
+        return false;
+    }
+
+    Ptr<Node> srcNode = route.path.front();
+    Ptr<Node> dstNode = route.path.back();
+    Ptr<Ipv4> srcIpv4 = srcNode->GetObject<Ipv4>();
+    Ptr<Ipv4> dstIpv4 = dstNode->GetObject<Ipv4>();
+
+    if (!srcIpv4 || !dstIpv4)
+    {
+        if (verbose)
+        {
+            NS_LOG_DEBUG("Cannot install route: missing IPv4 stack on source or destination");
+        }
+        return false;
+    }
+
+    Ptr<Ipv4StaticRouting> srcStaticRouting =
+        Ipv4RoutingHelper::GetRouting<Ipv4StaticRouting>(srcIpv4->GetRoutingProtocol());
+    if (!srcStaticRouting)
+    {
+        if (verbose)
+        {
+            NS_LOG_WARN("Source node " << srcNode->GetId() << " has no static routing");
+        }
+        return false;
+    }
+
+    std::vector<Ipv4Address> dstIpAddrs;
+    for (uint32_t dstIfIdx = 1; dstIfIdx < dstIpv4->GetNInterfaces(); ++dstIfIdx)
+    {
+        for (uint32_t dstAddrIdx = 0; dstAddrIdx < dstIpv4->GetNAddresses(dstIfIdx); ++dstAddrIdx)
+        {
+            Ipv4InterfaceAddress dstAddr = dstIpv4->GetAddress(dstIfIdx, dstAddrIdx);
+            Ipv4Address addr = dstAddr.GetLocal();
+            if (addr != Ipv4Address::GetZero() && addr != Ipv4Address("127.0.0.1"))
+            {
+                dstIpAddrs.push_back(addr);
+            }
+        }
+    }
+
+    if (dstIpAddrs.empty())
+    {
+        if (verbose)
+        {
+            NS_LOG_DEBUG("Could not find any address for destination node " << dstNode->GetId());
+        }
+        return false;
+    }
+
+    Ptr<Node> nextHopNode = route.path[1];
+    Ptr<Ipv4> nextHopIpv4 = nextHopNode->GetObject<Ipv4>();
+    if (!nextHopIpv4)
+    {
+        if (verbose)
+        {
+            NS_LOG_DEBUG("Next-hop node " << nextHopNode->GetId() << " has no IPv4");
+        }
+        return false;
+    }
+
+    Ipv4Address nextHopAddr = Ipv4Address::GetZero();
+    uint32_t srcInterface = 1;
+    bool foundRoute = false;
+
+    for (uint32_t srcIfIdx = 1; srcIfIdx < srcIpv4->GetNInterfaces() && !foundRoute; ++srcIfIdx)
+    {
+        if (srcIpv4->GetNAddresses(srcIfIdx) == 0)
+        {
+            continue;
+        }
+
+        Ipv4InterfaceAddress srcAddrObj = srcIpv4->GetAddress(srcIfIdx, 0);
+        Ipv4Address srcNetwork = srcAddrObj.GetLocal().CombineMask(srcAddrObj.GetMask());
+
+        for (uint32_t nhIfIdx = 1; nhIfIdx < nextHopIpv4->GetNInterfaces(); ++nhIfIdx)
+        {
+            for (uint32_t nhAddrIdx = 0; nhAddrIdx < nextHopIpv4->GetNAddresses(nhIfIdx); ++nhAddrIdx)
+            {
+                Ipv4InterfaceAddress nhAddr = nextHopIpv4->GetAddress(nhIfIdx, nhAddrIdx);
+                Ipv4Address nhNetwork = nhAddr.GetLocal().CombineMask(nhAddr.GetMask());
+                if (srcNetwork == nhNetwork && nhAddr.GetLocal() != srcAddrObj.GetLocal())
+                {
+                    nextHopAddr = nhAddr.GetLocal();
+                    srcInterface = srcIfIdx;
+                    foundRoute = true;
+                    break;
+                }
+            }
+            if (foundRoute)
+            {
+                break;
+            }
+        }
+    }
+
+    if (!foundRoute || nextHopAddr == Ipv4Address::GetZero())
+    {
+        if (verbose)
+        {
+            NS_LOG_DEBUG("ERROR: Could not find reachable next-hop address! Source Node: "
+                         << srcNode->GetId() << ", Destination Node: " << dstNode->GetId()
+                         << " (NextHop=" << nextHopNode->GetId()
+                         << ", DstAddr=" << dstIpAddrs.front() << ")");
+        }
+        return false;
+    }
+
+    Ipv4Mask hostMask = Ipv4Mask("255.255.255.255");
+    const bool isUpdate = Simulator::Now().GetSeconds() > 0.0;
+    for (const auto& dstIpAddr : dstIpAddrs)
+    {
+        srcStaticRouting->AddNetworkRouteTo(dstIpAddr, hostMask, nextHopAddr, srcInterface, 100);
+        if (verbose && isUpdate)
+        {
+            NS_LOG_DEBUG("    [UPDATE] Installing route on Node " << srcNode->GetId()
+                         << ": Dest=" << dstIpAddr << " via " << nextHopAddr
+                         << " (iface=" << srcInterface << ")");
+        }
+    }
+
+    return true;
+}
+
+bool
+LeoSimRoutingCalculatorHelper::InstallRoutes(const std::vector<LeoSimRoute>& routes, bool verbose)
+{
+    bool allInstalled = true;
+    for (const auto& route : routes)
+    {
+        if (route.valid)
+        {
+            allInstalled = InstallRoute(route, verbose) && allInstalled;
+        }
+    }
+    return allInstalled;
+}
+
 void
 LeoSimRoutingCalculatorHelper::SetStaticRoutes(Ptr<LeoSimRoutingCalculator> calculator,
                                                    const NodeContainer& sources,
@@ -80,12 +228,12 @@ LeoSimRoutingCalculatorHelper::SetStaticRoutes(Ptr<LeoSimRoutingCalculator> calc
     
     if (isUpdate && verbose)
     {
-        std::cout << "Recalculating routes based on current topology..." << std::endl;
+        NS_LOG_DEBUG("Recalculating routes based on current topology...");
     }
     else if (!isUpdate && verbose)
     {
-        std::cout << "Setting static routes between " << sources.GetN() << " sources and "
-                                                     << destinations.GetN() << " destinations" << std::endl;
+        NS_LOG_DEBUG("Setting static routes between " << sources.GetN() << " sources and "
+                                                       << destinations.GetN() << " destinations");
     }
     if (!calculator)
     {
@@ -147,8 +295,8 @@ LeoSimRoutingCalculatorHelper::SetStaticRoutes(Ptr<LeoSimRoutingCalculator> calc
             if (verbose)
             {
                 Ipv4RoutingTableEntry entry = srcStaticRouting->GetRoute(routeIdx);
-                std::cout << "    Removing old route: Dest=" << entry.GetDest() << " via " 
-                          << entry.GetGateway() << std::endl;
+                NS_LOG_DEBUG("    Removing old route: Dest=" << entry.GetDest() << " via "
+                                                             << entry.GetGateway());
             }
             srcStaticRouting->RemoveRoute(routeIdx);
             routesToRemove++;
@@ -156,8 +304,26 @@ LeoSimRoutingCalculatorHelper::SetStaticRoutes(Ptr<LeoSimRoutingCalculator> calc
         
         if (verbose && routesToRemove > 0)
         {
-            std::cout << "  Removed " << routesToRemove << " old computed routes for Node " 
-                      << srcNode->GetId() << std::endl;
+            NS_LOG_DEBUG("  Removed " << routesToRemove << " old computed routes for Node "
+                                       << srcNode->GetId());
+        }
+
+        std::vector<LeoSimRoute> computedRoutes(destinations.GetN());
+        std::vector<bool> routeComputed(destinations.GetN(), false);
+
+        for (uint32_t j = 0; j < destinations.GetN(); ++j)
+        {
+            Ptr<Node> dstNode = destinations.Get(j);
+            if (srcNode == dstNode)
+            {
+                continue;
+            }
+
+            computedRoutes[j] = calculator->ComputeRoute(
+                srcNode,
+                dstNode,
+                LeoSimRoutingCalculator::LEOSIM_METRIC_HOP_COUNT);
+            routeComputed[j] = true;
         }
 
         // For each destination node
@@ -170,205 +336,42 @@ LeoSimRoutingCalculatorHelper::SetStaticRoutes(Ptr<LeoSimRoutingCalculator> calc
 
             routesAttempted++;
 
-            // Compute route from source to destination
-            LeoSimRoute route = calculator->ComputeRoute(
-                srcNode,
-                dstNode,
-                LeoSimRoutingCalculator::LEOSIM_METRIC_HOP_COUNT);
+            const LeoSimRoute& route = computedRoutes[j];
 
-            if (!route.valid || route.path.size() < 2)
+            if (!routeComputed[j] || !route.valid || route.path.size() < 2)
             {
                 routesFailed++;
                 if (verbose)
                 {
-                    std::cout << "  No route: Node " << srcNode->GetId() << " to " << dstNode->GetId() << std::endl;
-                    NS_LOG_INFO("No valid route from node " << srcNode->GetId() << " to node "
+                    NS_LOG_DEBUG("  No route: Node " << srcNode->GetId() << " to " << dstNode->GetId());
+                    NS_LOG_DEBUG("No valid route from node " << srcNode->GetId() << " to node "
                                                             << dstNode->GetId());
                 }
                 continue;
             }
 
-            // Get destination node's IPv4 addresses
-            Ptr<Ipv4> dstIpv4 = dstNode->GetObject<Ipv4>();
-            if (!dstIpv4)
+            if (InstallRoute(route, verbose))
             {
-                if (verbose)
-                    std::cout << "  No IPv4 on destination node " << dstNode->GetId() << std::endl;
-                continue;
+                routesInstalled++;
             }
-
-            // Collect all destination IPv4 addresses (excluding loopback).
-            // Nodes are multi-homed in LeoSim (multiple satellite links), and TCP may
-            // pick a source address that isn't the first interface. If we only install
-            // routes to one address per node, return traffic can fail.
-            std::vector<Ipv4Address> dstIpAddrs;
-            for (uint32_t dstIfIdx = 1; dstIfIdx < dstIpv4->GetNInterfaces(); ++dstIfIdx)
+            else
             {
-                for (uint32_t dstAddrIdx = 0; dstAddrIdx < dstIpv4->GetNAddresses(dstIfIdx); ++dstAddrIdx)
-                {
-                    Ipv4InterfaceAddress dstAddr = dstIpv4->GetAddress(dstIfIdx, dstAddrIdx);
-                    Ipv4Address addr = dstAddr.GetLocal();
-                    if (addr != Ipv4Address::GetZero() && addr != Ipv4Address("127.0.0.1"))
-                    {
-                        dstIpAddrs.push_back(addr);
-                    }
-                }
-            }
-
-            if (dstIpAddrs.empty())
-            {
-                if (verbose)
-                {
-                    std::cout << "    Could not find any address for destination node " << dstNode->GetId() << std::endl;
-                }
                 routesFailed++;
-                continue;
             }
-
-            // Next hop is the second node in the path (first intermediate node)
-            Ptr<Node> nextHopNode = route.path[1];
-            Ptr<Ipv4> nextHopIpv4 = nextHopNode->GetObject<Ipv4>();
-
-            if (!nextHopIpv4)
-            {
-                if (verbose)
-                {
-                    std::cout << "      Error: NextHop node " << nextHopNode->GetId() << " has no IPv4" << std::endl;
-                }
-                routesFailed++;
-                continue;
-            }
-
-            // Find the best address on the next hop node to use as gateway
-            // Strategy:
-            // 1. First try to find an address on the same subnet as source's interface (direct link)
-            // 2. If that fails, use any available address on next hop
-            Ipv4Address nextHopAddr = Ipv4Address::GetZero();
-            uint32_t srcInterface = 1;
-            bool foundRoute = false;
-
-                // For each interface on source, try to find a matching downstream neighbor
-                for (uint32_t srcIfIdx = 1; (srcIfIdx < srcIpv4->GetNInterfaces()) && !foundRoute; ++srcIfIdx)
-                {
-                    Ipv4Address srcNetwork = Ipv4Address::GetZero();
-                    Ipv4Mask srcMask = Ipv4Mask::GetZero();
-                    Ipv4InterfaceAddress srcAddrObj = Ipv4InterfaceAddress();
-                    
-                    // Get the network address and mask for this source interface
-                    if (srcIpv4->GetNAddresses(srcIfIdx) > 0)
-                    {
-                        srcAddrObj = srcIpv4->GetAddress(srcIfIdx, 0);
-                        srcNetwork = srcAddrObj.GetLocal();
-                        srcMask = srcAddrObj.GetMask();
-                        Ipv4Address temp = srcNetwork;
-                        srcNetwork = temp.CombineMask(srcMask);
-                    }
-                    else
-                    {
-                        continue;  // Skip interfaces with no addresses
-                    }
-
-                    // Find an address on next hop that's on the same subnet as this source interface
-                    for (uint32_t nhIfIdx = 1; nhIfIdx < nextHopIpv4->GetNInterfaces(); ++nhIfIdx)
-                    {
-                        for (uint32_t nhAddrIdx = 0; nhAddrIdx < nextHopIpv4->GetNAddresses(nhIfIdx); ++nhAddrIdx)
-                        {
-                            Ipv4InterfaceAddress nhAddr = nextHopIpv4->GetAddress(nhIfIdx, nhAddrIdx);
-                            Ipv4Address nhNetwork = nhAddr.GetLocal();
-                            nhNetwork = nhNetwork.CombineMask(nhAddr.GetMask());
-                            
-                            // Check if they're on the same subnet
-                            if (srcNetwork == nhNetwork && nhAddr.GetLocal() != srcAddrObj.GetLocal())
-                            {
-                                nextHopAddr = nhAddr.GetLocal();
-                                srcInterface = srcIfIdx;
-                                foundRoute = true;
-                                
-                                break;
-                            }
-                        }
-                        if (foundRoute)
-                            break;
-                    }
-                }
-
-                // If we couldn't find a matching subnet, look for any address on next hop
-                // BUT only if it's actually reachable from one of source's interfaces
-                if (!foundRoute)
-                {
-                    // Try to find any pair of (src_subnet, nh_address) that match
-                    for (uint32_t srcIfIdx = 1; srcIfIdx < srcIpv4->GetNInterfaces() && !foundRoute; ++srcIfIdx)
-                    {
-                        if (srcIpv4->GetNAddresses(srcIfIdx) > 0)
-                        {
-                            Ipv4InterfaceAddress srcAddrObj = srcIpv4->GetAddress(srcIfIdx, 0);
-                            Ipv4Address srcNetwork = srcAddrObj.GetLocal().CombineMask(srcAddrObj.GetMask());
-                            
-                            // Look for ANY interface on next hop that's on the same subnet as this source interface
-                            for (uint32_t nhIfIdx = 1; nhIfIdx < nextHopIpv4->GetNInterfaces(); ++nhIfIdx)
-                            {
-                                if (nextHopIpv4->GetNAddresses(nhIfIdx) > 0)
-                                {
-                                    Ipv4InterfaceAddress nhAddr = nextHopIpv4->GetAddress(nhIfIdx, 0);
-                                    Ipv4Address nhNetwork = nhAddr.GetLocal().CombineMask(nhAddr.GetMask());
-                                    
-                                    // Check if they're on the same subnet
-                                    if (srcNetwork == nhNetwork && nhAddr.GetLocal() != srcAddrObj.GetLocal())
-                                    {
-                                        nextHopAddr = nhAddr.GetLocal();
-                                        srcInterface = srcIfIdx;
-                                        foundRoute = true;
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if (foundRoute && nextHopAddr != Ipv4Address::GetZero())
-                {
-                    Ipv4Mask hostMask = Ipv4Mask("255.255.255.255"); // /32 host route
-
-                    for (const auto& dstIpAddr : dstIpAddrs)
-                    {
-                        srcStaticRouting->AddNetworkRouteTo(dstIpAddr, hostMask,
-                                                            nextHopAddr, srcInterface, 100);
-
-                        if (verbose && isUpdate)
-                        {
-                            std::cout << "    [UPDATE] Installing route on Node " << srcNode->GetId()
-                                      << ": Dest=" << dstIpAddr << " via " << nextHopAddr
-                                      << " (iface=" << srcInterface << ")" << std::endl;
-                        }
-                        routesInstalled++;
-                    }
-                }
-                else
-                {
-                    if (verbose)
-                    {
-                        std::cout << "ERROR: Could not find reachable next-hop address! Source Node: " << srcNode->GetId() 
-                                  << ", Destination Node: " << dstNode->GetId() 
-                                  << " (NextHop=" << nextHopNode->GetId() 
-                                  << ", DstAddr=" << dstIpAddrs.front() << ")" << std::endl;
-                    }
-                    routesFailed++;
-                }
         }
     }
 
     if (verbose)
     {
-        std::cout << "\nRoute installation summary:" << std::endl;
-        std::cout << "  Routes attempted: " << routesAttempted << std::endl;
-        std::cout << "  Routes failed: " << routesFailed << std::endl;
-        std::cout << "  Routes installed: " << routesInstalled << std::endl;
-        NS_LOG_INFO("Total routes installed: " << routesInstalled);
+        NS_LOG_DEBUG("\nRoute installation summary:");
+        NS_LOG_DEBUG("  Routes attempted: " << routesAttempted);
+        NS_LOG_DEBUG("  Routes failed: " << routesFailed);
+        NS_LOG_DEBUG("  Routes installed: " << routesInstalled);
+        NS_LOG_DEBUG("Total routes installed: " << routesInstalled);
         
         if (isUpdate && routesInstalled > 0)
         {
-            std::cout << "  [UPDATE] " << routesInstalled << " routes recalculated and updated" << std::endl;
+            NS_LOG_DEBUG("  [UPDATE] " << routesInstalled << " routes recalculated and updated");
         }
     }
 }
@@ -389,27 +392,28 @@ LeoSimRoutingCalculatorHelper::EnableDynamicRouting(Ptr<LeoSimRoutingCalculator>
 
     if (verbose)
     {
-        std::cout << "\n=== Enabling Dynamic Routing ===" << std::endl;
-        std::cout << "Update interval: " << updateInterval.GetSeconds() << " seconds" << std::endl;
+        NS_LOG_DEBUG("\n=== Enabling Dynamic Routing ===");
+        NS_LOG_DEBUG("Update interval: " << updateInterval.GetSeconds() << " seconds");
         if (stopTime > 0.0)
-            std::cout << "Stop time: " << stopTime << " seconds" << std::endl;
-        std::cout << "Number of sources: " << sources.GetN() << std::endl;
-        std::cout << "Number of destinations: " << destinations.GetN() << std::endl;
+            NS_LOG_DEBUG("Stop time: " << stopTime << " seconds");
+        NS_LOG_DEBUG("Number of sources: " << sources.GetN());
+        NS_LOG_DEBUG("Number of destinations: " << destinations.GetN());
     }
 
     // Perform initial route calculation
     SetStaticRoutes(calculator, sources, destinations, verbose);
 
     // Schedule periodic updates
-    Simulator::Schedule(updateInterval,
-                        &LeoSimRoutingCalculatorHelper::UpdateRoutesAndReschedule,
-                        this,
-                        calculator,
-                        sources,
-                        destinations,
-                        updateInterval,
-                        stopTime,
-                        verbose);
+    m_dynamicRoutingUpdate =
+        Simulator::Schedule(updateInterval,
+                            &LeoSimRoutingCalculatorHelper::UpdateRoutesAndReschedule,
+                            this,
+                            calculator,
+                            sources,
+                            destinations,
+                            updateInterval,
+                            stopTime,
+                            verbose);
 }
 
 void
@@ -420,13 +424,14 @@ LeoSimRoutingCalculatorHelper::UpdateRoutesAndReschedule(Ptr<LeoSimRoutingCalcul
                                                           double stopTime,
                                                           bool verbose)
 {
+    LeoSimTaskProfiler::ScopedEvent profile("run_simulation.dynamic_routing_update");
     double currentTime = Simulator::Now().GetSeconds();
     
     if (verbose)
     {
-        std::cout << "\n========================================" << std::endl;
-        std::cout << "[" << currentTime << "s] DYNAMIC ROUTING UPDATE" << std::endl;
-        std::cout << "========================================" << std::endl;
+        NS_LOG_DEBUG("\n========================================");
+        NS_LOG_DEBUG("[" << currentTime << "s] DYNAMIC ROUTING UPDATE");
+        NS_LOG_DEBUG("========================================");
     }
 
     // Get active link count before update
@@ -434,7 +439,7 @@ LeoSimRoutingCalculatorHelper::UpdateRoutesAndReschedule(Ptr<LeoSimRoutingCalcul
     if (verbose && calculator)
     {
         activeLinksBeforeUpdate = calculator->GetNumActiveLinks();
-        std::cout << "Active links in network: " << activeLinksBeforeUpdate << std::endl;
+        NS_LOG_DEBUG("Active links in network: " << activeLinksBeforeUpdate);
     }
 
     // Reinstall routes with fresh calculations
@@ -444,8 +449,8 @@ LeoSimRoutingCalculatorHelper::UpdateRoutesAndReschedule(Ptr<LeoSimRoutingCalcul
     if (verbose && calculator)
     {
         uint32_t activeLinksAfterUpdate = calculator->GetNumActiveLinks();
-        std::cout << "Updated network status - Active links: " << activeLinksAfterUpdate << std::endl;
-        std::cout << "========================================\n" << std::endl;
+        NS_LOG_DEBUG("Updated network status - Active links: " << activeLinksAfterUpdate);
+        NS_LOG_DEBUG("========================================\n");
     }
 
     // Check if we should continue scheduling updates
@@ -453,22 +458,146 @@ LeoSimRoutingCalculatorHelper::UpdateRoutesAndReschedule(Ptr<LeoSimRoutingCalcul
     {
         if (verbose)
         {
-            std::cout << "[" << currentTime << "s] Stopping dynamic routing updates (reached stop time)"
-                      << std::endl;
+            NS_LOG_DEBUG("[" << currentTime << "s] Stopping dynamic routing updates (reached stop time)");
         }
+        m_dynamicRoutingUpdate = EventId();
         return;
     }
 
     // Schedule the next update
-    Simulator::Schedule(updateInterval,
-                        &LeoSimRoutingCalculatorHelper::UpdateRoutesAndReschedule,
-                        this,
-                        calculator,
-                        sources,
-                        destinations,
-                        updateInterval,
-                        stopTime,
-                        verbose);
+    m_dynamicRoutingUpdate =
+        Simulator::Schedule(updateInterval,
+                            &LeoSimRoutingCalculatorHelper::UpdateRoutesAndReschedule,
+                            this,
+                            calculator,
+                            sources,
+                            destinations,
+                            updateInterval,
+                            stopTime,
+                            verbose);
+}
+
+bool
+LeoSimRoutingCalculatorHelper::HasPendingDynamicRoutingUpdate() const
+{
+    return m_dynamicRoutingUpdate.IsPending();
+}
+
+void
+LeoSimRoutingCalculatorHelper::EnableReactiveLinkTriggeredRouting(
+    Ptr<LeoSimRoutingCalculator> calculator,
+    const NodeContainer& sources,
+    const NodeContainer& destinations,
+    Ptr<LeoSimChannelModel> groundChannelModel,
+    Ptr<LeoSimChannelModel> islChannelModel,
+    Time debounceInterval,
+    bool verbose)
+{
+    if (!calculator || !groundChannelModel)
+    {
+        NS_LOG_ERROR("Null calculator or ground channel model passed to EnableReactiveLinkTriggeredRouting");
+        return;
+    }
+
+    if (verbose)
+    {
+        NS_LOG_DEBUG("\n=== Enabling Reactive Link-Triggered Routing ===");
+        NS_LOG_DEBUG("Debounce interval: " << debounceInterval.GetMilliSeconds() << " ms");
+    }
+
+    m_reactiveCalculator = calculator;
+    m_reactiveSources = sources;
+    m_reactiveDestinations = destinations;
+    m_reactiveDebounceInterval = debounceInterval;
+    m_reactiveVerbose = verbose;
+
+    auto cb = MakeCallback(&LeoSimRoutingCalculatorHelper::OnLinkStateChanged, this);
+
+    groundChannelModel->TraceConnectWithoutContext("LinkStateChange", cb);
+
+    if (islChannelModel)
+    {
+        islChannelModel->TraceConnectWithoutContext("LinkStateChange", cb);
+    }
+}
+
+void
+LeoSimRoutingCalculatorHelper::OnLinkStateChanged(Ptr<Node> nodeA,
+                                                  Ptr<Node> nodeB,
+                                                  LeoSimLinkState newState)
+{
+    // Only react to links going DOWN — newly UP links will be picked up by the
+    // next periodic update or the already-scheduled debounced event.
+    if (newState != LEOSIM_LINK_DOWN)
+    {
+        return;
+    }
+
+    NS_LOG_DEBUG("Reactive routing: link between node " << nodeA->GetId()
+                << " and " << nodeB->GetId() << " went DOWN — scheduling route update");
+
+    if (m_reactiveVerbose)
+    {
+        NS_LOG_DEBUG("[" << Simulator::Now().GetSeconds()
+                         << "s] Reactive routing: link " << nodeA->GetId()
+                         << "<->" << nodeB->GetId()
+                         << " DOWN — scheduling route refresh in "
+                         << m_reactiveDebounceInterval.GetMilliSeconds() << " ms");
+    }
+
+    // Cancel any already-pending debounced update and schedule a fresh one so
+    // that a burst of simultaneous link-down events only causes one recompute.
+    if (m_pendingReactiveUpdate.IsPending())
+    {
+        m_pendingReactiveUpdate.Cancel();
+    }
+
+    m_pendingReactiveUpdate =
+        Simulator::Schedule(m_reactiveDebounceInterval,
+                            &LeoSimRoutingCalculatorHelper::DoReactiveUpdate,
+                            this);
+}
+
+void
+LeoSimRoutingCalculatorHelper::RequestRouteRefresh()
+{
+    if (!m_reactiveCalculator)
+    {
+        return;
+    }
+
+    if (m_pendingReactiveUpdate.IsPending())
+    {
+        m_pendingReactiveUpdate.Cancel();
+    }
+
+    m_pendingReactiveUpdate =
+        Simulator::Schedule(m_reactiveDebounceInterval,
+                            &LeoSimRoutingCalculatorHelper::DoReactiveUpdate,
+                            this);
+}
+
+void
+LeoSimRoutingCalculatorHelper::DoReactiveUpdate()
+{
+    LeoSimTaskProfiler::ScopedEvent profile("run_simulation.reactive_routing_update");
+
+    if (m_reactiveVerbose)
+    {
+        NS_LOG_DEBUG("\n[" << Simulator::Now().GetSeconds()
+                            << "s] REACTIVE ROUTING UPDATE (link-state triggered)");
+    }
+
+    if (!m_reactiveCalculator)
+    {
+        NS_LOG_WARN("Reactive routing update skipped: calculator is null");
+        return;
+    }
+
+    SetStaticRoutes(m_reactiveCalculator,
+                    m_reactiveSources,
+                    m_reactiveDestinations,
+                    m_reactiveVerbose);
 }
 
 } // namespace ns3

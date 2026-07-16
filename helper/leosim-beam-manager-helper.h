@@ -212,6 +212,18 @@ class LeoSimBeamManagerHelper
      */
     void SetMaxCandidates(uint32_t maxCandidates);
 
+    /**
+     * \brief Enable single-best-link mode for ground-satellite connections
+     *
+     * When enabled, only the single best beam (highest SINR) per satellite is
+     * established for UE connections. This implements state-of-the-art link
+     * selection where secondary/potential links are not considered during route
+     * calculation. This optimizes link quality and reduces routing complexity.
+     *
+     * \param enable True to enable single-best-link mode, false for standard multi-beam (default: false)
+     */
+    void SetSingleBestLinkMode(bool enable);
+
     /** @} */
 
     /**
@@ -299,6 +311,26 @@ class LeoSimBeamManagerHelper
      * \param sinrDb SINR threshold in dB for beam switching (default: 3.0 dB)
      */
     void SetSinrThreshold(double sinrDb);
+
+    /**
+     * \brief Set the multi-beam model for spot-beam topology and phased array steering.
+     * \param model Pointer to LeoSimMultiBeamModel instance.
+     *
+     * Must be called before Install() when phased array steering is required.
+     */
+    void SetMultiBeamModel(Ptr<LeoSimMultiBeamModel> model);
+
+    /**
+     * \brief Set the phased array beam steering update interval.
+     * \param interval Steering update period (default: same as update interval).
+     */
+    void SetPhasedArraySteeringInterval(Time interval);
+
+    /**
+     * \brief Set the beam footprint geometry update interval.
+     * \param interval Geometry update period.
+     */
+    void SetBeamGeometryUpdateInterval(Time interval);
 
     /** @} */
 
@@ -404,8 +436,12 @@ class LeoSimBeamManagerHelper
 
     // Multi-beam configuration
     LeoSimBeamConfig m_beamConfig;
+    Ptr<LeoSimMultiBeamModel> m_multiBeamModel;         //!< Multi-beam / phased array model
+    Time m_phasedArraySteeringInterval;                 //!< Phased array re-steering period
+    Time m_beamGeometryUpdateInterval;                  //!< Beam footprint refresh period
     Time m_intraBeamHoDelay;
     double m_sinrThresholdDb;
+    bool m_singleBestLinkMode;
 
     // Debug
     bool m_verbose;

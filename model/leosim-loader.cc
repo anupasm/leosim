@@ -26,7 +26,9 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <filesystem>
 #include <fstream>
+#include <limits>
 #include <sstream>
 
 namespace ns3
@@ -35,6 +37,150 @@ namespace ns3
 NS_LOG_COMPONENT_DEFINE("LeoSimLoader");
 
 NS_OBJECT_ENSURE_REGISTERED(LeoSimLoader);
+
+namespace
+{
+
+std::vector<std::filesystem::path>
+ListFilesWithExtensions(const std::string& directory, const std::vector<std::string>& extensions)
+{
+    std::vector<std::filesystem::path> files;
+    std::error_code ec;
+    if (!std::filesystem::exists(directory, ec) || !std::filesystem::is_directory(directory, ec))
+    {
+        return files;
+    }
+
+    for (const auto& entry : std::filesystem::directory_iterator(directory, ec))
+    {
+        if (ec)
+        {
+            break;
+        }
+        if (!entry.is_regular_file())
+        {
+            continue;
+        }
+
+        const auto extension = entry.path().extension().string();
+        if (std::find(extensions.begin(), extensions.end(), extension) != extensions.end())
+        {
+            files.push_back(entry.path());
+        }
+    }
+
+    std::sort(files.begin(), files.end());
+    return files;
+}
+
+std::vector<std::filesystem::path>
+ListTextFiles(const std::string& directory)
+{
+    return ListFilesWithExtensions(directory, {".txt"});
+}
+
+std::vector<std::filesystem::path>
+ListTleInputFiles(const std::string& directory)
+{
+    return ListFilesWithExtensions(directory, {".txt", ".csv"});
+}
+
+LeoSimOperatorId
+OperatorFromPath(const std::filesystem::path& path)
+{
+    return path.stem().string();
+}
+
+uint32_t
+CountValidTleTriplets(const std::filesystem::path& path)
+{
+    std::ifstream file(path);
+    if (!file.is_open())
+    {
+        NS_LOG_WARN("Failed to open TLE file for operator assignment: " << path.string());
+        return 0;
+    }
+
+    std::vector<std::string> lines;
+    std::string line;
+    while (std::getline(file, line))
+    {
+        const auto firstContent = line.find_first_not_of(" \t\r");
+        if (firstContent == std::string::npos || line[firstContent] == '#')
+        {
+            continue;
+        }
+        lines.push_back(line);
+    }
+
+    uint32_t count = 0;
+    for (size_t i = 0; i + 2 < lines.size();)
+    {
+        const bool valid = lines[i + 1].rfind("1 ", 0) == 0 && lines[i + 2].rfind("2 ", 0) == 0;
+        if (valid)
+        {
+            ++count;
+            i += 3;
+        }
+        else
+        {
+            ++i;
+        }
+    }
+    return count;
+}
+
+uint32_t
+CountValidTleCsvRows(const std::filesystem::path& path)
+{
+    std::ifstream file(path);
+    if (!file.is_open())
+    {
+        NS_LOG_WARN("Failed to open TLE CSV file for operator assignment: " << path.string());
+        return 0;
+    }
+
+    uint32_t count = 0;
+    std::string line;
+    while (std::getline(file, line))
+    {
+        const auto firstContent = line.find_first_not_of(" \t\r");
+        if (firstContent == std::string::npos || line[firstContent] == '#')
+        {
+            continue;
+        }
+
+        auto firstTokenEnd = line.find(',');
+        std::string firstToken = line.substr(0, firstTokenEnd);
+        firstToken.erase(std::remove_if(firstToken.begin(),
+                                        firstToken.end(),
+                                        [](unsigned char c) { return std::isspace(c); }),
+                         firstToken.end());
+        std::transform(firstToken.begin(),
+                       firstToken.end(),
+                       firstToken.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (firstToken == "object_name")
+        {
+            continue;
+        }
+
+        ++count;
+    }
+    return count;
+}
+
+uint32_t
+CountValidTleInputs(const std::filesystem::path& path)
+{
+    if (path.extension() == ".csv")
+    {
+        return CountValidTleCsvRows(path);
+    }
+    return CountValidTleTriplets(path);
+}
+
+} // namespace
 
 // WGS84 ellipsoid constants
 static const double WGS84_A = 6378137.0;               // Semi-major axis (m)
@@ -158,7 +304,7 @@ LeoSimLoader::LoadSatellitesFromCsv(const std::string& filename)
     file.close();
 
     m_numSatellites = m_satelliteData.size();
-    NS_LOG_INFO("Loaded " << m_numSatellites << " satellites from " << filename);
+    NS_LOG_DEBUG("Loaded " << m_numSatellites << " satellites from " << filename);
 
     return m_numSatellites;
 }
@@ -295,11 +441,11 @@ LeoSimLoader::LoadSatellitesFromTrace(const std::string& filename)
             m_satelliteNames[satId] = fields[1];
         }
         namesStream.close();
-        NS_LOG_INFO("Loaded satellite names from " << namesFile);
+        NS_LOG_DEBUG("Loaded satellite names from " << namesFile);
     }
 
     m_numSatellites = m_satelliteData.size();
-    NS_LOG_INFO("Loaded " << m_numSatellites << " satellites from trace file " << filename);
+    NS_LOG_DEBUG("Loaded " << m_numSatellites << " satellites from trace file " << filename);
 
     return m_numSatellites;
 }
@@ -320,6 +466,192 @@ uint32_t
 LeoSimLoader::LoadUEsFromCsv(const std::string& filename)
 {
     return LoadGroundDevicesFromCsvInternal(filename, false, "UE");
+}
+
+uint32_t
+LeoSimLoader::LoadGroundStationsFromText(const std::string& filename,
+                                         const LeoSimOperatorId& operatorId,
+                                         bool clearExisting)
+{
+    return LoadGroundDevicesFromTextInternal(filename, "SERVER", operatorId, clearExisting);
+}
+
+uint32_t
+LeoSimLoader::LoadUEsFromText(const std::string& filename,
+                              const LeoSimOperatorId& operatorId,
+                              bool clearExisting)
+{
+    return LoadGroundDevicesFromTextInternal(filename, "UE", operatorId, clearExisting);
+}
+
+uint32_t
+LeoSimLoader::LoadGroundDevicesFromDataDirectory(const std::string& dataDir,
+                                                 const std::vector<LeoSimOperatorId>& operators)
+{
+    NS_LOG_FUNCTION(this << dataDir);
+
+    if (operators.empty())
+    {
+        return LoadGroundDevicesFromDataDirectory(dataDir);
+    }
+
+    m_groundDevices.clear();
+    m_groundDeviceOperators.clear();
+    m_numGroundDevices = 0;
+
+    uint32_t loaded = 0;
+    for (const auto& opId : operators)
+    {
+        if (opId.empty())
+        {
+            continue;
+        }
+
+        const std::string gssFile = dataDir + "/gss/" + opId + ".txt";
+        const std::string ueFile = dataDir + "/ues/" + opId + ".txt";
+
+        loaded += LoadGroundStationsFromText(gssFile, opId, false);
+        loaded += LoadUEsFromText(ueFile, opId, false);
+    }
+
+    m_numGroundDevices = m_groundDevices.size();
+    return loaded;
+}
+
+uint32_t
+LeoSimLoader::LoadGroundDevicesFromDataDirectory(const std::string& dataDir)
+{
+    NS_LOG_FUNCTION(this << dataDir);
+
+    m_groundDevices.clear();
+    m_groundDeviceOperators.clear();
+    m_numGroundDevices = 0;
+
+    uint32_t loaded = 0;
+    for (const auto& gssFile : ListTextFiles(dataDir + "/gss"))
+    {
+        loaded += LoadGroundStationsFromText(gssFile.string(), OperatorFromPath(gssFile), false);
+    }
+    for (const auto& ueFile : ListTextFiles(dataDir + "/ues"))
+    {
+        loaded += LoadUEsFromText(ueFile.string(), OperatorFromPath(ueFile), false);
+    }
+
+    m_numGroundDevices = m_groundDevices.size();
+    return loaded;
+}
+
+uint32_t
+LeoSimLoader::LoadSatelliteOperatorsFromDataDirectory(const std::string& dataDir)
+{
+    NS_LOG_FUNCTION(this << dataDir);
+
+    m_satelliteOperators.clear();
+
+    uint32_t satIndex = 0;
+    for (const auto& tleFile : ListTleInputFiles(dataDir + "/tles"))
+    {
+        const LeoSimOperatorId opId = OperatorFromPath(tleFile);
+        const uint32_t numSatellitesInFile = CountValidTleInputs(tleFile);
+        for (uint32_t i = 0; i < numSatellitesInFile; ++i)
+        {
+            m_satelliteOperators[satIndex++] = opId;
+        }
+    }
+
+    NS_LOG_DEBUG("Loaded " << m_satelliteOperators.size()
+                           << " satellite operator assignments from " << dataDir << "/tles");
+    return m_satelliteOperators.size();
+}
+
+uint32_t
+LeoSimLoader::GetNextGroundDeviceId() const
+{
+    uint32_t nextId = 0;
+    for (const auto& entry : m_groundDevices)
+    {
+        if (entry.first == std::numeric_limits<uint32_t>::max())
+        {
+            continue;
+        }
+        nextId = std::max(nextId, entry.first + 1);
+    }
+    return nextId;
+}
+
+uint32_t
+LeoSimLoader::LoadGroundDevicesFromTextInternal(const std::string& filename,
+                                                const std::string& defaultDeviceType,
+                                                const LeoSimOperatorId& defaultOperator,
+                                                bool clearExisting)
+{
+    NS_LOG_FUNCTION(this << filename << defaultDeviceType << defaultOperator);
+
+    std::ifstream file(filename);
+    if (!file.is_open())
+    {
+        NS_LOG_WARN("Failed to open LeoSim data file: " << filename);
+        return 0;
+    }
+
+    if (clearExisting)
+    {
+        m_groundDevices.clear();
+        m_groundDeviceOperators.clear();
+    }
+
+    uint32_t nextId = GetNextGroundDeviceId();
+    uint32_t loaded = 0;
+    std::string line;
+
+    while (std::getline(file, line))
+    {
+        const auto firstContent = line.find_first_not_of(" \t\r");
+        if (firstContent == std::string::npos || line[firstContent] == '#')
+        {
+            continue;
+        }
+
+        auto fields = ParseCsvLine(line);
+        if (fields.size() < 3)
+        {
+            NS_LOG_WARN("Skipping malformed ground-device row in " << filename << ": " << line);
+            continue;
+        }
+        if (fields[0] == "name" || fields[0] == "device_name")
+        {
+            continue;
+        }
+
+        GroundDevice device;
+        device.deviceId = nextId++;
+        device.deviceName = fields[0];
+        device.deviceType = defaultDeviceType;
+        device.isGeodetic = true;
+
+        double lat = std::stod(fields[1]);
+        double lon = std::stod(fields[2]);
+        double alt = 0.0;
+        if (fields.size() > 3 && !fields[3].empty())
+        {
+            alt = std::stod(fields[3]);
+        }
+        device.latitudeDeg = lat;
+        device.longitudeDeg = lon;
+        device.altitudeM = alt;
+        device.position = GeodeticToCartesian(lat, lon, alt);
+
+        m_groundDevices[device.deviceId] = device;
+        m_groundDeviceOperators[device.deviceId] =
+            defaultOperator.empty() ? "default" : defaultOperator;
+        loaded++;
+    }
+
+    file.close();
+    m_numGroundDevices = m_groundDevices.size();
+
+    NS_LOG_DEBUG("Loaded " << loaded << " " << defaultDeviceType << " devices from " << filename);
+    return loaded;
 }
 
 uint32_t
@@ -436,6 +768,9 @@ LeoSimLoader::LoadGroundDevicesFromCsvInternal(const std::string& filename,
             double lat = std::stod(fields[latIndex]);
             double lon = std::stod(fields[lonIndex]);
             double alt = std::stod(fields[altIndex]);
+            device.latitudeDeg = lat;
+            device.longitudeDeg = lon;
+            device.altitudeM = alt;
 
             // Convert to Cartesian
             device.position = GeodeticToCartesian(lat, lon, alt);
@@ -454,6 +789,10 @@ LeoSimLoader::LoadGroundDevicesFromCsvInternal(const std::string& filename,
             device.position.y = std::stod(fields[yPosIndex]);
             device.position.z = std::stod(fields[zPosIndex]);
             device.isGeodetic = false;
+            Vector lla = CartesianToGeodetic(device.position);
+            device.latitudeDeg = lla.x;
+            device.longitudeDeg = lla.y;
+            device.altitudeM = lla.z;
         }
 
         // Optional 7th column: Operator
@@ -480,7 +819,7 @@ LeoSimLoader::LoadGroundDevicesFromCsvInternal(const std::string& filename,
     file.close();
 
     m_numGroundDevices = m_groundDevices.size();
-    NS_LOG_INFO("Loaded " << m_numGroundDevices << " ground devices from " << filename);
+    NS_LOG_DEBUG("Loaded " << m_numGroundDevices << " ground devices from " << filename);
 
     return m_numGroundDevices;
 }
@@ -592,7 +931,7 @@ LeoSimLoader::LoadSatelliteOperatorsFromCsv(const std::string& csvFile)
         m_satelliteOperators[satIndex] = fields[1];
     }
 
-    NS_LOG_INFO("Loaded " << m_satelliteOperators.size() << " satellite operator assignments from "
+    NS_LOG_DEBUG("Loaded " << m_satelliteOperators.size() << " satellite operator assignments from "
                            << csvFile);
 }
 
@@ -657,7 +996,7 @@ LeoSimLoader::ApplySatelliteMobility(NodeContainer& nodes)
         if (m_satelliteData.count(i) && !m_satelliteData[i].empty())
         {
             mobility->SetPosition(m_satelliteData[i][0].position);
-            NS_LOG_INFO("Set initial position for satellite " << i << " (" << GetSatelliteName(i)
+            NS_LOG_DEBUG("Set initial position for satellite " << i << " (" << GetSatelliteName(i)
                                                                << "): " << m_satelliteData[i][0].position);
         }
 
@@ -700,7 +1039,7 @@ LeoSimLoader::ApplyGroundDevicePositions(NodeContainer& nodes)
 
         // Set position
         mobility->SetPosition(it->second.position);
-        NS_LOG_INFO("Set position for ground device " << deviceId << " (" << it->second.deviceName
+        NS_LOG_DEBUG("Set position for ground device " << deviceId << " (" << it->second.deviceName
                                                        << "): " << it->second.position);
 
         deviceId++;
@@ -734,9 +1073,27 @@ LeoSimLoader::GetGroundDevicePosition(uint32_t deviceId) const
 std::pair<double, double>
 LeoSimLoader::GetGroundDeviceLatLon(uint32_t deviceId) const
 {
-    Vector pos = GetGroundDevicePosition(deviceId);
-    Vector lla = CartesianToGeodetic(pos);
+    Vector lla = GetGroundDeviceLatLonAlt(deviceId);
     return {lla.x, lla.y};
+}
+
+Vector
+LeoSimLoader::GetGroundDeviceLatLonAlt(uint32_t deviceId) const
+{
+    auto it = m_groundDevices.find(deviceId);
+    if (it != m_groundDevices.end())
+    {
+        return Vector(it->second.latitudeDeg, it->second.longitudeDeg, it->second.altitudeM);
+    }
+
+    Vector pos = GetGroundDevicePosition(deviceId);
+    return CartesianToGeodetic(pos);
+}
+
+double
+LeoSimLoader::GetGroundDeviceAltitude(uint32_t deviceId) const
+{
+    return GetGroundDeviceLatLonAlt(deviceId).z;
 }
 
 void
@@ -760,7 +1117,7 @@ LeoSimLoader::ScheduleSatellitePositions(Ptr<Node> node, uint32_t satId)
                             pos.position);
     }
 
-    NS_LOG_INFO("Scheduled " << it->second.size() << " position updates for satellite " << satId);
+    NS_LOG_DEBUG("Scheduled " << it->second.size() << " position updates for satellite " << satId);
 }
 
 void
@@ -953,7 +1310,7 @@ LeoSimLoader::SetSatellitesPerPlane(uint32_t count)
     }
 
     m_satellitesPerPlane = count;
-    NS_LOG_INFO("Set satellites per plane to " << m_satellitesPerPlane);
+    NS_LOG_DEBUG("Set satellites per plane to " << m_satellitesPerPlane);
 }
 
 uint32_t
@@ -963,4 +1320,3 @@ LeoSimLoader::GetSatellitesPerPlane() const
 }
 
 } // namespace ns3
-

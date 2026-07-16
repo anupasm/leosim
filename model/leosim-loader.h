@@ -57,6 +57,9 @@ struct GroundDevice
     std::string deviceName;  //!< Device name
     std::string deviceType;  //!< Device type ("SERVER" or "UE")
     Vector position;         //!< Position (x, y, z) in meters or (lat, lon, alt)
+    double latitudeDeg;      //!< Latitude in degrees when available
+    double longitudeDeg;     //!< Longitude in degrees when available
+    double altitudeM;        //!< Altitude above WGS84 ellipsoid in meters
     bool isGeodetic;         //!< True if position is geodetic (lat, lon, alt)
 };
 
@@ -121,6 +124,82 @@ class LeoSimLoader : public Object
      * \return Number of ground devices loaded
      */
     uint32_t LoadUEsFromCsv(const std::string& filename);
+
+    /**
+     * \brief Load ground-station devices from a LeoSim data text file.
+     *
+     * Expected row format: name,latitude_deg,longitude_deg[,altitude_m]
+     * Devices loaded through this method use type "SERVER" for compatibility with
+     * the existing example traffic sink path.
+     *
+     * \param filename Path to data/gss/<operator>.txt
+     * \param operatorId Operator identifier, normally taken from the file name stem
+     * \param clearExisting Whether to clear existing ground devices before loading
+     * \return Number of devices loaded from this file
+     */
+    uint32_t LoadGroundStationsFromText(const std::string& filename,
+                                        const LeoSimOperatorId& operatorId,
+                                        bool clearExisting = false);
+
+    /**
+     * \brief Load UE devices from a LeoSim data text file.
+     *
+     * Expected row format: name,latitude_deg,longitude_deg[,altitude_m]
+     *
+     * \param filename Path to data/ues/<operator>.txt
+     * \param operatorId Operator identifier, normally taken from the file name stem
+     * \param clearExisting Whether to clear existing ground devices before loading
+     * \return Number of devices loaded from this file
+     */
+    uint32_t LoadUEsFromText(const std::string& filename,
+                             const LeoSimOperatorId& operatorId,
+                             bool clearExisting = false);
+
+    /**
+     * \brief Load ground stations and UEs from contrib/leosim/data layout.
+     *
+     * Scans:
+     *   files under <dataDir>/gss with .txt suffix as ground stations
+     *   files under <dataDir>/ues with .txt suffix as UEs
+     *
+     * The operator ID is derived from each file name stem, for example
+     * gss/alpha.txt and ues/alpha.txt assign operator "alpha".
+     *
+     * \param dataDir LeoSim data directory
+     * \return Number of ground devices loaded
+     */
+    uint32_t LoadGroundDevicesFromDataDirectory(const std::string& dataDir);
+
+    /**
+     * \brief Load ground stations and UEs from contrib/leosim/data layout.
+     *
+     * If operators is empty, this behaves like LoadGroundDevicesFromDataDirectory(dataDir)
+     * and discovers operators from file names. Otherwise, for each operator token, this loads:
+     *   <dataDir>/gss/<operator>.txt as ground stations
+     *   <dataDir>/ues/<operator>.txt as UEs
+     *
+     * \param dataDir LeoSim data directory
+     * \param operators Operator identifiers to load
+     * \return Number of ground devices loaded
+     */
+    uint32_t LoadGroundDevicesFromDataDirectory(const std::string& dataDir,
+                                                const std::vector<LeoSimOperatorId>& operators);
+
+    /**
+     * \brief Assign satellite operators from contrib/leosim/data/tles file names.
+     *
+     * Scans .txt and .csv files under <dataDir>/tles in lexical order. Each valid TLE triplet
+     * in a text file or CelesTrak-style CSV row assigns the next zero-based satellite index
+     * to the operator from the file stem, for example tles/beta.txt or tles/beta.csv assigns
+     * operator "beta".
+     *
+     * This is intended for preprocessed mobility traces whose satellite IDs preserve
+     * the same ordering used when the TLE files were converted.
+     *
+     * \param dataDir LeoSim data directory
+     * \return Number of satellite operator assignments loaded
+     */
+    uint32_t LoadSatelliteOperatorsFromDataDirectory(const std::string& dataDir);
 
     /**
      * \brief Get the number of satellites loaded
@@ -232,6 +311,20 @@ class LeoSimLoader : public Object
     std::pair<double, double> GetGroundDeviceLatLon(uint32_t deviceId) const;
 
     /**
+     * \brief Get ground device latitude, longitude, and altitude.
+     * \param deviceId Device ID.
+     * \return Vector(latitude_deg, longitude_deg, altitude_m).
+     */
+    Vector GetGroundDeviceLatLonAlt(uint32_t deviceId) const;
+
+    /**
+     * \brief Get ground device altitude in meters.
+     * \param deviceId Device ID.
+     * \return Altitude above WGS84 ellipsoid in meters.
+     */
+    double GetGroundDeviceAltitude(uint32_t deviceId) const;
+
+    /**
      * \brief Convert geodetic coordinates to Cartesian (ECEF)
      * \param latitude Latitude in degrees
      * \param longitude Longitude in degrees
@@ -308,6 +401,13 @@ class LeoSimLoader : public Object
     uint32_t LoadGroundDevicesFromCsvInternal(const std::string& filename,
                           bool clearExisting,
                           const std::string& defaultDeviceType);
+
+    uint32_t LoadGroundDevicesFromTextInternal(const std::string& filename,
+                                               const std::string& defaultDeviceType,
+                                               const LeoSimOperatorId& defaultOperator,
+                                               bool clearExisting);
+
+    uint32_t GetNextGroundDeviceId() const;
 
     std::map<uint32_t, std::vector<SatellitePosition>> m_satelliteData; //!< Satellite position data
     std::map<uint32_t, std::string> m_satelliteNames;                   //!< Satellite names

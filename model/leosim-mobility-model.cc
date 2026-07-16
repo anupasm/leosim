@@ -155,7 +155,7 @@ LeoSimMobilityModel::Start()
     // For stationary nodes (gateways), don't schedule updates
     if (m_nodeType == LEOSIM_GATEWAY)
     {
-        NS_LOG_INFO("Gateway node " << m_nodeId << " at fixed position");
+        NS_LOG_DEBUG("Gateway node " << m_nodeId << " at fixed position");
         return;
     }
 
@@ -164,7 +164,7 @@ LeoSimMobilityModel::Start()
     {
         Time nextUpdate = m_waypoints[1].time;
         m_event = Simulator::Schedule(nextUpdate, &LeoSimMobilityModel::UpdatePosition, this);
-        NS_LOG_INFO("Scheduled " << m_waypoints.size() << " waypoints for node " << m_nodeId);
+        NS_LOG_DEBUG("Scheduled " << m_waypoints.size() << " waypoints for node " << m_nodeId);
     }
 }
 
@@ -257,7 +257,7 @@ LeoSimMobilityModel::UpdatePosition()
     }
     else
     {
-        NS_LOG_INFO("Node " << m_nodeId << " completed all waypoints");
+        NS_LOG_DEBUG("Node " << m_nodeId << " completed all waypoints");
         m_active = false;
     }
 }

@@ -43,15 +43,6 @@ LeoSimLoaderHelper::LoadSatellitesFromCsv(const std::string& filename)
     NS_LOG_FUNCTION(this << filename);
 
     uint32_t numLoaded = m_loader->LoadSatellitesFromCsv(filename);
-    
-    if (m_verbose)
-    {
-        std::cout << "Loaded " << numLoaded << " satellites from " << filename << std::endl;
-        for (uint32_t i = 0; i < numLoaded; ++i)
-        {
-            std::cout << "  Satellite " << i << ": " << m_loader->GetSatelliteName(i) << std::endl;
-        }
-    }
 
     return numLoaded > 0;
 }
@@ -90,6 +81,38 @@ LeoSimLoaderHelper::LoadGroundDevicesFromCsv(const std::string& filename)
             std::cout << "  Ground Device " << i << ": " << m_loader->GetGroundDeviceName(i)
                       << std::endl;
         }
+    }
+
+    return numLoaded > 0;
+}
+
+bool
+LeoSimLoaderHelper::LoadGroundDevicesFromDataDirectory(
+    const std::string& dataDir,
+    const std::vector<LeoSimOperatorId>& operators)
+{
+    NS_LOG_FUNCTION(this << dataDir);
+
+    uint32_t numLoaded = m_loader->LoadGroundDevicesFromDataDirectory(dataDir, operators);
+
+    if (m_verbose)
+    {
+        std::cout << "Loaded " << numLoaded << " ground devices from " << dataDir << std::endl;
+    }
+
+    return numLoaded > 0;
+}
+
+bool
+LeoSimLoaderHelper::LoadGroundDevicesFromDataDirectory(const std::string& dataDir)
+{
+    NS_LOG_FUNCTION(this << dataDir);
+
+    uint32_t numLoaded = m_loader->LoadGroundDevicesFromDataDirectory(dataDir);
+
+    if (m_verbose)
+    {
+        std::cout << "Loaded " << numLoaded << " ground devices from " << dataDir << std::endl;
     }
 
     return numLoaded > 0;

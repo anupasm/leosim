@@ -36,7 +36,17 @@ constexpr double PI = 3.14159265358979323846;
 constexpr double EARTH_RADIUS_KM = 6371.0;
 constexpr double DEFAULT_SAT_ALTITUDE_KM = 550.0;
 constexpr double DEFAULT_CARRIER_FREQ_HZ = 20.0e9;
-constexpr double MAX_ANTENNA_GAIN_DBI = 30.0;
+
+inline double
+WrapLongitudeDelta(double deltaDeg)
+{
+	deltaDeg = std::fmod(deltaDeg + 180.0, 360.0);
+	if (deltaDeg < 0.0)
+	{
+		deltaDeg += 360.0;
+	}
+	return deltaDeg - 180.0;
+}
 
 inline double
 DegToRad(double deg)
@@ -115,46 +125,6 @@ LeoSimSinrEngine::GetTypeId()
                             .SetGroupName("LeoSim")
                             .AddConstructor<LeoSimSinrEngine>();
     return tid;
-}
-
-double
-LeoSimSpotBeam::GetAntennaGain(double offBoresightDeg) const
-{
-    const double offBoresightRad = DegToRad(offBoresightDeg);
-    const double theta3dBDeg = 0.7 * (radiusKm / 600.0) * (180.0 / PI);
-    const double theta3dBRad = DegToRad(theta3dBDeg);
-
-    if (std::abs(theta3dBRad) < 1e-12)
-    {
-        return MAX_ANTENNA_GAIN_DBI;
-    }
-
-    const double sinDen = std::sin(theta3dBRad);
-    if (std::abs(sinDen) < 1e-12)
-    {
-        return MAX_ANTENNA_GAIN_DBI;
-    }
-
-    const double u = 2.07123 * std::sin(offBoresightRad) / sinDen;
-    if (u < 0.001)
-    {
-        return MAX_ANTENNA_GAIN_DBI;
-    }
-
-    double j1uOverU = 0.0;
-    if (u < 3.8)
-    {
-        const double u2 = u * u;
-        const double u4 = u2 * u2;
-        j1uOverU = 0.5 - u2 / 16.0 + u4 / 384.0;
-    }
-    else
-    {
-        j1uOverU = std::sqrt(2.0 / (PI * u)) * std::cos(u - 3.0 * PI / 4.0);
-    }
-
-    const double gainLinear = std::pow(2.0 * j1uOverU, 2.0);
-    return MAX_ANTENNA_GAIN_DBI + 10.0 * std::log10(std::max(gainLinear, 1e-10));
 }
 
 void
@@ -256,6 +226,15 @@ LeoSimSinrEngine::ComputeSinr(uint32_t ueNodeId,
         const double satLon = satSubpoint.second;
 
         const double satGroundDistanceKm = GreatCircleDistanceKm(ueLat, ueLon, satLat, satLon);
+        // A satellite below the geometric radio horizon is occulted by Earth and
+        // cannot contribute co-channel interference at this ground terminal.
+        const double horizonCentralAngleRad =
+            std::acos(EARTH_RADIUS_KM / (EARTH_RADIUS_KM + DEFAULT_SAT_ALTITUDE_KM));
+        const double horizonGroundDistanceKm = EARTH_RADIUS_KM * horizonCentralAngleRad;
+        if (satGroundDistanceKm > horizonGroundDistanceKm)
+        {
+            continue;
+        }
         const double satSlantDistanceKm =
             std::sqrt(satGroundDistanceKm * satGroundDistanceKm +
                       DEFAULT_SAT_ALTITUDE_KM * DEFAULT_SAT_ALTITUDE_KM);
@@ -322,9 +301,9 @@ LeoSimSinrEngine::ComputeOffBoresightAngle(double beamCenterLat,
     const double kmPerDegLat = 111.32;
     const double kmPerDegLon = kmPerDegLat * std::max(1e-6, std::cos(satLatRad));
 
-    const double beamX = (beamCenterLon - satLon) * kmPerDegLon;
+    const double beamX = WrapLongitudeDelta(beamCenterLon - satLon) * kmPerDegLon;
     const double beamY = (beamCenterLat - satLat) * kmPerDegLat;
-    const double ueX = (ueLon - satLon) * kmPerDegLon;
+    const double ueX = WrapLongitudeDelta(ueLon - satLon) * kmPerDegLon;
     const double ueY = (ueLat - satLat) * kmPerDegLat;
 
     const double beamNorm = std::sqrt(beamX * beamX + beamY * beamY);

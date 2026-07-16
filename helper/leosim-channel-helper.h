@@ -21,6 +21,7 @@
 #include "ns3/leosim-channel-model.h"
 #include "ns3/node-container.h"
 #include "ns3/ptr.h"
+#include "ns3/vector.h"
 
 namespace ns3
 {
@@ -47,7 +48,7 @@ class LeoSimChannelHelper
     ~LeoSimChannelHelper();
 
     /**
-     * \brief Create channels between all satellites and all ground nodes
+     * \brief Create bounded channels between satellites and ground nodes
      * \param satellites Satellite nodes
      * \param groundNodes Ground nodes (gateways and/or UEs)
      * \return Pointer to created channel model
@@ -80,12 +81,69 @@ class LeoSimChannelHelper
     Ptr<LeoSimChannelModel> CreateIslMesh(NodeContainer satellites);
 
     /**
+     * \brief Create bounded nearest-neighbor ISL candidates.
+     *
+     * This avoids the O(N^2) link count of a full ISL mesh. A bounded spatial
+     * candidate set is used to construct a degree-limited spanning forest,
+     * followed by shortest-edge capacity filling. Connectivity is audited.
+     *
+     * \param satellites Satellite nodes
+     * \param maxNeighbors Maximum nearest neighbors per satellite
+     * \return Pointer to created channel model with bounded ISL links
+     */
+    Ptr<LeoSimChannelModel> CreateIslNearestNeighborMesh(NodeContainer satellites,
+                                                         uint32_t maxNeighbors);
+
+    /**
+     * \brief Create realistic bounded ISL topology candidates.
+     *
+     * Satellites are interpreted as a plane-major constellation grid:
+     * index = plane * satellitesPerPlane + slot. Each satellite gets candidate
+     * ISLs to the forward/backward satellites in the same plane and to the same
+     * slot in the two adjacent planes. Physical availability is still governed
+     * by the channel model's ISL distance and quality constraints.
+     *
+     * \param satellites Satellite nodes in plane-major order
+     * \param satellitesPerPlane Number of slots in each orbital plane
+     * \param wrapPlanes Whether first/last planes are adjacent
+     * \return Pointer to created channel model with bounded ISL links
+     */
+    Ptr<LeoSimChannelModel> CreateIslGridTopology(NodeContainer satellites,
+                                                  uint32_t satellitesPerPlane,
+                                                  bool wrapPlanes = true);
+
+    /**
      * \brief Add ISL links to existing channel model
      * \param channelModel Existing channel model
      * \param satellites Satellite nodes
      * \return Number of ISL links added
      */
     uint32_t AddIslLinks(Ptr<LeoSimChannelModel> channelModel, NodeContainer satellites);
+
+    /**
+     * \brief Add bounded nearest-neighbor ISL links to an existing channel model.
+     * \param channelModel Existing channel model
+     * \param satellites Satellite nodes
+     * \param maxNeighbors Maximum nearest neighbors per satellite
+     * \return Number of ISL links added
+     */
+    uint32_t AddNearestNeighborIslLinks(Ptr<LeoSimChannelModel> channelModel,
+                                        NodeContainer satellites,
+                                        uint32_t maxNeighbors);
+
+    /**
+     * \brief Add realistic bounded ISL topology candidates to an existing model.
+     * \param channelModel Existing channel model
+     * \param satellites Satellite nodes in plane-major order
+     * \param satellitesPerPlane Number of slots in each orbital plane
+     * \param wrapPlanes Whether first/last planes are adjacent
+     * Candidate pairs outside the configured ISL range at creation time are skipped.
+     * \return Number of initially in-range ISL links added
+     */
+    uint32_t AddGridIslLinks(Ptr<LeoSimChannelModel> channelModel,
+                             NodeContainer satellites,
+                             uint32_t satellitesPerPlane,
+                             bool wrapPlanes = true);
 
     /**
      * \brief Add single ISL link to existing channel model
@@ -115,6 +173,12 @@ class LeoSimChannelHelper
     void AddLinks(Ptr<LeoSimChannelModel> channelModel,
                   NodeContainer satellites,
                   NodeContainer groundNodes);
+
+    /**
+     * \brief Set maximum satellite access-link candidates per ground node
+     * \param maxLinks Maximum links to create per ground node, minimum 1
+     */
+    void SetMaxGroundLinksPerNode(uint32_t maxLinks);
 
     /**
      * \brief Set minimum elevation angle
@@ -255,7 +319,26 @@ class LeoSimChannelHelper
      * \param groundNode Ground node
      * \return True if link is feasible based on elevation angle and distance constraints
      */
-    bool IsLinkFeasible(Ptr<Node> satellite, Ptr<Node> groundNode);
+    bool IsLinkFeasible(Ptr<Node> satellite, Ptr<Node> groundNode) const;
+
+    /**
+     * \brief Add bounded satellite-ground links to a channel model
+     * \param channelModel Existing channel model
+     * \param satellites Satellite nodes
+     * \param groundNodes Ground nodes
+     * \return Number of links added
+     */
+    uint32_t AddGroundAccessLinks(Ptr<LeoSimChannelModel> channelModel,
+                                  NodeContainer satellites,
+                                  NodeContainer groundNodes);
+
+    /**
+     * \brief Calculate elevation angle from ground node to satellite
+     * \param groundPos Ground-node ECEF position
+     * \param satPos Satellite ECEF position
+     * \return Elevation angle in degrees
+     */
+    double CalculateElevationAngle(const Vector& groundPos, const Vector& satPos) const;
 
     // Channel parameters
     double m_minElevationAngle;     //!< Minimum elevation angle (degrees)
@@ -269,6 +352,7 @@ class LeoSimChannelHelper
     bool m_atmosphericEnabled;      //!< Enable atmospheric attenuation
     Time m_updateInterval;          //!< Update interval
     bool m_verbose;                 //!< Verbose logging
+    uint32_t m_maxGroundLinksPerNode; //!< Maximum satellite candidates per ground node
 
     // ISL-specific parameters
     double m_islMaxDistance;        //!< Maximum ISL distance (meters)

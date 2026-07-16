@@ -21,18 +21,22 @@
 #include "ns3/internet-module.h"
 #include "ns3/ipv4-routing-table-entry.h"
 #include "ns3/ipv4-static-routing.h"
+#include "ns3/leosim-beam-layout-engine.h"
 #include "ns3/leosim-beam-manager-helper.h"
 #include "ns3/leosim-channel-helper.h"
 #include "ns3/leosim-channel-model.h"
 #include "ns3/leosim-channel.h"
 #include "ns3/leosim-device-installer.h"
-#include "ns3/leosim-isl-routing-model.h"
+#include "ns3/leosim-external-routing-helper.h"
 #include "ns3/leosim-loader-helper.h"
 #include "ns3/leosim-loader.h"
 #include "ns3/leosim-mobility-helper.h"
+#include "ns3/leosim-multi-beam-model.h"
 #include "ns3/leosim-operator-helper.h"
 #include "ns3/leosim-routing-calculator-helper.h"
 #include "ns3/leosim-routing-calculator.h"
+#include "ns3/leosim-statistics-helper.h"
+#include "ns3/leosim-task-profiler.h"
 #include "ns3/leosim-traffic-generator-helper.h"
 #include "ns3/leosim-visualization-helper.h"
 #include "ns3/leosim-weather-helper.h"
@@ -40,43 +44,221 @@
 #include "ns3/network-module.h"
 #include "ns3/output-stream-wrapper.h"
 
+#include <chrono>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <set>
+#include <algorithm>
 #include <vector>
 
 using namespace ns3;
 
 NS_LOG_COMPONENT_DEFINE("LeoSimTcpExample");
 
+namespace
+{
+
+class LeoSimTaskTimingLogger
+{
+  public:
+    explicit LeoSimTaskTimingLogger(std::ostream* output)
+        : m_output(output),
+          m_active(false),
+          m_startSimTimeSeconds(0.0)
+    {
+    }
+
+    ~LeoSimTaskTimingLogger()
+    {
+        Finish();
+    }
+
+    void Start(const std::string& taskName)
+    {
+        Finish();
+        if (m_output == nullptr)
+        {
+            return;
+        }
+
+        m_active = true;
+        m_taskName = taskName;
+        m_startWallTime = std::chrono::steady_clock::now();
+        m_startSimTimeSeconds = Simulator::Now().GetSeconds();
+    }
+
+    void Finish()
+    {
+        if (!m_active || m_output == nullptr)
+        {
+            return;
+        }
+
+        const auto endWallTime = std::chrono::steady_clock::now();
+        const double elapsedMs =
+            std::chrono::duration<double, std::milli>(endWallTime - m_startWallTime).count();
+
+        (*m_output) << m_taskName << "," << std::fixed << std::setprecision(6)
+                    << m_startSimTimeSeconds << "," << Simulator::Now().GetSeconds() << ","
+                    << elapsedMs << std::endl;
+        m_active = false;
+    }
+
+  private:
+    std::ostream* m_output;
+    bool m_active;
+    std::string m_taskName;
+    std::chrono::steady_clock::time_point m_startWallTime;
+    double m_startSimTimeSeconds;
+};
+
+struct LeoSimRuntimeKpiStats
+{
+    uint64_t totalSamples = 0;
+    uint64_t connectedSamples = 0;
+    double signalStrengthSumDbm = 0.0;
+    double signalStrengthMinDbm = std::numeric_limits<double>::max();
+    double signalStrengthMaxDbm = -std::numeric_limits<double>::max();
+};
+
+struct LeoSimProgressState
+{
+    std::chrono::steady_clock::time_point wallStart;
+};
+
+void
+LogSimulationProgress(Time interval, Time stopTime, LeoSimProgressState* state)
+{
+    if (state == nullptr)
+    {
+        return;
+    }
+
+    const double wallSeconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - state->wallStart).count();
+    std::cout << "[progress] sim=" << std::fixed << std::setprecision(1)
+              << Simulator::Now().GetSeconds() << "/" << stopTime.GetSeconds()
+              << "s wall=" << std::setprecision(1) << wallSeconds << "s" << std::endl;
+
+    if (Simulator::Now() + interval <= stopTime)
+    {
+        Simulator::Schedule(interval, &LogSimulationProgress, interval, stopTime, state);
+    }
+}
+
+void
+SampleServingLinkMetrics(Ptr<LeoSimBeamManager> beamManager,
+                         Ptr<LeoSimChannelModel> channelModel,
+                         Ptr<LeoSimStatisticsHelper> statistics,
+                         NodeContainer ueNodes,
+                         Time sampleInterval,
+                         Time stopTime,
+                         LeoSimRuntimeKpiStats* kpiStats)
+{
+    LeoSimTaskProfiler::ScopedEvent profile("run_simulation.kpi_sampling");
+
+    if (!beamManager || !channelModel || kpiStats == nullptr)
+    {
+        return;
+    }
+
+    for (uint32_t i = 0; i < ueNodes.GetN(); ++i)
+    {
+        uint32_t ueNodeId = ueNodes.Get(i)->GetId();
+        LeoSimBeamRecord servingBeam = beamManager->GetCurrentBeam(ueNodeId);
+
+        kpiStats->totalSamples++;
+        if (servingBeam.satelliteNodeId == std::numeric_limits<uint32_t>::max())
+        {
+            continue;
+        }
+
+        LeoSimChannelQuality quality =
+            channelModel->GetLinkQuality(ueNodeId, servingBeam.satelliteNodeId);
+        if (statistics)
+        {
+            statistics->RecordSnr(quality.snr);
+        }
+        if (quality.linkState == LEOSIM_LINK_DOWN)
+        {
+            continue;
+        }
+
+        kpiStats->connectedSamples++;
+        kpiStats->signalStrengthSumDbm += quality.signalStrength;
+        kpiStats->signalStrengthMinDbm =
+            std::min(kpiStats->signalStrengthMinDbm, quality.signalStrength);
+        kpiStats->signalStrengthMaxDbm =
+            std::max(kpiStats->signalStrengthMaxDbm, quality.signalStrength);
+    }
+
+    if (Simulator::Now() + sampleInterval <= stopTime)
+    {
+        Simulator::Schedule(sampleInterval,
+                            &SampleServingLinkMetrics,
+                            beamManager,
+                            channelModel,
+                            statistics,
+                            ueNodes,
+                            sampleInterval,
+                            stopTime,
+                            kpiStats);
+    }
+}
+
+} // namespace
+
 int
 main(int argc, char* argv[])
 {
-    std::string satelliteFile = "contrib/leosim/utils/satellite_mobility.tcl";
-    std::string groundDeviceFile = "contrib/leosim/utils/ground_devices.csv";
+    std::string leosimDataDir = "contrib/leosim/data";
+    std::string satelliteFile = leosimDataDir + "/prepro/satellite_mobility.tcl";
+    std::string groundDeviceFile = "";
     double simTime = 60.0;
     double logInterval = 1.0;
     double minElevation = 10.0;
     double frequency = 12.0e9;
     std::string positionFile = "leosim_positions.csv";
-    std::string linkFile = "leosim_links.csv";
     std::string packetFile = "leosim_packets.csv";
-    std::string beamFile = "leosim_beams.csv";
+    std::string linkStateFile = "leosim_link_state.csv";
+    std::string beamAssociationFile = "leosim_beam_associations.csv";
     std::string handoverFile = "leosim_handovers.csv";
     std::string choFile = "leosim_cho.csv";
+    std::string coverageFile = "leosim_coverage.csv";
+    std::string taskTimingFile = "leosim_task_times.csv";
+    std::string statisticsFile = "leosim_statistics.json";
+    std::string statisticsTimeSeriesFile = "leosim_statistics.csv";
+    double statisticsIntervalSeconds = 1.0;
     bool logPackets = true;
     bool logBeams = true;
+    uint32_t packetTraceNodeLimit = 150000;
+    std::string flowMonitorScope = "endpoints";
     bool verbose = true;
     bool useTrace = true;
     bool enablePeriodicRouting = true;
+    bool useExternalRouting = true;
+    std::string externalRoutingEngine = "contrib/leosim/utils/rengine/leosim-rengine";
+    std::string externalRoutingWorkDir = "/tmp/leosim-routing";
+    uint32_t externalRoutingWorkers = 10;
+    std::string externalRoutingMode = "destination-tree";
+    std::string externalRoutingMetric = "distance";
+    std::string routingEndpoints = "ground";
+    uint64_t externalRoutingMaxRequests = 10000000ULL;
+    bool destinationTreeAllNodes = true;
+    double routingReactiveDebounceMs = 200.0;
     double routingUpdateInterval = 10.0;
     double pathPrintInterval = 10.0;
-    uint32_t numSatellites = 300;
-    uint32_t numServers = 1;
-    uint32_t numUes = 1;
+    double progressLogInterval = 1.0;
+    uint32_t numSatellites = 30000;
+    uint32_t numServers = 1000;
+    uint32_t numUes = 1000000;
     bool enableIsl = true;
+    bool islFullMesh = false;
+    uint32_t maxIslNeighbors = 4;
+    uint32_t islSatellitesPerPlane = 20;
     double islFrequency = 26.0e9;
     double islMaxDistance = 5000000.0;
     double islTransmitPower = 30.0;
@@ -97,6 +279,7 @@ main(int argc, char* argv[])
     double a3OffsetDb = 3.0;
     double a4ThresholdDbm = -110.0;
     double tteTriggerSeconds = 30.0;
+    double beamSinrThresholdDb = -10.0;
     double wRsrp = 0.30;
     double wSinr = 0.25;
     double wTte = 0.20;
@@ -109,6 +292,22 @@ main(int argc, char* argv[])
     double choExec = 150.0;
     bool enableLoadBalancing = true;
     bool enableHoBuffering = true;
+
+    // === Phased Array Beam Steering Configuration ===
+    bool enablePhasedArray = true;
+    uint32_t phasedArrayElementsAz = 8;
+    uint32_t phasedArrayElementsEl = 8;
+    double phasedArrayElementSpacingLambda = 0.5;
+    double phasedArrayOperatingFrequencyGhz = 20.0;
+    double phasedArrayMaxSteeringAngleDeg = 60.0;
+    double phasedArrayElementGainDbi = 5.0;
+    double phasedArraySteeringIntervalMs = 100.0;
+    double beamUpdateIntervalMs = 1000.0;
+    uint32_t beamNumRings = 2;
+    double beamRadiusKm = 100.0;
+    uint32_t beamReuseColors = 3;
+    double beamGeometryUpdateIntervalSeconds = 1.0;
+    double kpiSampleIntervalSeconds = 0.5;
 
     // === Operator Sharing ===
     std::string satOperatorsFile = "";
@@ -126,32 +325,94 @@ main(int argc, char* argv[])
 
     CommandLine cmd;
     cmd.AddValue("satellites", "Path to satellite position file", satelliteFile);
-    cmd.AddValue("groundDevices", "Path to ground device CSV file", groundDeviceFile);
+    cmd.AddValue("dataDir", "Path to LeoSim data directory with gss/ and ues/ folders", leosimDataDir);
+    cmd.AddValue("groundDevices", "Optional legacy ground device CSV file; overrides dataDir when set", groundDeviceFile);
     cmd.AddValue("simTime", "Simulation time in seconds", simTime);
     cmd.AddValue("logInterval", "Interval for position/link logging (seconds)", logInterval);
     cmd.AddValue("minElevation", "Minimum elevation angle (degrees)", minElevation);
     cmd.AddValue("frequency", "Carrier frequency (Hz)", frequency);
     cmd.AddValue("positions", "Output file for position data", positionFile);
-    cmd.AddValue("links", "Output file for link data", linkFile);
     cmd.AddValue("packets", "Output file for packet data", packetFile);
-    cmd.AddValue("beams", "Output file for beam state data", beamFile);
+    cmd.AddValue("linkState",
+                 "Unified output file for link, channel-quality, and beam-authority state",
+                 linkStateFile);
+    cmd.AddValue("beamAssociations",
+                 "Output file for compact ground-to-serving-beam associations",
+                 beamAssociationFile);
     cmd.AddValue("handovers", "Output file for handover events", handoverFile);
     cmd.AddValue("cho", "Output file for CHO candidate configuration", choFile);
+    cmd.AddValue("coverage", "Output file for satellite ground coverage data", coverageFile);
+    cmd.AddValue("taskTimingFile",
+                 "CSV output for LeoSim complex task wall-clock timing; empty disables it",
+                 taskTimingFile);
+    cmd.AddValue("statisticsFile",
+                 "JSON output for aggregate, satellite-link, handover, and per-flow KPIs; empty disables it",
+                 statisticsFile);
+    cmd.AddValue("statisticsTimeSeriesFile",
+                 "CSV output for periodic cumulative KPI samples; empty disables it",
+                 statisticsTimeSeriesFile);
+    cmd.AddValue("statisticsInterval",
+                 "Statistics CSV sampling interval in seconds",
+                 statisticsIntervalSeconds);
     cmd.AddValue("logPackets", "Enable packet logging", logPackets);
     cmd.AddValue("logBeams", "Enable beam + handover logging", logBeams);
+    cmd.AddValue("packetTraceNodeLimit",
+                 "Maximum nodes for packet tracing; 0 disables the limit",
+                 packetTraceNodeLimit);
+    cmd.AddValue("flowMonitorScope",
+                 "FlowMonitor installation scope: endpoints, all, or off",
+                 flowMonitorScope);
     cmd.AddValue("verbose", "Enable verbose logging", verbose);
     cmd.AddValue("useTrace", "Use ns-3 trace file format for satellites", useTrace);
     cmd.AddValue("enablePeriodicRouting", "Enable periodic routing updates", enablePeriodicRouting);
+    cmd.AddValue("useExternalRouting",
+                 "Use process-parallel LeoSimExternalRoutingHelper instead of in-process Dijkstra",
+                 useExternalRouting);
+    cmd.AddValue("externalRoutingEngine",
+                 "Path to contrib/leosim/utils/rengine/leosim-rengine executable",
+                 externalRoutingEngine);
+    cmd.AddValue("externalRoutingWorkDir",
+                 "Directory for external routing graph/request/result snapshots",
+                 externalRoutingWorkDir);
+    cmd.AddValue("externalRoutingWorkers",
+                 "Number of external routing worker processes",
+                 externalRoutingWorkers);
+    cmd.AddValue("externalRoutingMode",
+                 "External routing mode: destination-tree or pair",
+                 externalRoutingMode);
+    cmd.AddValue("externalRoutingMetric",
+                 "External routing metric: distance or hop",
+                 externalRoutingMetric);
+    cmd.AddValue("routingEndpoints",
+                 "Route destinations: ground (UEs and gateways), gateways, ues, or all",
+                 routingEndpoints);
+    cmd.AddValue("externalRoutingMaxRequests",
+                 "Maximum route records materialized per external-routing snapshot",
+                 externalRoutingMaxRequests);
+    cmd.AddValue("destinationTreeAllNodes",
+                 "Generate destination-tree next hops for every graph/transit node",
+                 destinationTreeAllNodes);
+    cmd.AddValue("routingReactiveDebounceMs",
+                 "Debounce interval for handover-triggered routing refreshes (milliseconds)",
+                 routingReactiveDebounceMs);
     cmd.AddValue("routingUpdateInterval",
                  "Routing update interval (seconds)",
                  routingUpdateInterval);
     cmd.AddValue("pathPrintInterval",
                  "Interval for printing UE->Server node-id paths (seconds)",
                  pathPrintInterval);
+    cmd.AddValue("progressLogInterval",
+                 "Simulation progress log interval in seconds; 0 disables it",
+                 progressLogInterval);
     cmd.AddValue("numSatellites", "Number of satellites to use from the file", numSatellites);
-    cmd.AddValue("numServers", "Number of server ground stations to use", numServers);
+    cmd.AddValue("numServers", "Number of server ground stations to use; 0 means all loaded servers", numServers);
     cmd.AddValue("numUes", "Number of UEs to use", numUes);
     cmd.AddValue("enableIsl", "Enable Inter-Satellite Links (ISL)", enableIsl);
+    cmd.AddValue("islFullMesh", "Create all-pairs ISL mesh; not recommended for large constellations", islFullMesh);
+    cmd.AddValue("maxIslNeighbors", "Maximum spatial ISL degree per satellite", maxIslNeighbors);
+    cmd.AddValue("islSatellitesPerPlane",
+                 "Satellites per orbital plane for bounded ISL grid topology",
+                 islSatellitesPerPlane);
     cmd.AddValue("islFrequency", "ISL carrier frequency (Hz)", islFrequency);
     cmd.AddValue("islMaxDistance", "Maximum ISL distance (meters)", islMaxDistance);
     cmd.AddValue("islTransmitPower", "ISL transmit power (dBm)", islTransmitPower);
@@ -179,6 +440,9 @@ main(int argc, char* argv[])
     cmd.AddValue("tteTrigger",
                  "Ephemeris handover lead time before TTE expires, seconds",
                  tteTriggerSeconds);
+    cmd.AddValue("beamSinrThreshold",
+                 "Minimum beam SINR outage floor in dB required for serving-beam eligibility",
+                 beamSinrThresholdDb);
     cmd.AddValue("maxCandidates", "Maximum CHO candidate satellites pre-positioned", maxCandidates);
     cmd.AddValue("choPrep", "CHO preparation phase delay in milliseconds (default 100)", choPrep);
     cmd.AddValue("choExec", "CHO execution phase delay in milliseconds (default 150)", choExec);
@@ -191,6 +455,50 @@ main(int argc, char* argv[])
     cmd.AddValue("wActive", "TOPSIS weight for active-beam preference", wActive);
     cmd.AddValue("enableLoadBalancing", "Enable load-balancing handovers", enableLoadBalancing);
     cmd.AddValue("enableHoBuffering", "Enable packet buffering during handover", enableHoBuffering);
+
+    // === Phased Array Parameters ===
+    cmd.AddValue("enablePhasedArray",
+                 "Enable phased-array multi-beam steering on satellites",
+                 enablePhasedArray);
+    cmd.AddValue("paElementsAz",
+                 "Phased-array azimuth element count",
+                 phasedArrayElementsAz);
+    cmd.AddValue("paElementsEl",
+                 "Phased-array elevation element count",
+                 phasedArrayElementsEl);
+    cmd.AddValue("paSpacingLambda",
+                 "Phased-array element spacing (d/lambda)",
+                 phasedArrayElementSpacingLambda);
+    cmd.AddValue("paFrequencyGhz",
+                 "Phased-array operating frequency (GHz)",
+                 phasedArrayOperatingFrequencyGhz);
+    cmd.AddValue("paMaxSteeringDeg",
+                 "Maximum electronic steering angle from nadir (degrees)",
+                 phasedArrayMaxSteeringAngleDeg);
+    cmd.AddValue("paElementGainDbi",
+                 "Single element gain (dBi)",
+                 phasedArrayElementGainDbi);
+    cmd.AddValue("paSteeringIntervalMs",
+                 "Phased-array steering update interval (milliseconds)",
+                 phasedArraySteeringIntervalMs);
+    cmd.AddValue("beamUpdateIntervalMs",
+                 "Beam-manager decision cycle interval (milliseconds)",
+                 beamUpdateIntervalMs);
+    cmd.AddValue("beamNumRings",
+                 "Hex-beam layout ring count for real geometric coverage",
+                 beamNumRings);
+    cmd.AddValue("beamRadiusKm",
+                 "Beam footprint radius in kilometers for geometric coverage",
+                 beamRadiusKm);
+    cmd.AddValue("beamReuseColors",
+                 "Frequency reuse color groups for geometric beam layout",
+                 beamReuseColors);
+    cmd.AddValue("beamGeometryUpdateInterval",
+                 "Beam center geometry refresh interval in seconds",
+                 beamGeometryUpdateIntervalSeconds);
+    cmd.AddValue("kpiSampleInterval",
+                 "Runtime KPI sampling interval for signal/stability (seconds)",
+                 kpiSampleIntervalSeconds);
 
     // === Operator Sharing ===
     cmd.AddValue("satOperators",
@@ -224,11 +532,29 @@ main(int argc, char* argv[])
 
     Time::SetResolution(Time::NS);
 
+    std::ofstream taskTimingStream;
+    if (!taskTimingFile.empty())
+    {
+        taskTimingStream.open(taskTimingFile);
+        if (taskTimingStream.is_open())
+        {
+            taskTimingStream
+                << "task,sim_time_start_s,sim_time_end_s,wall_time_elapsed_ms" << std::endl;
+        }
+        else
+        {
+            std::cerr << "Warning: Could not open task timing file: " << taskTimingFile
+                      << std::endl;
+        }
+    }
+    LeoSimTaskTimingLogger taskTimer(taskTimingStream.is_open() ? &taskTimingStream : nullptr);
+    LeoSimTaskProfiler::SetOutputStream(taskTimingStream.is_open() ? &taskTimingStream : nullptr);
+
     if (verbose)
     {
         // LogComponentEnable("LeoSimTcpExample", LOG_LEVEL_INFO);
 
-        LogComponentEnable("LeoSimBeamManager", LOG_LEVEL_DEBUG);
+        LogComponentEnable("LeoSimBeamManager", LOG_LEVEL_INFO);
         LogComponentEnable("LeoSimBeamManagerHelper", LOG_LEVEL_INFO);
 
         // LogComponentEnable("LeoSimChannelModel", LOG_LEVEL_INFO);
@@ -237,6 +563,8 @@ main(int argc, char* argv[])
         // LogComponentEnable("Ipv4GlobalRouting", LOG_LEVEL_INFO);
         // LogComponentEnable("LeoSimRoutingCalculatorHelper", LOG_LEVEL_INFO);
     }
+
+    taskTimer.Start("load_input_data");
 
     LeoSimLoaderHelper loaderHelper;
     loaderHelper.SetVerbose(verbose);
@@ -249,11 +577,20 @@ main(int argc, char* argv[])
     {
         loaderHelper.LoadSatellitesFromCsv(satelliteFile);
     }
-    loaderHelper.LoadGroundDevicesFromCsv(groundDeviceFile);
+    if (!groundDeviceFile.empty())
+    {
+        loaderHelper.LoadGroundDevicesFromCsv(groundDeviceFile);
+    }
+    else
+    {
+        loaderHelper.LoadGroundDevicesFromDataDirectory(leosimDataDir);
+    }
 
     Ptr<LeoSimLoader> loader = loaderHelper.GetLoader();
+    loader->SetSatellitesPerPlane(islSatellitesPerPlane);
     auto serverDeviceIds = loader->GetGroundDeviceIdsByType("SERVER");
     auto ueDeviceIds = loader->GetGroundDeviceIdsByType("UE");
+    taskTimer.Finish();
 
     if (loader->GetNumSatellites() == 0 || serverDeviceIds.empty() || ueDeviceIds.empty())
     {
@@ -270,7 +607,11 @@ main(int argc, char* argv[])
         numSatellites = loader->GetNumSatellites();
     }
 
-    if (numServers > serverDeviceIds.size())
+    if (numServers == 0)
+    {
+        numServers = serverDeviceIds.size();
+    }
+    else if (numServers > serverDeviceIds.size())
     {
         std::cerr << "Warning: Requested " << numServers << " servers, but only "
                   << serverDeviceIds.size() << " available. Using all available." << std::endl;
@@ -283,6 +624,8 @@ main(int argc, char* argv[])
                   << " available. Using all available." << std::endl;
         numUes = ueDeviceIds.size();
     }
+
+    taskTimer.Start("create_nodes_and_install_mobility");
 
     std::cout << "[t=" << Simulator::Now().GetSeconds() << "s] Setting up multi-node topology" << std::endl;
     std::cout << "  Satellites: " << numSatellites << std::endl;
@@ -308,20 +651,16 @@ main(int argc, char* argv[])
     for (uint32_t i = 0; i < numSatellites; i++)
     {
         mobilityHelper.InstallSatellite(satelliteNodes.Get(i), i, loader->GetSatelliteName(i));
-        if (verbose)
-        {
-            std::cout << "  [t=" << Simulator::Now().GetSeconds() << "s] Satellite " << i << ": " << loader->GetSatelliteName(i) << std::endl;
-        }
     }
 
     // Install mobility for all UEs
     for (uint32_t i = 0; i < numUes; i++)
     {
         uint32_t ueId = ueDeviceIds[i];
-        mobilityHelper.InstallGateway(ueNodes.Get(i),
-                                      ueId,
-                                      loader->GetGroundDeviceName(ueId),
-                                      loader->GetGroundDevicePosition(ueId));
+        mobilityHelper.InstallUE(ueNodes.Get(i),
+                                 ueId,
+                                 loader->GetGroundDeviceName(ueId),
+                                 loader->GetGroundDevicePosition(ueId));
         if (verbose)
         {
             std::cout << "  [t=" << Simulator::Now().GetSeconds() << "s] UE " << i << ": " << loader->GetGroundDeviceName(ueId) << std::endl;
@@ -344,11 +683,27 @@ main(int argc, char* argv[])
     }
 
     mobilityHelper.StartAll();
+    taskTimer.Finish();
 
     // === Operator Model Setup (Phase 8 of LeoSim) ===
+    taskTimer.Start("setup_operator_model");
     if (!satOperatorsFile.empty())
     {
         loader->LoadSatelliteOperatorsFromCsv(satOperatorsFile);
+    }
+    else
+    {
+        uint32_t loadedSatelliteOperators =
+            loader->LoadSatelliteOperatorsFromDataDirectory(leosimDataDir);
+        if (loadedSatelliteOperators != loader->GetNumSatellites())
+        {
+            std::cerr << "Warning: Loaded " << loader->GetNumSatellites()
+                      << " satellites from the mobility trace, but found "
+                      << loadedSatelliteOperators << " satellite operator assignments in "
+                      << leosimDataDir
+                      << "/tles. Regenerate the mobility trace from the same TLE directory."
+                      << std::endl;
+        }
     }
 
     LeoSimOperatorHelper opHelper;
@@ -367,21 +722,26 @@ main(int argc, char* argv[])
     }
 
     Ptr<LeoSimOperatorModel> operatorModel = opHelper.Build();
+    taskTimer.Finish();
 
     // Create visualization helper
+    taskTimer.Start("initialize_visualization_logging");
     LeoSimVisualizationHelper vizHelper;
     vizHelper.SetOutputFile(positionFile);
-    vizHelper.SetLinkFile(linkFile);
     vizHelper.SetPacketFile(packetFile);
-    vizHelper.SetBeamFile(beamFile);
+    vizHelper.SetUnifiedLinkStateFile(linkStateFile);
+    vizHelper.SetBeamAssociationFile(beamAssociationFile);
     vizHelper.SetHandoverFile(handoverFile);
     vizHelper.SetChoFile(choFile);
+    vizHelper.SetCoverageFile(coverageFile);
     vizHelper.EnablePacketLogging(logPackets);
     vizHelper.EnableBeamLogging(logBeams);
     vizHelper.SetLoaderHelper(loaderHelper);
     vizHelper.Initialize();
+    taskTimer.Finish();
 
     // Create dynamic channel model for logging/visualization
+    taskTimer.Start("create_ground_channel_model");
     LeoSimChannelHelper channelHelper;
     channelHelper.SetMinElevationAngle(minElevation);
     channelHelper.SetFrequency(frequency);
@@ -398,8 +758,6 @@ main(int argc, char* argv[])
     Ptr<LeoSimChannelModel> channelModel =
         channelHelper.CreateChannels(satelliteNodes, allGroundNodes);
     channelModel->SetOperatorModel(operatorModel);
-
-    channelModel->StartUpdates();
 
     // Optional weather model wiring
     Ptr<LeoSimWeatherModel> weatherModel;
@@ -450,8 +808,10 @@ main(int argc, char* argv[])
         channelModel->SetRainFadeThresholdDb(rainFadeThreshold);
         channelModel->SetSnrFloorDb(-5.0);
     }
+    taskTimer.Finish();
 
     // Create ISL mesh if enabled
+    taskTimer.Start("create_isl_channel_model");
     Ptr<LeoSimChannelModel> islChannelModel;
     std::map<Ptr<Node>, std::vector<Ipv4Address>> islAddresses;
     if (enableIsl)
@@ -465,13 +825,29 @@ main(int argc, char* argv[])
         islHelper.SetUpdateInterval(Seconds(1.0));
         islHelper.SetVerbose(verbose);
 
-        islChannelModel = islHelper.CreateIslMesh(satelliteNodes);
+        if (islFullMesh)
+        {
+            islChannelModel = islHelper.CreateIslMesh(satelliteNodes);
+        }
+        else
+        {
+            islChannelModel =
+                islHelper.CreateIslNearestNeighborMesh(satelliteNodes, maxIslNeighbors);
+        }
         islChannelModel->SetOperatorModel(operatorModel);
-        islChannelModel->StartUpdates();
 
         std::cout << "[t=" << Simulator::Now().GetSeconds() << "s] ISL configuration:" << std::endl;
         std::cout << "  Frequency: " << islFrequency / 1e9 << " GHz" << std::endl;
         std::cout << "  Max Distance: " << islMaxDistance / 1000.0 << " km" << std::endl;
+        std::cout << "  Topology: "
+                  << (islFullMesh ? "full mesh"
+                                  : "bounded spatial nearest-neighbor graph")
+                  << std::endl;
+        if (!islFullMesh)
+        {
+            std::cout << "  ISL Degree Bound: " << maxIslNeighbors
+                      << " links per satellite" << std::endl;
+        }
         std::cout << "  Tx Power: " << islTransmitPower << " dBm" << std::endl;
         std::cout << "  Antenna Gain: " << islAntennaGain << " dB" << std::endl;
 
@@ -479,11 +855,13 @@ main(int argc, char* argv[])
         vizHelper.SetIslChannelModel(islChannelModel);
         std::cout << "[t=" << Simulator::Now().GetSeconds() << "s] ISL visualization enabled" << std::endl;
     }
+    taskTimer.Finish();
 
     // Set channel model in visualization helper for ground link tracking
     vizHelper.SetChannelModel(channelModel);
 
     // Install network devices on all nodes based on channel model links
+    taskTimer.Start("install_network_devices");
     std::cout << "\n[t=" << Simulator::Now().GetSeconds() << "s] Installing network devices from channel model links..." << std::endl;
 
     // Install devices for ground links (satellite-to-UE, satellite-to-Server)
@@ -515,8 +893,10 @@ main(int argc, char* argv[])
         islDeviceInstaller.ApplySharingRates(islDevices);
         std::cout << "[t=" << Simulator::Now().GetSeconds() << "s] Installed " << islDevices.GetN() << " ISL devices" << std::endl;
     }
+    taskTimer.Finish();
 
     //  Install Internet stack on all nodes
+    taskTimer.Start("install_internet_stack_and_assign_addresses");
     std::cout << "\n[t=" << Simulator::Now().GetSeconds() << "s] Installing Internet stack on all nodes..." << std::endl;
     InternetStackHelper stack;
     stack.Install(satelliteNodes);
@@ -524,13 +904,16 @@ main(int argc, char* argv[])
     stack.Install(serverNodes);
     std::cout << "[t=" << Simulator::Now().GetSeconds() << "s] Internet stack installed" << std::endl;
 
-    // Assign IP addresses - unique per-link subnets to avoid address collisions
-    // Ground links on 10.0-99.0.0/24, ISL links on 10.100-199.0.0/24
-    // This ensures each interface has a unique address and no collisions between nodes
+    // Assign IP addresses - one /30 subnet per point-to-point link.
+    // Ground links and ISLs use disjoint address blocks to avoid collisions even
+    // when the number of ground links grows with all loaded servers/UEs.
     std::cout << "\n[t=" << Simulator::Now().GetSeconds() << "s] Assigning IP addresses (unique per-link subnets)..." << std::endl;
 
-    uint32_t groundSubnetIndex = 0;
-    uint32_t islSubnetIndex = 100;
+    Ipv4AddressHelper groundIpv4;
+    groundIpv4.SetBase(Ipv4Address("10.0.0.0"), Ipv4Mask("255.255.255.252"));
+
+    Ipv4AddressHelper islIpv4;
+    islIpv4.SetBase(Ipv4Address("10.128.0.0"), Ipv4Mask("255.255.255.252"));
 
     // Assign ground devices - create proper P2P links with IP address pairs
     std::cout << "  [t=" << Simulator::Now().GetSeconds() << "s] Assigning ground link subnets..." << std::endl;
@@ -554,13 +937,9 @@ main(int argc, char* argv[])
                       << std::endl;
         }
 
-        Ipv4AddressHelper groundIpv4;
-        char baseAddrStr[32];
-        snprintf(baseAddrStr, sizeof(baseAddrStr), "10.%d.0.0", groundSubnetIndex);
-        groundIpv4.SetBase(Ipv4Address(baseAddrStr), Ipv4Mask("255.255.255.0"));
         groundIpv4.Assign(linkDevices);
+        groundIpv4.NewNetwork();
 
-        groundSubnetIndex++;
         assignedLinks++;
     }
 
@@ -583,38 +962,64 @@ main(int argc, char* argv[])
                           << std::endl;
             }
 
-            Ipv4AddressHelper islIpv4;
-            char baseAddrStr[32];
-            snprintf(baseAddrStr, sizeof(baseAddrStr), "10.%d.0.0", islSubnetIndex);
-            islIpv4.SetBase(Ipv4Address(baseAddrStr), Ipv4Mask("255.255.255.0"));
             islIpv4.Assign(linkDevices);
 
-            if (verbose)
-            {
-                std::cout << "    ISL " << (islSubnetIndex - 100) << ": " << baseAddrStr << "/24"
-                          << std::endl;
-            }
-
-            islSubnetIndex++;
+            islIpv4.NewNetwork();
         }
     }
 
     std::cout << "[t=" << Simulator::Now().GetSeconds() << "s] Address assignment complete: " << assignedLinks << " ground links, "
-              << (islSubnetIndex - 100) << " ISL links" << std::endl;
+              << (enableIsl ? (islDevices.GetN() / 2) : 0) << " ISL links" << std::endl;
+    taskTimer.Finish();
 
     // Combine all nodes for routing
+    taskTimer.Start("prepare_routing_calculator");
     NodeContainer allNodes;
     allNodes.Add(satelliteNodes);
     allNodes.Add(ueNodes);
     allNodes.Add(serverNodes);
 
+    NodeContainer routingDestinationNodes;
+    if (routingEndpoints == "ground")
+    {
+        routingDestinationNodes.Add(ueNodes);
+        routingDestinationNodes.Add(serverNodes);
+    }
+    else if (routingEndpoints == "gateways")
+    {
+        routingDestinationNodes.Add(serverNodes);
+    }
+    else if (routingEndpoints == "ues")
+    {
+        routingDestinationNodes.Add(ueNodes);
+    }
+    else if (routingEndpoints == "all")
+    {
+        routingDestinationNodes.Add(allNodes);
+    }
+    else
+    {
+        std::cerr << "Error: routingEndpoints must be ground, gateways, ues, or all"
+                  << std::endl;
+        return 1;
+    }
+    // Application endpoints are explicit sources. In destination-tree mode
+    // the helper expands these to every registered graph node when
+    // destinationTreeAllNodes is enabled, ensuring transit forwarding state.
+    NodeContainer externalRoutingSourceNodes;
+    externalRoutingSourceNodes.Add(ueNodes);
+    externalRoutingSourceNodes.Add(serverNodes);
+
     vizHelper.SetOperatorFile("leosim_operators.csv");
     vizHelper.SetSharingFile("leosim_sharing.csv");
     vizHelper.InitOperatorLogging(operatorModel, allNodes);
 
-    // Install computed routes into static routing tables
-    std::cout << "\n[t=" << Simulator::Now().GetSeconds() << "s] Setting up dynamic routing with periodic updates..." << std::endl;
+    // Prepare the routing calculator before beam-manager installation, but defer route
+    // installation until the beam manager is attached as the access-link authority.
+    std::cout << "\n[t=" << Simulator::Now().GetSeconds()
+              << "s] Preparing unified routing calculator..." << std::endl;
     LeoSimRoutingCalculatorHelper routingHelper;
+    LeoSimExternalRoutingHelper externalRoutingHelper;
 
     // Create unified routing calculator that handles both ground and ISL links
     Ptr<LeoSimRoutingCalculator> unifiedCalc =
@@ -624,25 +1029,10 @@ main(int argc, char* argv[])
     {
         unifiedCalc->SetPathType(LeoSimRoutingCalculator::LEOSIM_PATH_SAME_OPERATOR_ONLY);
     }
-
-    // Combine all nodes for routing (already created above)
-
-    // Enable dynamic routing with periodic updates
-    // This continuously recalculates and updates routes based on changing topology
-    routingHelper.EnableDynamicRouting(unifiedCalc,
-                                       allNodes,
-                                       allNodes,
-                                       Seconds(routingUpdateInterval),
-                                       simTime,
-                                       verbose);
-
-    if (verbose)
-    {
-        std::cout << "[t=" << Simulator::Now().GetSeconds() << "s] Dynamic routing enabled with update interval: " << routingUpdateInterval
-                  << " seconds" << std::endl;
-    }
+    taskTimer.Finish();
 
     // === Beam Management & Handover (3GPP NTN CHO) ===
+    taskTimer.Start("setup_beam_manager_and_handover");
     std::cout << "\n[t=" << Simulator::Now().GetSeconds() << "s] Setting up beam manager with conditional handover support..." << std::endl;
 
     LeoSimBeamManagerHelper beamHelper;
@@ -680,6 +1070,7 @@ main(int argc, char* argv[])
     beamHelper.SetA3Offset(a3OffsetDb);
     beamHelper.SetA4Threshold(a4ThresholdDbm);
     beamHelper.SetTteThreshold(Seconds(tteTriggerSeconds));
+    beamHelper.SetSinrThreshold(beamSinrThresholdDb);
 
     // Set CHO timing (convert from milliseconds to seconds)
     beamHelper.SetChoPreparationDelay(Seconds(choPrep / 1000.0));
@@ -688,15 +1079,73 @@ main(int argc, char* argv[])
     // Set TOPSIS prioritization weights (must sum to 1.0)
     beamHelper.SetTopsisWeights(wRsrp, wSinr, wTte, wLoad, wLatency, wElevation, wActive);
     beamHelper.SetMaxCandidates(maxCandidates);
+    beamHelper.SetUpdateInterval(MilliSeconds(beamUpdateIntervalMs));
 
     // Set features
     beamHelper.EnableLoadBalancing(enableLoadBalancing);
     beamHelper.EnableHandoverBuffering(enableHoBuffering);
 
+    Ptr<LeoSimMultiBeamModel> multiBeamModel;
+    if (enablePhasedArray)
+    {
+        multiBeamModel = CreateObject<LeoSimMultiBeamModel>();
+        LeoSimPhasedArrayConfig paCfg;
+        paCfg.numElementsAz = phasedArrayElementsAz;
+        paCfg.numElementsEl = phasedArrayElementsEl;
+        paCfg.elementSpacingLambda = phasedArrayElementSpacingLambda;
+        paCfg.operatingFrequencyGHz = phasedArrayOperatingFrequencyGhz;
+        paCfg.maxSteeringAngleDeg = phasedArrayMaxSteeringAngleDeg;
+        paCfg.elementGainDbi = phasedArrayElementGainDbi;
+        multiBeamModel->SetPhasedArrayConfig(paCfg);
+
+        // Populate real per-satellite beam geometry from current satellite positions.
+        uint32_t totalInitializedBeams = 0;
+        for (uint32_t i = 0; i < satelliteNodes.GetN(); ++i)
+        {
+            Ptr<Node> sat = satelliteNodes.Get(i);
+            if (!sat)
+            {
+                continue;
+            }
+
+            Ptr<MobilityModel> mobility = sat->GetObject<MobilityModel>();
+            if (!mobility)
+            {
+                continue;
+            }
+
+            uint32_t satId = sat->GetId();
+            uint32_t cellIdBase = satId * 1000;
+            auto beams = LeoSimBeamLayoutEngine::GenerateHexLayout(satId,
+                                                                    mobility->GetPosition(),
+                                                                    std::max<uint32_t>(1, beamNumRings),
+                                                                    beamRadiusKm,
+                                                                    std::max<uint32_t>(1, beamReuseColors),
+                                                                    cellIdBase);
+            totalInitializedBeams += beams.size();
+            multiBeamModel->SetBeamsForSatellite(satId, beams);
+        }
+
+        multiBeamModel->UpdateGeometry(satelliteNodes, Simulator::Now());
+
+        beamHelper.SetMultiBeamModel(multiBeamModel);
+        beamHelper.SetPhasedArraySteeringInterval(MilliSeconds(phasedArraySteeringIntervalMs));
+        beamHelper.SetBeamGeometryUpdateInterval(Seconds(beamGeometryUpdateIntervalSeconds));
+        vizHelper.SetMultiBeamModel(multiBeamModel);
+
+        if (verbose)
+        {
+            std::cout << "  Initialized geometric beams: " << totalInitializedBeams
+                      << " (rings=" << beamNumRings << ", radius=" << beamRadiusKm
+                      << " km, reuseColors=" << beamReuseColors << ")" << std::endl;
+        }
+    }
+
     // Install beam manager on all ground nodes (UEs + servers)
     Ptr<LeoSimBeamManager> beamManager =
         beamHelper.Install(allGroundNodes, satelliteNodes, Seconds(simTime));
     beamManager->SetOperatorModel(operatorModel);
+    unifiedCalc->SetBeamManager(beamManager);
     if (enableWeather && weatherModel)
     {
         beamManager->SetWeatherModel(weatherModel);
@@ -724,7 +1173,151 @@ main(int argc, char* argv[])
                   << std::endl;
         std::cout << "  Handover buffering: " << (enableHoBuffering ? "enabled" : "disabled")
                   << std::endl;
+        std::cout << "  Phased-array steering: " << (enablePhasedArray ? "enabled" : "disabled")
+                  << std::endl;
+        if (enablePhasedArray)
+        {
+            std::cout << "  Array elements (Az x El): " << phasedArrayElementsAz << " x "
+                      << phasedArrayElementsEl << std::endl;
+            std::cout << "  Element spacing (d/lambda): " << phasedArrayElementSpacingLambda
+                      << std::endl;
+            std::cout << "  Max steering angle: " << phasedArrayMaxSteeringAngleDeg << " deg"
+                      << std::endl;
+            std::cout << "  Steering interval: " << phasedArraySteeringIntervalMs << " ms"
+                      << std::endl;
+        }
     }
+    taskTimer.Finish();
+
+    // Install computed routes only after the beam manager is active, so satellite-ground
+    // access links must pass serving/prepared-beam authority from the first packet onward.
+    taskTimer.Start("setup_dynamic_routing");
+    std::cout << "\n[t=" << Simulator::Now().GetSeconds() << "s] Setting up "
+              << (useExternalRouting ? "external process-parallel " : "")
+              << (enablePeriodicRouting ? "dynamic routing with periodic updates"
+                                         : "static routing snapshot")
+              << "..." << std::endl;
+    if (useExternalRouting)
+    {
+        externalRoutingHelper.SetEnginePath(externalRoutingEngine);
+        externalRoutingHelper.SetWorkingDirectory(externalRoutingWorkDir);
+        externalRoutingHelper.SetWorkerCount(externalRoutingWorkers);
+        externalRoutingHelper.SetMode(
+            externalRoutingMode == "pair"
+                ? LeoSimExternalRoutingHelper::LEOSIM_EXTERNAL_PAIR
+                : LeoSimExternalRoutingHelper::LEOSIM_EXTERNAL_DESTINATION_TREE);
+        externalRoutingHelper.SetMetric(
+            externalRoutingMetric == "hop"
+                ? LeoSimExternalRoutingHelper::LEOSIM_EXTERNAL_HOP_COUNT
+                : LeoSimExternalRoutingHelper::LEOSIM_EXTERNAL_WEIGHT_DISTANCE);
+        externalRoutingHelper.SetMaxRouteRequests(externalRoutingMaxRequests);
+        externalRoutingHelper.SetDestinationTreeAllNodes(destinationTreeAllNodes);
+
+        if (enablePeriodicRouting)
+        {
+            externalRoutingHelper.EnableDynamicRouting(unifiedCalc,
+                                                       externalRoutingSourceNodes,
+                                                       routingDestinationNodes,
+                                                       Seconds(routingUpdateInterval),
+                                                       simTime,
+                                                       verbose);
+            if (verbose)
+            {
+                std::cout << "[t=" << Simulator::Now().GetSeconds()
+                          << "s] External dynamic routing enabled: engine="
+                          << externalRoutingEngine
+                          << ", workers=" << externalRoutingWorkers
+                          << ", interval=" << routingUpdateInterval << " seconds"
+                          << std::endl;
+            }
+        }
+        else
+        {
+            externalRoutingHelper.SetStaticRoutes(unifiedCalc,
+                                                  externalRoutingSourceNodes,
+                                                  routingDestinationNodes,
+                                                  verbose);
+            if (verbose)
+            {
+                std::cout << "[t=" << Simulator::Now().GetSeconds()
+                          << "s] External static routing snapshot installed" << std::endl;
+            }
+        }
+
+        externalRoutingHelper.EnableReactiveRouteRefresh(unifiedCalc,
+                                                         externalRoutingSourceNodes,
+                                                         routingDestinationNodes,
+                                                         MilliSeconds(routingReactiveDebounceMs),
+                                                         verbose);
+        beamManager->SetAccessStateChangeCallback(
+            MakeCallback(&LeoSimExternalRoutingHelper::RequestRouteRefresh,
+                         &externalRoutingHelper));
+    }
+    else if (enablePeriodicRouting)
+    {
+        // Continuously recalculate routes based on changing topology.
+        routingHelper.EnableDynamicRouting(unifiedCalc,
+                                           allNodes,
+                                           routingDestinationNodes,
+                                           Seconds(routingUpdateInterval),
+                                           simTime,
+                                           verbose);
+
+        if (verbose)
+        {
+            std::cout << "[t=" << Simulator::Now().GetSeconds()
+                      << "s] Dynamic routing enabled with update interval: "
+                      << routingUpdateInterval << " seconds" << std::endl;
+        }
+    }
+    else
+    {
+        routingHelper.SetStaticRoutes(unifiedCalc,
+                                      allNodes,
+                                      routingDestinationNodes,
+                                      verbose);
+        if (verbose)
+        {
+            std::cout << "[t=" << Simulator::Now().GetSeconds()
+                      << "s] Static routing snapshot installed" << std::endl;
+        }
+    }
+
+    if (!useExternalRouting)
+    {
+        routingHelper.EnableReactiveLinkTriggeredRouting(unifiedCalc,
+                                                         allNodes,
+                                                         routingDestinationNodes,
+                                                         channelModel,
+                                                         enableIsl ? islChannelModel : nullptr,
+                                                         MilliSeconds(routingReactiveDebounceMs),
+                                                         verbose);
+        beamManager->SetAccessStateChangeCallback(
+            MakeCallback(&LeoSimRoutingCalculatorHelper::RequestRouteRefresh, &routingHelper));
+    }
+    taskTimer.Finish();
+
+    taskTimer.Start("schedule_kpi_and_visualization_logging");
+    Ptr<LeoSimStatisticsHelper> statistics = CreateObject<LeoSimStatisticsHelper>();
+    statistics->SetBeamManager(beamManager);
+    if (!statistics->AttachChannelModel(channelModel))
+    {
+        std::cerr << "Warning: failed to attach statistics to access channel traces" << std::endl;
+    }
+    if (enableIsl && islChannelModel && !statistics->AttachChannelModel(islChannelModel))
+    {
+        std::cerr << "Warning: failed to attach statistics to ISL channel traces" << std::endl;
+    }
+    LeoSimRuntimeKpiStats runtimeKpiStats;
+    Simulator::Schedule(Seconds(0.0),
+                        &SampleServingLinkMetrics,
+                        beamManager,
+                        channelModel,
+                        statistics,
+                        ueNodes,
+                        Seconds(kpiSampleIntervalSeconds),
+                        Seconds(simTime),
+                        &runtimeKpiStats);
 
     // Schedule position and link logging
     vizHelper.SchedulePositionLogging(satelliteNodes, serverNodes, ueNodes, logInterval, simTime);
@@ -738,8 +1331,10 @@ main(int argc, char* argv[])
                             islChannelModel,
                             t);
     }
+    taskTimer.Finish();
 
     // Install TCP traffic from UEs to server
+    taskTimer.Start("install_traffic_and_packet_logging");
     std::cout << "\n[t=" << Simulator::Now().GetSeconds() << "s] Installing TCP traffic from UEs to server..." << std::endl;
 
     // Get server IP address
@@ -798,47 +1393,178 @@ main(int argc, char* argv[])
     // Install packet logging hooks for visualization (after network setup complete)
     if (logPackets)
     {
-        vizHelper.InstallPacketLogging(satelliteNodes, serverNodes, ueNodes);
-        std::cout << "[t=" << Simulator::Now().GetSeconds() << "s] Packet logging activated" << std::endl;
+        const uint64_t traceNodeCount = static_cast<uint64_t>(satelliteNodes.GetN()) +
+                                        serverNodes.GetN() + ueNodes.GetN();
+        if (packetTraceNodeLimit > 0 && traceNodeCount > packetTraceNodeLimit)
+        {
+            std::cout << "[t=" << Simulator::Now().GetSeconds()
+                      << "s] Packet logging skipped: " << traceNodeCount
+                      << " nodes exceeds --packetTraceNodeLimit=" << packetTraceNodeLimit
+                      << ". Use --packetTraceNodeLimit=0 to force tracing." << std::endl;
+        }
+        else
+        {
+            vizHelper.InstallPacketLogging(satelliteNodes, serverNodes, ueNodes);
+            std::cout << "[t=" << Simulator::Now().GetSeconds()
+                      << "s] Packet logging activated" << std::endl;
+        }
     }
+    taskTimer.Finish();
 
     // === Add Flow Monitor for Packet Loss Analysis ===
+    taskTimer.Start("install_flow_monitor");
     Ptr<FlowMonitor> flowMonitor;
     FlowMonitorHelper flowmonHelper;
-    flowMonitor = flowmonHelper.InstallAll();
+    if (flowMonitorScope == "endpoints")
+    {
+        flowMonitor = flowmonHelper.Install(externalRoutingSourceNodes);
+        std::cout << "[t=" << Simulator::Now().GetSeconds()
+                  << "s] FlowMonitor installed on " << externalRoutingSourceNodes.GetN()
+                  << " traffic endpoints" << std::endl;
+    }
+    else if (flowMonitorScope == "all")
+    {
+        flowMonitor = flowmonHelper.InstallAll();
+        std::cout << "[t=" << Simulator::Now().GetSeconds()
+                  << "s] FlowMonitor installed on all " << allNodes.GetN() << " nodes"
+                  << std::endl;
+    }
+    else if (flowMonitorScope == "off")
+    {
+        std::cout << "[t=" << Simulator::Now().GetSeconds() << "s] FlowMonitor disabled"
+                  << std::endl;
+    }
+    else
+    {
+        std::cerr << "Error: flowMonitorScope must be endpoints, all, or off" << std::endl;
+        return 1;
+    }
+    if (flowMonitor)
+    {
+        statistics->SetFlowMonitor(
+            flowMonitor,
+            DynamicCast<Ipv4FlowClassifier>(flowmonHelper.GetClassifier()));
+    }
+    if (!statisticsTimeSeriesFile.empty())
+    {
+        if (statisticsIntervalSeconds <= 0.0)
+        {
+            std::cerr << "Error: statisticsInterval must be greater than zero" << std::endl;
+            return 1;
+        }
+        statistics->StartPeriodicSampling(Seconds(statisticsIntervalSeconds),
+                                          statisticsTimeSeriesFile);
+    }
+    taskTimer.Finish();
 
     // Run the simulation for the specified duration
+    taskTimer.Start("run_simulation");
+    LeoSimProgressState progressState{std::chrono::steady_clock::now()};
+    if (progressLogInterval > 0.0 && progressLogInterval <= simTime)
+    {
+        Simulator::Schedule(Seconds(progressLogInterval),
+                            &LogSimulationProgress,
+                            Seconds(progressLogInterval),
+                            Seconds(simTime),
+                            &progressState);
+    }
     Simulator::Stop(Seconds(simTime));
     Simulator::Run();
+    taskTimer.Finish();
 
-    // Print flow monitor statistics
-    flowMonitor->CheckForLostPackets();
-    Ptr<Ipv4FlowClassifier> classifier =
-        DynamicCast<Ipv4FlowClassifier>(flowmonHelper.GetClassifier());
-    FlowMonitor::FlowStatsContainer stats = flowMonitor->GetFlowStats();
+    // Consolidate FlowMonitor and satellite-specific telemetry.
+    taskTimer.Start("postprocess_results_and_write_summary");
+    statistics->StopPeriodicSampling();
+    const LeoSimStatisticsSnapshot networkStats = statistics->GetSnapshot(true);
+    const std::vector<LeoSimFlowStatistics> flowStats = statistics->GetFlowStatistics();
 
     std::cout << "\n[t=" << Simulator::Now().GetSeconds() << "s] === PACKET LOSS ANALYSIS ===" << std::endl;
-    for (std::map<FlowId, FlowMonitor::FlowStats>::const_iterator i = stats.begin();
-         i != stats.end();
-         ++i)
+    if (!flowMonitor)
     {
-        Ipv4FlowClassifier::FiveTuple t = classifier->FindFlow(i->first);
-        std::cout << "\n[t=" << Simulator::Now().GetSeconds() << "s] Flow " << i->first << " (" << t.sourceAddress << " -> "
-                  << t.destinationAddress << ")" << std::endl;
-        std::cout << "  Tx Packets: " << i->second.txPackets << std::endl;
-        std::cout << "  Rx Packets: " << i->second.rxPackets << std::endl;
-        std::cout << "  Lost Packets: " << (i->second.txPackets - i->second.rxPackets) << std::endl;
-        std::cout << "  Loss Rate: "
-                  << (100.0 * (i->second.txPackets - i->second.rxPackets) / i->second.txPackets)
-                  << "%" << std::endl;
-        std::cout << "  Delay (ms): "
-                  << (i->second.delaySum.GetMilliSeconds() / i->second.rxPackets) << std::endl;
+        std::cout << "  Disabled (--flowMonitorScope=off)" << std::endl;
+    }
+    for (const auto& flow : flowStats)
+    {
+        std::cout << "\n[t=" << Simulator::Now().GetSeconds() << "s] Flow " << flow.flowId
+                  << " (" << flow.sourceAddress << ':' << flow.sourcePort << " -> "
+                  << flow.destinationAddress << ':' << flow.destinationPort << ")" << std::endl;
+        std::cout << "  Tx/Rx/Lost Packets: " << flow.txPackets << '/' << flow.rxPackets << '/'
+                  << flow.lostPackets << std::endl;
+        std::cout << "  Delivery Ratio: " << (100.0 * flow.packetDeliveryRatio) << "%" << std::endl;
+        std::cout << "  Throughput: " << flow.throughputMbps << " Mbps" << std::endl;
+        std::cout << "  Mean Delay/Jitter: " << flow.meanDelayMs << '/' << flow.meanJitterMs
+                  << " ms" << std::endl;
+        std::cout << "  Mean Hop Count: " << flow.meanHopCount << std::endl;
     }
     std::cout << "=======================================" << std::endl;
 
+    const double avgSignalStrengthDbm =
+        runtimeKpiStats.connectedSamples > 0
+            ? (runtimeKpiStats.signalStrengthSumDbm /
+               static_cast<double>(runtimeKpiStats.connectedSamples))
+            : 0.0;
+    const double connectedRatioPct =
+        runtimeKpiStats.totalSamples > 0
+            ? (100.0 * static_cast<double>(runtimeKpiStats.connectedSamples) /
+               static_cast<double>(runtimeKpiStats.totalSamples))
+            : 0.0;
+    const double handoverSuccessPct = 100.0 * networkStats.handoverSuccessRatio;
+    const double packetDeliveryPct = 100.0 * networkStats.packetDeliveryRatio;
+
+    std::cout << "\n[t=" << Simulator::Now().GetSeconds() << "s] === PHASED-ARRAY KPI SUMMARY ==="
+              << std::endl;
+    std::cout << "Signal strength (serving-link RSS):" << std::endl;
+    std::cout << "  Samples: " << runtimeKpiStats.connectedSamples << "/"
+              << runtimeKpiStats.totalSamples << std::endl;
+    if (runtimeKpiStats.connectedSamples > 0)
+    {
+        std::cout << "  Avg RSS: " << avgSignalStrengthDbm << " dBm" << std::endl;
+        std::cout << "  Min RSS: " << runtimeKpiStats.signalStrengthMinDbm << " dBm"
+                  << std::endl;
+        std::cout << "  Max RSS: " << runtimeKpiStats.signalStrengthMaxDbm << " dBm"
+                  << std::endl;
+    }
+    else
+    {
+        std::cout << "  No connected serving-link samples captured." << std::endl;
+    }
+
+    std::cout << "Beam switching delay (handover latency):" << std::endl;
+    std::cout << "  Handover events: " << networkStats.handovers << std::endl;
+    std::cout << "  Avg delay: " << networkStats.meanHandoverLatencyMs << " ms" << std::endl;
+    std::cout << "  P95 delay: " << networkStats.p95HandoverLatencyMs << " ms" << std::endl;
+
+    std::cout << "Connection stability:" << std::endl;
+    std::cout << "  Connected sample ratio: " << connectedRatioPct << "%" << std::endl;
+    std::cout << "  Handover success rate: " << handoverSuccessPct << "%" << std::endl;
+    std::cout << "  Ping-pong count: " << networkStats.pingPongs << std::endl;
+    std::cout << "  Packet delivery ratio: " << packetDeliveryPct << "%" << std::endl;
+    std::cout << "  Aggregate throughput: " << networkStats.throughputMbps << " Mbps" << std::endl;
+    std::cout << "  Mean delay/jitter: " << networkStats.meanDelayMs << '/'
+              << networkStats.meanJitterMs << " ms" << std::endl;
+    std::cout << "Satellite channel:" << std::endl;
+    std::cout << "  SNR samples/mean/min/max: " << networkStats.snrDb.count << '/'
+              << networkStats.snrDb.mean << '/' << networkStats.snrDb.min << '/'
+              << networkStats.snrDb.max << " dB" << std::endl;
+    std::cout << "  Mean path loss: " << networkStats.pathLossDb.mean << " dB" << std::endl;
+    std::cout << "  Link up/down/degraded events: " << networkStats.linkUpEvents << '/'
+              << networkStats.linkDownEvents << '/' << networkStats.linkDegradedEvents << std::endl;
+    std::cout << "==========================================" << std::endl;
+
+    if (!statisticsFile.empty())
+    {
+        statistics->WriteSummary(statisticsFile);
+    }
+
     std::cout << "\n[t=" << Simulator::Now().GetSeconds() << "s] === LeoSim Visualization Outputs ===" << std::endl;
     std::cout << "positions:  " << positionFile << std::endl;
-    std::cout << "links:      " << linkFile << std::endl;
+    std::cout << "linkState:  " << linkStateFile << std::endl;
+    std::cout << "coverage:   " << coverageFile << std::endl;
+    std::cout << "statistics: "
+              << (statisticsFile.empty() ? "(disabled)" : statisticsFile) << std::endl;
+    std::cout << "statSeries: "
+              << (statisticsTimeSeriesFile.empty() ? "(disabled)" : statisticsTimeSeriesFile)
+              << std::endl;
     if (logPackets)
     {
         std::cout << "packets:    " << packetFile << std::endl;
@@ -849,7 +1575,7 @@ main(int argc, char* argv[])
     }
     if (logBeams)
     {
-        std::cout << "beams:      " << beamFile << std::endl;
+        std::cout << "assoc:      " << beamAssociationFile << std::endl;
         std::cout << "handovers:  " << handoverFile << std::endl;
         std::cout << "cho:        " << choFile << std::endl;
     }
@@ -858,28 +1584,36 @@ main(int argc, char* argv[])
         std::cout << "beams/handovers/cho: (disabled)" << std::endl;
     }
     std::cout << "\nTo visualize (from ns3/ directory):" << std::endl;
-    std::cout << "  python contrib/leosim/utils/visualize_3d.py \\\n+  --position_file "
-              << positionFile << " \\\n+  --links " << linkFile;
+    std::cout << "  python contrib/leosim/utils/visualize_3d.py \\\n  --position_file "
+              << positionFile << " \\\n  --links " << linkStateFile;
     if (logPackets)
     {
-        std::cout << " \\\n+  --packets " << packetFile;
+        std::cout << " \\\n  --packets " << packetFile;
     }
     if (logBeams)
     {
-        std::cout << " \\\n+  --beams " << beamFile << " \\\n+  --handovers " << handoverFile;
+        std::cout << " \\\n  --beams " << beamAssociationFile << " \\\n  --handovers " << handoverFile;
     }
-    std::cout << " \\\n+  --output visualization.html" << std::endl;
+    std::cout << " \\\n  --output visualization.html" << std::endl;
+    if (!taskTimingFile.empty() && taskTimingStream.is_open())
+    {
+        std::cout << "taskTimes:  " << taskTimingFile << std::endl;
+    }
     std::cout << "===================================" << std::endl;
+    taskTimer.Finish();
 
     // Channel updates and visualization finalize
+    taskTimer.Start("finalize_and_cleanup");
     channelModel->StopUpdates();
     if (enableIsl && islChannelModel)
     {
         islChannelModel->StopUpdates();
     }
     vizHelper.Finalize();
+    taskTimer.Finish();
 
     Simulator::Destroy();
+    LeoSimTaskProfiler::SetOutputStream(nullptr);
 
     return 0;
 }

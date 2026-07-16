@@ -35,13 +35,17 @@ LeoSimBeamManagerHelper::LeoSimBeamManagerHelper()
       m_a4Threshold(-110.0),
       m_elevationThreshold(10.0),
       m_tteThreshold(Seconds(30.0)),
-        m_topsisWeights({0.18, 0.22, 0.18, 0.12, 0.08, 0.05, 0.05, 0.12}),
+      m_topsisWeights({0.18, 0.22, 0.14, 0.10, 0.08, 0.14, 0.00, 0.10}),
       m_maxCandidates(3),
       m_choPreparationDelay(MilliSeconds(100)),
       m_choExecutionDelay(MilliSeconds(150)),
       m_updateInterval(MilliSeconds(100)),
       m_loadBalancingEnabled(false),
       m_handoverBufferingEnabled(true),
+      m_phasedArraySteeringInterval(MilliSeconds(100)),
+      m_beamGeometryUpdateInterval(MilliSeconds(100)),
+      m_sinrThresholdDb(-10.0),
+      m_singleBestLinkMode(false),
       m_verbose(false)
 {
     NS_LOG_FUNCTION(this);
@@ -152,6 +156,13 @@ LeoSimBeamManagerHelper::SetTteThreshold(Time tte)
 }
 
 void
+LeoSimBeamManagerHelper::SetSinrThreshold(double sinrDb)
+{
+    NS_LOG_FUNCTION(this << sinrDb);
+    m_sinrThresholdDb = sinrDb;
+}
+
+void
 LeoSimBeamManagerHelper::SetTopsisWeights(double w1,
                                           double w2,
                                           double w3,
@@ -178,6 +189,13 @@ LeoSimBeamManagerHelper::SetMaxCandidates(uint32_t maxCandidates)
     NS_LOG_FUNCTION(this << maxCandidates);
     m_maxCandidates = maxCandidates;
 }
+
+void LeoSimBeamManagerHelper::SetSingleBestLinkMode(bool enable)
+{
+    NS_LOG_FUNCTION(this << enable);
+    m_singleBestLinkMode = enable;
+}
+
 
 void
 LeoSimBeamManagerHelper::SetChoPreparationDelay(Time delay)
@@ -241,6 +259,27 @@ LeoSimBeamManagerHelper::SetVerbose(bool verbose)
     m_verbose = verbose;
 }
 
+void
+LeoSimBeamManagerHelper::SetMultiBeamModel(Ptr<LeoSimMultiBeamModel> model)
+{
+    NS_LOG_FUNCTION(this << model);
+    m_multiBeamModel = model;
+}
+
+void
+LeoSimBeamManagerHelper::SetPhasedArraySteeringInterval(Time interval)
+{
+    NS_LOG_FUNCTION(this << interval);
+    m_phasedArraySteeringInterval = interval;
+}
+
+void
+LeoSimBeamManagerHelper::SetBeamGeometryUpdateInterval(Time interval)
+{
+    NS_LOG_FUNCTION(this << interval);
+    m_beamGeometryUpdateInterval = interval;
+}
+
 Ptr<LeoSimBeamManager>
 LeoSimBeamManagerHelper::Install(NodeContainer groundNodes,
                                   NodeContainer satNodes,
@@ -285,6 +324,7 @@ LeoSimBeamManagerHelper::Install(NodeContainer groundNodes,
     m_manager->SetA4Threshold(m_a4Threshold);
     m_manager->SetElevationThreshold(m_elevationThreshold);
     m_manager->SetTteThreshold(m_tteThreshold);
+    m_manager->SetSinrThresholdDb(m_sinrThresholdDb);
 
     m_manager->SetTopsisWeights(m_topsisWeights[0],
                                  m_topsisWeights[1],
@@ -295,6 +335,8 @@ LeoSimBeamManagerHelper::Install(NodeContainer groundNodes,
                                  m_topsisWeights[6],
                                  m_topsisWeights[7]);
     m_manager->SetMaxCandidates(m_maxCandidates);
+    m_manager->SetSingleBestLinkMode(m_singleBestLinkMode);
+    m_manager->SetUpdateInterval(m_updateInterval);
 
     m_manager->SetChoPreparationDelay(m_choPreparationDelay);
     m_manager->SetChoExecutionDelay(m_choExecutionDelay);
@@ -311,10 +353,18 @@ LeoSimBeamManagerHelper::Install(NodeContainer groundNodes,
 
     m_manager->SetVerbose(m_verbose);
 
+    // Phased array / multi-beam model
+    if (m_multiBeamModel)
+    {
+        m_manager->SetMultiBeamModel(m_multiBeamModel);
+        m_manager->SetPhasedArraySteeringInterval(m_phasedArraySteeringInterval);
+        m_manager->SetBeamGeometryUpdateInterval(m_beamGeometryUpdateInterval);
+    }
+
     // Start the beam manager with the provided nodes and simulation time
     m_manager->Start(groundNodes, satNodes, Seconds(0.0), simTime);
 
-    NS_LOG_INFO("LeoSimBeamManager installed with "
+    NS_LOG_DEBUG("LeoSimBeamManager installed with "
                 << groundNodes.GetN() << " ground nodes and " << satNodes.GetN()
                 << " satellites, "
                 << "simulation duration: " << simTime.GetSeconds() << "s");

@@ -34,6 +34,9 @@ namespace
 constexpr double EARTH_RADIUS_KM = 6371.0;
 constexpr double KM_PER_DEGREE = 111.32;
 constexpr double PI = 3.14159265358979323846;
+// Slightly tighter than mathematically tangent packing to avoid visible gaps
+// from spherical projection and floating-point rounding.
+constexpr double HEX_CENTER_SPACING_FACTOR = 0.96;
 
 inline int
 PositiveModulo(int value, int mod)
@@ -51,8 +54,9 @@ IndexToAxial(uint32_t index, int& q, int& r)
         return;
     }
 
-    static const int dirQ[6] = {1, 0, -1, -1, 0, 1};
-    static const int dirR[6] = {-1, -1, 0, 1, 1, 0};
+    // Axial directions (pointy-top convention)
+    static const int dirQ[6] = {1, 1, 0, -1, -1, 0};
+    static const int dirR[6] = {0, -1, -1, 0, 1, 1};
 
     uint32_t cursor = 1;
     for (uint32_t ring = 1;; ++ring)
@@ -60,8 +64,9 @@ IndexToAxial(uint32_t index, int& q, int& r)
         const uint32_t ringCount = 6 * ring;
         if (index < cursor + ringCount)
         {
-            q = static_cast<int>(ring);
-            r = 0;
+            // Start each ring at axial coordinate (-ring, +ring)
+            q = -static_cast<int>(ring);
+            r = static_cast<int>(ring);
             uint32_t local = index - cursor;
             for (uint32_t d = 0; d < 6; ++d)
             {
@@ -134,13 +139,15 @@ LeoSimBeamLayoutEngine::GenerateHexLayout(uint32_t satelliteNodeId,
     uint32_t beamIndex = 0;
     appendBeam(0, 0, beamIndex++);
 
-    static const int dirQ[6] = {1, 0, -1, -1, 0, 1};
-    static const int dirR[6] = {-1, -1, 0, 1, 1, 0};
+    // Axial directions (pointy-top convention)
+    static const int dirQ[6] = {1, 1, 0, -1, -1, 0};
+    static const int dirR[6] = {0, -1, -1, 0, 1, 1};
 
     for (uint32_t ring = 1; ring <= numRings; ++ring)
     {
-        int q = static_cast<int>(ring);
-        int r = 0;
+        // Start each ring at axial coordinate (-ring, +ring)
+        int q = -static_cast<int>(ring);
+        int r = static_cast<int>(ring);
 
         for (uint32_t d = 0; d < 6; ++d)
         {
@@ -219,7 +226,7 @@ LeoSimBeamLayoutEngine::FindBeamForPosition(const std::vector<LeoSimSpotBeam>& b
     {
         if (static_cast<int32_t>(beam.beamId) == bestBeamId)
         {
-            return (bestDistanceKm <= 1.5 * beam.radiusKm) ? bestBeamId : -1;
+            return (bestDistanceKm <= beam.radiusKm) ? bestBeamId : -1;
         }
     }
 
@@ -231,10 +238,11 @@ LeoSimBeamLayoutEngine::AxialToOffset(int q, int r, double beamRadiusKm)
 {
     NS_LOG_FUNCTION(q << r << beamRadiusKm);
 
+    const double effectiveRadiusKm = beamRadiusKm * HEX_CENTER_SPACING_FACTOR;
     const double sqrt3 = std::sqrt(3.0);
-    const double x = beamRadiusKm * (3.0 / 2.0) * static_cast<double>(q);
-    const double y = beamRadiusKm * ((sqrt3 / 2.0) * static_cast<double>(q) +
-                                     sqrt3 * static_cast<double>(r));
+    const double x = effectiveRadiusKm * (3.0 / 2.0) * static_cast<double>(q);
+    const double y = effectiveRadiusKm * ((sqrt3 / 2.0) * static_cast<double>(q) +
+                                          sqrt3 * static_cast<double>(r));
 
     return Vector2D(x, y);
 }

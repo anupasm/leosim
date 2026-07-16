@@ -19,10 +19,14 @@
 #define LEOSIM_MULTI_BEAM_MODEL_H
 
 #include "ns3/object.h"
+#include "ns3/node-container.h"
+#include "ns3/nstime.h"
 #include "ns3/vector.h"
 
+#include <cmath>
 #include <cstdint>
 #include <map>
+#include <utility>
 #include <vector>
 
 namespace ns3
@@ -43,6 +47,24 @@ struct LeoSimBeamConfig
     bool beamHoppingEnabled = false;      //!< Enables beam hopping scheduler when true.
     uint32_t beamHopCycleSlotsN = 256;    //!< Number of slots in one beam hopping cycle.
     uint32_t beamHopSlotMs = 10;          //!< Beam hopping slot duration (ms).
+    bool singleBestLinkMode = false;      //!< Enable single best link per satellite (state-of-the-art selection).
+};
+
+/**
+ * \ingroup leosim
+ * \brief Configuration parameters for a phased array antenna.
+ *
+ * Models a Uniform Rectangular Array (URA) whose beam can be steered
+ * electronically toward any ground node within the maximum steering cone.
+ */
+struct LeoSimPhasedArrayConfig
+{
+    uint32_t numElementsAz = 8;           //!< Number of elements along the azimuth axis.
+    uint32_t numElementsEl = 8;           //!< Number of elements along the elevation axis.
+    double elementSpacingLambda = 0.5;    //!< Element spacing as fraction of wavelength (d/λ).
+    double operatingFrequencyGHz = 20.0;  //!< Carrier frequency in GHz.
+    double maxSteeringAngleDeg = 60.0;    //!< Maximum off-nadir steering angle (degrees).
+    double elementGainDbi = 5.0;          //!< Single-element gain (dBi).
 };
 
 /**
@@ -75,7 +97,12 @@ struct LeoSimSpotBeam
 
 /**
  * \ingroup leosim
- * \brief Placeholder object wrapper for multi-beam state/model ownership.
+ * \brief Manages satellite multi-beam state and phased array steering.
+ *
+ * Owns the per-satellite spot-beam list and exposes a Uniform Rectangular
+ * Array (URA) phased array antenna model.  Call SteerBeam() each time the
+ * satellite or a ground node moves, then query CalculateGain() for link
+ * budget calculations.
  */
 class LeoSimMultiBeamModel : public Object
 {
@@ -90,6 +117,10 @@ class LeoSimMultiBeamModel : public Object
     void SetBeamsForSatellite(uint32_t satId, const std::vector<LeoSimSpotBeam>& beams)
     {
         m_beamsBySatellite[satId] = beams;
+        for (const auto& beam : beams)
+        {
+            m_nominalBeamRadiusKm[{satId, beam.beamId}] = beam.radiusKm;
+        }
     }
 
     /**
@@ -126,8 +157,78 @@ class LeoSimMultiBeamModel : public Object
         return m_beamsBySatellite;
     }
 
+    // -----------------------------------------------------------------------
+    // Phased array configuration
+    // -----------------------------------------------------------------------
+
+    /**
+     * \brief Replace the phased array configuration.
+     * \param config New configuration struct.
+     */
+    void SetPhasedArrayConfig(const LeoSimPhasedArrayConfig& config);
+
+    /**
+     * \brief Retrieve the current phased array configuration.
+     */
+    const LeoSimPhasedArrayConfig& GetPhasedArrayConfig() const;
+
+    // -----------------------------------------------------------------------
+    // Dynamic beam steering
+    // -----------------------------------------------------------------------
+
+    /**
+     * \brief Steer the phased array beam toward a target position.
+     * \param antennaPosition ECEF position of the satellite antenna (metres).
+     * \param targetPosition  ECEF position of the target ground node (metres).
+     *
+     * Computes the off-nadir elevation and azimuth angles required to point
+     * the URA boresight at the target and stores them as the current steering
+     * state.  The off-nadir angle is clamped to
+     * LeoSimPhasedArrayConfig::maxSteeringAngleDeg.
+     */
+    void SteerBeam(const Vector& antennaPosition, const Vector& targetPosition);
+
+    /**
+     * \brief Calculate array gain in a given direction.
+     * \param azimuthDeg   Azimuth of the query direction (degrees, 0 = North).
+     * \param elevationDeg Off-nadir angle of the query direction (degrees).
+     * \return Antenna gain (dBi) toward the requested direction.
+     *
+     * Uses a separable sinc-envelope URA pattern referenced to the current
+     * steering state set by SteerBeam().  Returns peak gain when the query
+     * direction matches the steering direction.
+     */
+    double CalculateGain(double azimuthDeg, double elevationDeg) const;
+
+    /**
+     * \brief Return the current beam steering azimuth (degrees, 0 = North).
+     */
+    double GetSteeringAzimuthDeg() const;
+
+    /**
+     * \brief Return the current beam steering off-nadir elevation (degrees).
+     */
+    double GetSteeringElevationDeg() const;
+
+    /**
+     * \brief Synchronize beam footprints with current satellite positions.
+     * \param satellites Satellite nodes whose beam geometry should be updated.
+     * \param now Current simulation time, used for logging and trace context.
+     *
+     * Updates each configured satellite's spot-beam centers through
+     * LeoSimBeamLayoutEngine::UpdateBeamPositions(), then refreshes the
+     * footprint radii for altitude and off-nadir projection effects.
+     */
+    void UpdateGeometry(NodeContainer satellites, Time now);
+
   private:
     std::map<uint32_t, std::vector<LeoSimSpotBeam>> m_beamsBySatellite;
+    std::map<std::pair<uint32_t, uint32_t>, double> m_nominalBeamRadiusKm;
+
+    // Phased array antenna parameters
+    LeoSimPhasedArrayConfig m_phasedArrayConfig; //!< URA configuration.
+    double m_steeringAzimuthDeg{0.0};            //!< Current steering azimuth (deg).
+    double m_steeringElevationDeg{0.0};          //!< Current off-nadir steering angle (deg).
 };
 
 } // namespace ns3

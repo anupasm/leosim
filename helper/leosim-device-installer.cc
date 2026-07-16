@@ -202,7 +202,7 @@ LeoSimDeviceInstaller::InstallLink(Ptr<Node> node1, Ptr<Node> node2)
 
     if (m_verbose)
     {
-        NS_LOG_INFO("Installed P2P devices between nodes " << node1->GetId() << " and "
+        NS_LOG_DEBUG("Installed P2P devices between nodes " << node1->GetId() << " and "
                                                            << node2->GetId());
     }
 
@@ -234,7 +234,7 @@ LeoSimDeviceInstaller::Install(NodeContainer satellites, NodeContainer groundNod
 
     if (m_verbose)
     {
-        NS_LOG_INFO("Installing devices for " << allLinks.size() << " links");
+        NS_LOG_DEBUG("Installing devices for " << allLinks.size() << " links");
     }
 
     // Install devices for each link
@@ -247,7 +247,7 @@ LeoSimDeviceInstaller::Install(NodeContainer satellites, NodeContainer groundNod
 
     if (m_verbose)
     {
-        NS_LOG_INFO("Installed " << allDevices.GetN() << " total devices");
+        NS_LOG_DEBUG("Installed " << allDevices.GetN() << " total devices");
     }
 
     return allDevices;
@@ -274,7 +274,7 @@ LeoSimDeviceInstaller::Install(NodeContainer satellites,
 
     if (m_verbose)
     {
-        NS_LOG_INFO("Installing devices for " << links.size() << " links of type " << linkType);
+        NS_LOG_DEBUG("Installing devices for " << links.size() << " links of type " << linkType);
     }
 
     // Install devices for each link
@@ -287,7 +287,7 @@ LeoSimDeviceInstaller::Install(NodeContainer satellites,
 
     if (m_verbose)
     {
-        NS_LOG_INFO("Installed " << allDevices.GetN() << " devices for link type " << linkType);
+        NS_LOG_DEBUG("Installed " << allDevices.GetN() << " devices for link type " << linkType);
     }
 
     return allDevices;
@@ -326,7 +326,7 @@ LeoSimDeviceInstaller::InstallDynamic(NodeContainer satellites, NodeContainer gr
 
     if (m_verbose)
     {
-        NS_LOG_INFO("Dynamic installation added " << devicesAdded << " devices");
+        NS_LOG_DEBUG("Dynamic installation added " << devicesAdded << " devices");
     }
 
     return devicesAdded;
@@ -405,7 +405,7 @@ LeoSimDeviceInstaller::Update()
 
     if (m_verbose)
     {
-        NS_LOG_INFO("Update resulted in " << changes << " changes");
+        NS_LOG_DEBUG("Update resulted in " << changes << " changes");
     }
 
     return changes;
@@ -468,7 +468,7 @@ LeoSimDeviceInstaller::Clear()
     m_numInstalledDevices = 0;
     if (m_verbose)
     {
-        NS_LOG_INFO("Cleared all installed devices");
+        NS_LOG_DEBUG("Cleared all installed devices");
     }
 }
 
@@ -479,7 +479,7 @@ LeoSimDeviceInstaller::SetDevicesPerNode(uint32_t numDevices)
     m_devicesPerNode = numDevices;
     if (m_verbose)
     {
-        NS_LOG_INFO("Set devices per node to " << numDevices);
+        NS_LOG_DEBUG("Set devices per node to " << numDevices);
     }
 }
 
@@ -503,7 +503,7 @@ LeoSimDeviceInstaller::EnableLinkStateCallbacks(Ptr<LeoSimChannelModel> channelM
     
     if (m_verbose)
     {
-        NS_LOG_INFO("Link state callbacks enabled");
+        NS_LOG_DEBUG("Link state callbacks enabled");
     }
 }
 
@@ -633,7 +633,7 @@ LeoSimDeviceInstaller::ApplySharingRates(NetDeviceContainer& devices)
 
         if (m_verbose)
         {
-            NS_LOG_INFO("Sharing rate applied: nodes " << nodeA->GetId() << "(" << m_operatorModel->GetOperatorId(nodeA->GetId())
+            NS_LOG_DEBUG("Sharing rate applied: nodes " << nodeA->GetId() << "(" << m_operatorModel->GetOperatorId(nodeA->GetId())
                                                        << ") <-> " << nodeB->GetId() << "(" << m_operatorModel->GetOperatorId(nodeB->GetId())
                                                        << "), alpha=" << alphaUsed
                                                        << ", effectiveRate=" << (static_cast<double>(effectiveRateBps) / 1e6) << " Mbps");
@@ -645,7 +645,7 @@ void
 LeoSimDeviceInstaller::UpdateSharingRates(NetDeviceContainer& devices)
 {
     NS_LOG_FUNCTION(this << devices.GetN());
-    NS_LOG_INFO("Updating sharing rates at t=" << Simulator::Now().GetSeconds());
+    NS_LOG_DEBUG("Updating sharing rates at t=" << Simulator::Now().GetSeconds());
     ApplySharingRates(devices);
 }
 

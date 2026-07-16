@@ -22,9 +22,14 @@
 #include "ns3/node-container.h"
 #include "ns3/simulator.h"
 
+#include <algorithm>
 #include <cmath>
 #include <iomanip>
 #include <iostream>
+#include <map>
+#include <set>
+#include <tuple>
+#include <vector>
 #include "ns3/names.h"
 namespace ns3
 {
@@ -43,6 +48,7 @@ LeoSimChannelHelper::LeoSimChannelHelper()
       m_atmosphericEnabled(true),
       m_updateInterval(Seconds(1.0)),
       m_verbose(false),
+      m_maxGroundLinksPerNode(1),
       m_islMaxDistance(5000000.0),
       m_islTransmitPower(30.0),
       m_islAntennaGain(30.0),
@@ -64,23 +70,11 @@ LeoSimChannelHelper::CreateChannels(NodeContainer satellites, NodeContainer grou
     Ptr<LeoSimChannelModel> channelModel = CreateObject<LeoSimChannelModel>();
     ConfigureChannelModel(channelModel);
 
-    // Create links between satellites and ground nodes only when in contact
-    uint32_t linkCount = 0;
-    for (uint32_t i = 0; i < satellites.GetN(); ++i)
-    {
-        for (uint32_t j = 0; j < groundNodes.GetN(); ++j)
-        {
-            Ptr<Node> sat = satellites.Get(i);
-            Ptr<Node> ground = groundNodes.Get(j);
-
-            channelModel->AddLink(sat, ground);
-            linkCount++;
-        }
-    }
+    uint32_t linkCount = AddGroundAccessLinks(channelModel, satellites, groundNodes);
 
     if (m_verbose)
     {
-        NS_LOG_INFO("Created " << linkCount << " satellite-to-ground links (in contact only)");
+        NS_LOG_DEBUG("Created " << linkCount << " bounded satellite-to-ground candidate links");
     }
 
     // Start periodic updates
@@ -98,20 +92,11 @@ LeoSimChannelHelper::CreateSatelliteToGatewayChannels(NodeContainer satellites,
     Ptr<LeoSimChannelModel> channelModel = CreateObject<LeoSimChannelModel>();
     ConfigureChannelModel(channelModel);
 
-    // Create links between all satellites and all gateways
-    uint32_t linkCount = 0;
-    for (uint32_t i = 0; i < satellites.GetN(); ++i)
-    {
-        for (uint32_t j = 0; j < gateways.GetN(); ++j)
-        {
-            channelModel->AddLink(satellites.Get(i), gateways.Get(j));
-            linkCount++;
-        }
-    }
+    uint32_t linkCount = AddGroundAccessLinks(channelModel, satellites, gateways);
 
     if (m_verbose)
     {
-        NS_LOG_INFO("Created " << linkCount << " satellite-to-gateway links");
+        NS_LOG_DEBUG("Created " << linkCount << " bounded satellite-to-gateway candidate links");
     }
 
     // Start periodic updates
@@ -128,20 +113,11 @@ LeoSimChannelHelper::CreateSatelliteToUeChannels(NodeContainer satellites, NodeC
     Ptr<LeoSimChannelModel> channelModel = CreateObject<LeoSimChannelModel>();
     ConfigureChannelModel(channelModel);
 
-    // Create links between all satellites and all UEs
-    uint32_t linkCount = 0;
-    for (uint32_t i = 0; i < satellites.GetN(); ++i)
-    {
-        for (uint32_t j = 0; j < ues.GetN(); ++j)
-        {
-            channelModel->AddLink(satellites.Get(i), ues.Get(j));
-            linkCount++;
-        }
-    }
+    uint32_t linkCount = AddGroundAccessLinks(channelModel, satellites, ues);
 
     if (m_verbose)
     {
-        NS_LOG_INFO("Created " << linkCount << " satellite-to-UE links");
+        NS_LOG_DEBUG("Created " << linkCount << " bounded satellite-to-UE candidate links");
     }
 
     // Start periodic updates
@@ -157,20 +133,90 @@ LeoSimChannelHelper::AddLinks(Ptr<LeoSimChannelModel> channelModel,
 {
     NS_LOG_FUNCTION(this << channelModel << satellites.GetN() << groundNodes.GetN());
 
-    uint32_t linkCount = 0;
-    for (uint32_t i = 0; i < satellites.GetN(); ++i)
+    uint32_t linkCount = AddGroundAccessLinks(channelModel, satellites, groundNodes);
+
+    if (m_verbose)
     {
-        for (uint32_t j = 0; j < groundNodes.GetN(); ++j)
+        NS_LOG_DEBUG("Added " << linkCount << " bounded access links to existing channel model");
+    }
+}
+
+uint32_t
+LeoSimChannelHelper::AddGroundAccessLinks(Ptr<LeoSimChannelModel> channelModel,
+                                          NodeContainer satellites,
+                                          NodeContainer groundNodes)
+{
+    NS_LOG_FUNCTION(this << channelModel << satellites.GetN() << groundNodes.GetN());
+
+    if (!channelModel || satellites.GetN() == 0 || groundNodes.GetN() == 0)
+    {
+        return 0;
+    }
+
+    uint32_t linkCount = 0;
+    const uint32_t maxLinks = std::max<uint32_t>(1, m_maxGroundLinksPerNode);
+
+    for (uint32_t g = 0; g < groundNodes.GetN(); ++g)
+    {
+        Ptr<Node> ground = groundNodes.Get(g);
+        Ptr<MobilityModel> groundMobility = ground->GetObject<MobilityModel>();
+        if (!groundMobility)
         {
-            channelModel->AddLink(satellites.Get(i), groundNodes.Get(j));
+            continue;
+        }
+
+        const Vector groundPos = groundMobility->GetPosition();
+        std::vector<std::pair<double, uint32_t>> feasibleSatellites;
+        std::vector<std::pair<double, uint32_t>> fallbackSatellites;
+        feasibleSatellites.reserve(satellites.GetN());
+        fallbackSatellites.reserve(satellites.GetN());
+
+        for (uint32_t s = 0; s < satellites.GetN(); ++s)
+        {
+            Ptr<Node> satellite = satellites.Get(s);
+            Ptr<MobilityModel> satMobility = satellite->GetObject<MobilityModel>();
+            if (!satMobility)
+            {
+                continue;
+            }
+
+            const Vector satPos = satMobility->GetPosition();
+            const double dx = satPos.x - groundPos.x;
+            const double dy = satPos.y - groundPos.y;
+            const double dz = satPos.z - groundPos.z;
+            const double distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+            fallbackSatellites.emplace_back(distance, s);
+
+            if (distance <= m_maxLinkDistance &&
+                CalculateElevationAngle(groundPos, satPos) >= m_minElevationAngle)
+            {
+                feasibleSatellites.emplace_back(distance, s);
+            }
+        }
+
+        std::sort(feasibleSatellites.begin(),
+                  feasibleSatellites.end(),
+                  [](const auto& a, const auto& b) {
+                      return a.first < b.first;
+                  });
+        std::sort(fallbackSatellites.begin(),
+                  fallbackSatellites.end(),
+                  [](const auto& a, const auto& b) {
+                      return a.first < b.first;
+                  });
+
+        const std::vector<std::pair<double, uint32_t>>& selectedSatellites =
+            feasibleSatellites.empty() ? fallbackSatellites : feasibleSatellites;
+
+        const uint32_t count = std::min<uint32_t>(maxLinks, selectedSatellites.size());
+        for (uint32_t n = 0; n < count; ++n)
+        {
+            channelModel->AddLink(satellites.Get(selectedSatellites[n].second), ground);
             linkCount++;
         }
     }
 
-    if (m_verbose)
-    {
-        NS_LOG_INFO("Added " << linkCount << " links to existing channel model");
-    }
+    return linkCount;
 }
 
 void
@@ -198,7 +244,7 @@ LeoSimChannelHelper::ConfigureChannelModel(Ptr<LeoSimChannelModel> channelModel)
 
     if (m_verbose)
     {
-        NS_LOG_INFO("Configured channel model: " << "MinElev=" << m_minElevationAngle << "°, "
+        NS_LOG_DEBUG("Configured channel model: " << "MinElev=" << m_minElevationAngle << "°, "
                                                  << "MaxDist=" << m_maxLinkDistance / 1000.0
                                                  << "km, "
                                                  << "Freq=" << m_frequency / 1e9 << "GHz, "
@@ -206,7 +252,7 @@ LeoSimChannelHelper::ConfigureChannelModel(Ptr<LeoSimChannelModel> channelModel)
                                                  << "TxGain=" << m_txAntennaGain << "dB, "
                                                  << "RxGain=" << m_rxAntennaGain << "dB, "
                                                  << "NoiseBW=" << m_noiseBandwidth / 1e6 << "MHz");
-        NS_LOG_INFO("ISL parameters: MaxDist=" << m_islMaxDistance / 1000.0 << "km, "
+        NS_LOG_DEBUG("ISL parameters: MaxDist=" << m_islMaxDistance / 1000.0 << "km, "
                                                << "TxPower=" << m_islTransmitPower << "dBm, "
                                                << "Gain=" << m_islAntennaGain << "dB, "
                                                << "Freq=" << m_islFrequency / 1e9 << "GHz");
@@ -294,10 +340,82 @@ LeoSimChannelHelper::SetUpdateInterval(Time interval)
 }
 
 void
+LeoSimChannelHelper::SetMaxGroundLinksPerNode(uint32_t maxLinks)
+{
+    NS_LOG_FUNCTION(this << maxLinks);
+    m_maxGroundLinksPerNode = std::max<uint32_t>(1, maxLinks);
+}
+
+void
 LeoSimChannelHelper::SetVerbose(bool verbose)
 {
     NS_LOG_FUNCTION(this << verbose);
     m_verbose = verbose;
+}
+
+bool
+LeoSimChannelHelper::IsLinkFeasible(Ptr<Node> satellite, Ptr<Node> groundNode) const
+{
+    NS_LOG_FUNCTION(this << satellite << groundNode);
+
+    if (!satellite || !groundNode)
+    {
+        return false;
+    }
+
+    Ptr<MobilityModel> satMobility = satellite->GetObject<MobilityModel>();
+    Ptr<MobilityModel> groundMobility = groundNode->GetObject<MobilityModel>();
+    if (!satMobility || !groundMobility)
+    {
+        return false;
+    }
+
+    const Vector satPos = satMobility->GetPosition();
+    const Vector groundPos = groundMobility->GetPosition();
+    const double dx = satPos.x - groundPos.x;
+    const double dy = satPos.y - groundPos.y;
+    const double dz = satPos.z - groundPos.z;
+    const double distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+
+    return distance <= m_maxLinkDistance &&
+           CalculateElevationAngle(groundPos, satPos) >= m_minElevationAngle;
+}
+
+double
+LeoSimChannelHelper::CalculateElevationAngle(const Vector& groundPos, const Vector& satPos) const
+{
+    Vector los;
+    los.x = satPos.x - groundPos.x;
+    los.y = satPos.y - groundPos.y;
+    los.z = satPos.z - groundPos.z;
+
+    const double losDistance = std::sqrt(los.x * los.x + los.y * los.y + los.z * los.z);
+    if (losDistance == 0.0)
+    {
+        return 0.0;
+    }
+
+    const double groundDistance =
+        std::sqrt(groundPos.x * groundPos.x + groundPos.y * groundPos.y + groundPos.z * groundPos.z);
+    if (groundDistance == 0.0)
+    {
+        return std::asin(los.z / losDistance) * 180.0 / M_PI;
+    }
+
+    Vector up;
+    up.x = groundPos.x / groundDistance;
+    up.y = groundPos.y / groundDistance;
+    up.z = groundPos.z / groundDistance;
+
+    Vector losNorm;
+    losNorm.x = los.x / losDistance;
+    losNorm.y = los.y / losDistance;
+    losNorm.z = los.z / losDistance;
+
+    const double cosZenith =
+        std::min(1.0, std::max(-1.0, losNorm.x * up.x + losNorm.y * up.y + losNorm.z * up.z));
+    const double zenithAngle = std::acos(cosZenith);
+    return (M_PI / 2.0 - zenithAngle) * 180.0 / M_PI;
 }
 
 void
@@ -375,12 +493,12 @@ LeoSimChannelHelper::LogActiveLinks(Ptr<LeoSimChannelModel> channelModel, const 
     }
     msg += "Active links: " + std::to_string(activeLinks.size());
 
-    NS_LOG_INFO(msg);
+    NS_LOG_DEBUG(msg);
 
     for (const auto& link : activeLinks)
     {
         LeoSimChannelQuality quality = channelModel->GetChannelQuality(link.first, link.second);
-        NS_LOG_INFO("  Link " << link.first->GetId() << "->" << link.second->GetId()
+        NS_LOG_DEBUG("  Link " << link.first->GetId() << "->" << link.second->GetId()
                               << ": dist=" << quality.distance / 1000.0 << "km, "
                               << "elev=" << quality.elevationAngle << "°, "
                               << "SNR=" << quality.snr << "dB");
@@ -400,10 +518,53 @@ LeoSimChannelHelper::CreateIslMesh(NodeContainer satellites)
 
     if (m_verbose)
     {
-        NS_LOG_INFO("Created ISL mesh with " << linkCount << " links between " 
+        NS_LOG_DEBUG("Created ISL mesh with " << linkCount << " links between " 
                    << satellites.GetN() << " satellites");
     }
 
+    return channelModel;
+}
+
+Ptr<LeoSimChannelModel>
+LeoSimChannelHelper::CreateIslNearestNeighborMesh(NodeContainer satellites, uint32_t maxNeighbors)
+{
+    NS_LOG_FUNCTION(this << satellites.GetN() << maxNeighbors);
+
+    Ptr<LeoSimChannelModel> channelModel = CreateObject<LeoSimChannelModel>();
+    ConfigureChannelModel(channelModel);
+
+    uint32_t linkCount = AddNearestNeighborIslLinks(channelModel, satellites, maxNeighbors);
+
+    if (m_verbose)
+    {
+        NS_LOG_DEBUG("Created bounded ISL mesh with " << linkCount << " links between "
+                                                      << satellites.GetN() << " satellites");
+    }
+
+    channelModel->StartUpdates();
+    return channelModel;
+}
+
+Ptr<LeoSimChannelModel>
+LeoSimChannelHelper::CreateIslGridTopology(NodeContainer satellites,
+                                           uint32_t satellitesPerPlane,
+                                           bool wrapPlanes)
+{
+    NS_LOG_FUNCTION(this << satellites.GetN() << satellitesPerPlane << wrapPlanes);
+
+    Ptr<LeoSimChannelModel> channelModel = CreateObject<LeoSimChannelModel>();
+    ConfigureChannelModel(channelModel);
+
+    uint32_t linkCount =
+        AddGridIslLinks(channelModel, satellites, satellitesPerPlane, wrapPlanes);
+
+    if (m_verbose)
+    {
+        NS_LOG_DEBUG("Created grid ISL topology with " << linkCount << " links between "
+                                                       << satellites.GetN() << " satellites");
+    }
+
+    channelModel->StartUpdates();
     return channelModel;
 }
 
@@ -416,7 +577,298 @@ LeoSimChannelHelper::AddIslLinks(Ptr<LeoSimChannelModel> channelModel, NodeConta
 
     if (m_verbose)
     {
-        NS_LOG_INFO("Added " << linkCount << " ISL links to existing channel model");
+        NS_LOG_DEBUG("Added " << linkCount << " ISL links to existing channel model");
+    }
+
+    return linkCount;
+}
+
+uint32_t
+LeoSimChannelHelper::AddNearestNeighborIslLinks(Ptr<LeoSimChannelModel> channelModel,
+                                                NodeContainer satellites,
+                                                uint32_t maxNeighbors)
+{
+    NS_LOG_FUNCTION(this << channelModel << satellites.GetN() << maxNeighbors);
+
+    if (!channelModel || maxNeighbors == 0 || satellites.GetN() < 2)
+    {
+        return 0;
+    }
+
+    struct Candidate
+    {
+        double distance;
+        uint32_t first;
+        uint32_t second;
+    };
+
+    const uint32_t numSatellites = satellites.GetN();
+    const uint32_t candidateLimit = std::max<uint32_t>(16, maxNeighbors * 4);
+    std::map<std::pair<uint32_t, uint32_t>, double> uniqueCandidates;
+
+    // Keep only a small nearest-neighbor candidate set per satellite. This uses
+    // O(N*k) storage rather than materializing the O(N^2) full mesh.
+    for (uint32_t i = 0; i < numSatellites; ++i)
+    {
+        Ptr<Node> sat = satellites.Get(i);
+        Ptr<MobilityModel> satMobility = sat->GetObject<MobilityModel>();
+        if (!satMobility)
+        {
+            continue;
+        }
+
+        const Vector satPos = satMobility->GetPosition();
+        std::vector<std::pair<double, uint32_t>> neighbors;
+        neighbors.reserve(numSatellites - 1);
+
+        for (uint32_t j = 0; j < numSatellites; ++j)
+        {
+            if (i == j)
+            {
+                continue;
+            }
+
+            Ptr<Node> peer = satellites.Get(j);
+            Ptr<MobilityModel> peerMobility = peer->GetObject<MobilityModel>();
+            if (!peerMobility)
+            {
+                continue;
+            }
+
+            const Vector peerPos = peerMobility->GetPosition();
+            const double dx = peerPos.x - satPos.x;
+            const double dy = peerPos.y - satPos.y;
+            const double dz = peerPos.z - satPos.z;
+            const double distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (distance <= m_islMaxDistance)
+            {
+                neighbors.emplace_back(distance, j);
+            }
+        }
+
+        const uint32_t count = std::min<uint32_t>(candidateLimit, neighbors.size());
+        if (neighbors.size() > count)
+        {
+            std::nth_element(neighbors.begin(),
+                             neighbors.begin() + count,
+                             neighbors.end(),
+                             [](const auto& a, const auto& b) { return a.first < b.first; });
+            neighbors.resize(count);
+        }
+        std::sort(neighbors.begin(), neighbors.end(), [](const auto& a, const auto& b) {
+            return a.first < b.first;
+        });
+
+        for (uint32_t n = 0; n < count; ++n)
+        {
+            const uint32_t j = neighbors[n].second;
+            const auto pair = std::make_pair(std::min(i, j), std::max(i, j));
+            auto [it, inserted] = uniqueCandidates.emplace(pair, neighbors[n].first);
+            if (!inserted)
+            {
+                it->second = std::min(it->second, neighbors[n].first);
+            }
+        }
+    }
+
+    std::vector<Candidate> candidates;
+    candidates.reserve(uniqueCandidates.size());
+    for (const auto& [pair, distance] : uniqueCandidates)
+    {
+        candidates.push_back({distance, pair.first, pair.second});
+    }
+    std::sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) {
+        if (a.distance != b.distance)
+        {
+            return a.distance < b.distance;
+        }
+        return std::tie(a.first, a.second) < std::tie(b.first, b.second);
+    });
+
+    std::vector<uint32_t> parent(numSatellites);
+    std::vector<uint32_t> rank(numSatellites, 0);
+    std::vector<uint32_t> degree(numSatellites, 0);
+    for (uint32_t i = 0; i < numSatellites; ++i)
+    {
+        parent[i] = i;
+    }
+    auto findRoot = [&parent](uint32_t node) {
+        uint32_t root = node;
+        while (parent[root] != root)
+        {
+            root = parent[root];
+        }
+        while (parent[node] != node)
+        {
+            const uint32_t next = parent[node];
+            parent[node] = root;
+            node = next;
+        }
+        return root;
+    };
+    auto unite = [&parent, &rank, &findRoot](uint32_t a, uint32_t b) {
+        a = findRoot(a);
+        b = findRoot(b);
+        if (a == b)
+        {
+            return;
+        }
+        if (rank[a] < rank[b])
+        {
+            std::swap(a, b);
+        }
+        parent[b] = a;
+        if (rank[a] == rank[b])
+        {
+            rank[a]++;
+        }
+    };
+
+    std::set<std::pair<uint32_t, uint32_t>> selected;
+    auto select = [&](const Candidate& edge) {
+        if (degree[edge.first] >= maxNeighbors || degree[edge.second] >= maxNeighbors)
+        {
+            return false;
+        }
+        const auto pair = std::make_pair(edge.first, edge.second);
+        if (!selected.insert(pair).second)
+        {
+            return false;
+        }
+        degree[edge.first]++;
+        degree[edge.second]++;
+        unite(edge.first, edge.second);
+        return true;
+    };
+
+    // Connectivity pass: prefer short edges that join different components.
+    for (const Candidate& edge : candidates)
+    {
+        if (findRoot(edge.first) != findRoot(edge.second))
+        {
+            select(edge);
+        }
+    }
+    // Capacity pass: fill unused terminals with the shortest remaining edges.
+    for (const Candidate& edge : candidates)
+    {
+        select(edge);
+    }
+
+    uint32_t linkCount = 0;
+    for (const auto& [first, second] : selected)
+    {
+        channelModel->AddIslLink(satellites.Get(first), satellites.Get(second));
+        linkCount++;
+    }
+
+    std::set<uint32_t> components;
+    uint32_t isolated = 0;
+    for (uint32_t i = 0; i < numSatellites; ++i)
+    {
+        components.insert(findRoot(i));
+        isolated += degree[i] == 0 ? 1 : 0;
+    }
+
+    if (m_verbose || components.size() > 1 || isolated > 0)
+    {
+        std::cout << "ISL spatial topology: " << linkCount << " links, max degree "
+                  << maxNeighbors << ", " << components.size() << " connected components, "
+                  << isolated << " isolated satellites" << std::endl;
+    }
+
+    return linkCount;
+}
+
+uint32_t
+LeoSimChannelHelper::AddGridIslLinks(Ptr<LeoSimChannelModel> channelModel,
+                                     NodeContainer satellites,
+                                     uint32_t satellitesPerPlane,
+                                     bool wrapPlanes)
+{
+    NS_LOG_FUNCTION(this << channelModel << satellites.GetN() << satellitesPerPlane
+                         << wrapPlanes);
+
+    const uint32_t numSatellites = satellites.GetN();
+    if (!channelModel || satellitesPerPlane == 0 || numSatellites < 2)
+    {
+        return 0;
+    }
+
+    const uint32_t numPlanes = (numSatellites + satellitesPerPlane - 1) / satellitesPerPlane;
+    std::set<std::pair<uint32_t, uint32_t>> addedPairs;
+    uint32_t linkCount = 0;
+
+    auto addCandidate = [&](uint32_t i, uint32_t j) {
+        if (i >= numSatellites || j >= numSatellites || i == j)
+        {
+            return;
+        }
+
+        const uint32_t id1 = satellites.Get(i)->GetId();
+        const uint32_t id2 = satellites.Get(j)->GetId();
+        const auto pair = std::make_pair(std::min(id1, id2), std::max(id1, id2));
+        if (addedPairs.find(pair) != addedPairs.end())
+        {
+            return;
+        }
+
+        Ptr<MobilityModel> mobility1 = satellites.Get(i)->GetObject<MobilityModel>();
+        Ptr<MobilityModel> mobility2 = satellites.Get(j)->GetObject<MobilityModel>();
+        if (!mobility1 || !mobility2 ||
+            mobility1->GetDistanceFrom(mobility2) > m_islMaxDistance)
+        {
+            return;
+        }
+
+        addedPairs.insert(pair);
+        channelModel->AddIslLink(satellites.Get(i), satellites.Get(j));
+        linkCount++;
+    };
+
+    for (uint32_t i = 0; i < numSatellites; ++i)
+    {
+        const uint32_t plane = i / satellitesPerPlane;
+        const uint32_t slot = i % satellitesPerPlane;
+        const uint32_t planeStart = plane * satellitesPerPlane;
+        const uint32_t planeEnd = std::min(planeStart + satellitesPerPlane, numSatellites);
+        const uint32_t satsInPlane = planeEnd - planeStart;
+
+        if (satsInPlane > 1)
+        {
+            const uint32_t forwardSlot = (slot + 1) % satsInPlane;
+            const uint32_t backwardSlot = (slot + satsInPlane - 1) % satsInPlane;
+            addCandidate(i, planeStart + forwardSlot);
+            addCandidate(i, planeStart + backwardSlot);
+        }
+
+        if (numPlanes > 1)
+        {
+            if (plane > 0)
+            {
+                addCandidate(i, (plane - 1) * satellitesPerPlane + slot);
+            }
+            else if (wrapPlanes)
+            {
+                addCandidate(i, (numPlanes - 1) * satellitesPerPlane + slot);
+            }
+
+            if (plane + 1 < numPlanes)
+            {
+                addCandidate(i, (plane + 1) * satellitesPerPlane + slot);
+            }
+            else if (wrapPlanes)
+            {
+                addCandidate(i, slot);
+            }
+        }
+    }
+
+    if (m_verbose)
+    {
+        NS_LOG_DEBUG("Added " << linkCount
+                              << " initially in-range grid ISL links (same-plane forward/backward "
+                                 "plus adjacent planes)");
     }
 
     return linkCount;

@@ -25,14 +25,25 @@
 #include "ns3/ptr.h"
 #include "ns3/node.h"
 #include "ns3/nstime.h"
+#include "ns3/callback.h"
 
 #include <map>
+#include <mutex>
 #include <set>
 #include <vector>
 #include <queue>
 
 namespace ns3
 {
+
+class LeoSimBeamManager;
+class LeoSimDijkstraRoutingModel;
+class LeoSimRouteProvider;
+struct LeoSimRoutingContext;
+struct LeoSimRoutingRequest;
+
+using LeoSimEdgeCostCallback =
+    Callback<double, Ptr<Node>, Ptr<Node>, const LeoSimChannelQuality&>;
 
 /**
  * \ingroup leosim
@@ -99,6 +110,34 @@ class LeoSimRoutingCalculator : public Object
     };
 
     /**
+     * \brief Policy for admitting satellite-ground access links into routing.
+     */
+    enum AccessLinkPolicy
+    {
+        LEOSIM_ACCESS_SERVING_ONLY,        //!< Current serving beam only.
+        LEOSIM_ACCESS_SERVING_AND_CHO,     //!< Serving beam plus prepared CHO candidates.
+        LEOSIM_ACCESS_MULTI_CONNECTIVITY   //!< Top-N ranked valid beams per ground node.
+    };
+
+    /**
+     * \brief Routing access state for satellite-ground links.
+     *
+     * This is deliberately distinct from LeoSimLinkState (physical channel
+     * visibility) and LeoSimBeamState (beam/cell association lifecycle).
+     */
+    enum LeoSimAccessLinkState
+    {
+        LEOSIM_ACCESS_NOT_APPLICABLE = 0,   //!< Not a satellite-ground access link.
+        LEOSIM_ACCESS_CHANNEL_DOWN,         //!< Physical channel is not UP/DEGRADED.
+        LEOSIM_ACCESS_NO_ELIGIBLE_BEAM,     //!< No active feasible beam covers the ground node.
+        LEOSIM_ACCESS_BEAM_DARK,            //!< Selected beam exists but is dark this slot.
+        LEOSIM_ACCESS_NOT_SELECTED,         //!< Channel/beam feasible but not routing-authorized.
+        LEOSIM_ACCESS_SERVING,              //!< Current serving access link.
+        LEOSIM_ACCESS_PREPARED,             //!< Prepared CHO candidate access link.
+        LEOSIM_ACCESS_MULTI_CONNECTIVITY_CANDIDATE //!< Policy-admitted multi-connectivity link.
+    };
+
+    /**
      * \brief Get the type ID
      * \return The TypeId
      */
@@ -140,6 +179,65 @@ class LeoSimRoutingCalculator : public Object
      * \return Pointer to the ISL channel model (null if not set)
      */
     Ptr<LeoSimChannelModel> GetIslChannelModel() const;
+
+    /**
+     * \brief Set beam manager used as the access-link authority.
+     * \param beamManager Pointer to the beam manager.
+     */
+    void SetBeamManager(Ptr<LeoSimBeamManager> beamManager);
+
+    /**
+     * \brief Set satellite-ground access-link admission policy.
+     * \param policy Access policy. Defaults to LEOSIM_ACCESS_SERVING_ONLY.
+     */
+    void SetAccessLinkPolicy(AccessLinkPolicy policy);
+
+    /**
+     * \brief Set maximum access links per ground node in multi-connectivity mode.
+     * \param maxLinks Maximum ranked links to admit.
+     */
+    void SetMultiConnectivityMaxLinks(uint32_t maxLinks);
+
+    /**
+     * \brief Enable or bypass beam-manager access-link authority.
+     * \param enabled True to enforce serving/prepared access policy.
+     */
+    void SetAccessAuthorityEnabled(bool enabled);
+
+    /**
+     * \brief Return whether beam-manager access-link authority is enforced.
+     */
+    bool IsAccessAuthorityEnabled() const;
+
+    /**
+     * \brief Set the route provider used by ComputeRoute.
+     * \param provider Route provider implementation. Null restores the default Dijkstra provider.
+     */
+    void SetRouteProvider(Ptr<LeoSimRouteProvider> provider);
+
+    /**
+     * \brief Get the currently configured route provider.
+     */
+    Ptr<LeoSimRouteProvider> GetRouteProvider() const;
+
+    /**
+     * \brief Set a custom edge-cost callback used by the default Dijkstra provider.
+     * \param callback Cost callback. A null callback restores built-in metric costs.
+     */
+    void SetEdgeCostCallback(LeoSimEdgeCostCallback callback);
+
+    /**
+     * \brief Get the custom edge-cost callback, if one is configured.
+     */
+    LeoSimEdgeCostCallback GetEdgeCostCallback() const;
+
+    /**
+     * \brief Get routing access state for a satellite-ground pair.
+     * \param source First endpoint.
+     * \param destination Second endpoint.
+     * \return Explicit routing access state.
+     */
+    LeoSimAccessLinkState GetAccessLinkState(Ptr<Node> source, Ptr<Node> destination);
 
     /**
      * \brief Set operator model used for operator-aware routing.
@@ -336,6 +434,18 @@ class LeoSimRoutingCalculator : public Object
     void PreComputeRouteForNode(uint32_t ueNodeId, uint32_t candidateSatId);
 
   private:
+    friend class LeoSimDijkstraRoutingModel;
+
+    LeoSimRoutingRequest BuildRoutingRequest(Ptr<Node> source,
+                                             Ptr<Node> destination,
+                                             RoutingMetric metric,
+                                             PathType pathType,
+                                             double minSnr) const;
+
+    LeoSimRoutingContext BuildRoutingContext(PathType pathType);
+
+    bool ValidateRoute(const LeoSimRoute& route, const LeoSimRoutingRequest& request);
+
     /**
      * \brief Dijkstra's algorithm implementation for route computation
      * \param source Source node
@@ -388,6 +498,14 @@ class LeoSimRoutingCalculator : public Object
     bool IsLinkAllowed(Ptr<Node> source, Ptr<Node> destination, PathType pathType);
 
     /**
+     * \brief Check beam-manager authority for a satellite-ground access link.
+     * \param source First endpoint.
+     * \param destination Second endpoint.
+     * \return True if the access link may be used for routing.
+     */
+    bool IsAccessLinkAllowed(Ptr<Node> source, Ptr<Node> destination);
+
+    /**
      * \brief Check if link meets SNR constraint
      * \param source Source node
      * \param destination Destination node
@@ -415,11 +533,25 @@ class LeoSimRoutingCalculator : public Object
     // Pointer to the ISL channel model for inter-satellite links
     Ptr<LeoSimChannelModel> m_islChannelModel;
 
+    // Beam manager authority for satellite-ground access links
+    Ptr<LeoSimBeamManager> m_beamManager;
+
     // Pointer to operator model for operator-aware costs and constraints
     Ptr<LeoSimOperatorModel> m_operatorModel;
 
+    // Replaceable route computation provider
+    Ptr<LeoSimRouteProvider> m_routeProvider;
+
+    // Optional custom edge-cost callback for the default Dijkstra provider
+    LeoSimEdgeCostCallback m_edgeCostCallback;
+
     // Default path type (used when caller does not specify one)
     PathType m_defaultPathType;
+
+    // Access-link policy
+    AccessLinkPolicy m_accessLinkPolicy;
+    uint32_t m_multiConnectivityMaxLinks;
+    bool m_accessAuthorityEnabled;
 
     // Configuration
     bool m_verbose;  //!< Enable verbose logging
@@ -428,9 +560,71 @@ class LeoSimRoutingCalculator : public Object
     std::map<Ptr<Node>, std::set<Ptr<Node>>> m_cachedTopology;
     Time m_lastTopologyCacheUpdate;
     Time m_topologyCacheTTL;  //!< Time-to-live for cached topology
+    mutable std::mutex m_topologyCacheMutex; //!< Protects topology cache during parallel route calculations
 
     // Route cache: keyed by (source node ID, destination node ID) pair
     std::map<std::pair<uint32_t, uint32_t>, LeoSimRoute> m_routeCache;  //!< Cached routes
+};
+
+/**
+ * \ingroup leosim
+ * \brief Public route-computation request passed to custom routing providers.
+ */
+struct LeoSimRoutingRequest
+{
+    Ptr<Node> source;       //!< Source node.
+    Ptr<Node> destination;  //!< Destination node.
+    Time time;              //!< Simulation time at request creation.
+
+    LeoSimRoutingCalculator::RoutingMetric metric; //!< Requested routing metric.
+    LeoSimRoutingCalculator::PathType pathType;    //!< Requested path constraint.
+    double minSnr;                                  //!< Minimum SNR, or < 0 for none.
+};
+
+/**
+ * \ingroup leosim
+ * \brief Public routing state passed to custom routing providers.
+ */
+struct LeoSimRoutingContext
+{
+    Ptr<LeoSimChannelModel> channelModel;       //!< Satellite-ground channel model.
+    Ptr<LeoSimChannelModel> islChannelModel;    //!< ISL channel model, if configured.
+    Ptr<LeoSimBeamManager> beamManager;         //!< Beam manager access authority.
+    Ptr<LeoSimOperatorModel> operatorModel;     //!< Operator policy model.
+
+    LeoSimRoutingCalculator::AccessLinkPolicy accessPolicy; //!< Active access-link policy.
+    uint32_t multiConnectivityMaxLinks;                     //!< Max MC links per ground node.
+    bool accessAuthorityEnabled;                            //!< Whether beam authority is enforced.
+
+    std::map<Ptr<Node>, std::set<Ptr<Node>>> topology; //!< Active topology graph.
+
+    Ptr<LeoSimRoutingCalculator> calculator; //!< Calculator exposing link-quality helpers.
+};
+
+/**
+ * \ingroup leosim
+ * \brief Replaceable route-computation interface.
+ */
+class LeoSimRouteProvider : public Object
+{
+  public:
+    static TypeId GetTypeId();
+
+    virtual LeoSimRoute ComputeRoute(const LeoSimRoutingRequest& request,
+                                     const LeoSimRoutingContext& context) = 0;
+};
+
+/**
+ * \ingroup leosim
+ * \brief Default Dijkstra route provider.
+ */
+class LeoSimDijkstraRoutingModel : public LeoSimRouteProvider
+{
+  public:
+    static TypeId GetTypeId();
+
+    LeoSimRoute ComputeRoute(const LeoSimRoutingRequest& request,
+                             const LeoSimRoutingContext& context) override;
 };
 
 } // namespace ns3

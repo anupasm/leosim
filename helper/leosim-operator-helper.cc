@@ -18,6 +18,7 @@
 #include "leosim-operator-helper.h"
 
 #include "ns3/log.h"
+#include "ns3/leosim-mobility-model.h"
 
 namespace ns3
 {
@@ -51,7 +52,13 @@ LeoSimOperatorHelper::RegisterSatellites(const NodeContainer& satNodes)
         LeoSimOperatorId opId = "default";
         if (m_loader)
         {
-            opId = m_loader->GetSatelliteOperator(i);
+            uint32_t satId = i;
+            Ptr<LeoSimMobilityModel> mobility = node->GetObject<LeoSimMobilityModel>();
+            if (mobility)
+            {
+                satId = mobility->GetNodeId();
+            }
+            opId = m_loader->GetSatelliteOperator(satId);
         }
 
         m_model->RegisterNode(node->GetId(), opId, LEOSIM_ROLE_SATELLITE);
@@ -75,7 +82,13 @@ LeoSimOperatorHelper::RegisterGroundDevices(const NodeContainer& ueNodes,
         LeoSimOperatorId opId = "default";
         if (m_loader)
         {
-            opId = m_loader->GetGroundDeviceOperator(i);
+            uint32_t deviceId = i;
+            Ptr<LeoSimMobilityModel> mobility = node->GetObject<LeoSimMobilityModel>();
+            if (mobility)
+            {
+                deviceId = mobility->GetNodeId();
+            }
+            opId = m_loader->GetGroundDeviceOperator(deviceId);
         }
 
         m_model->RegisterNode(node->GetId(), opId, LEOSIM_ROLE_UE);
@@ -92,7 +105,13 @@ LeoSimOperatorHelper::RegisterGroundDevices(const NodeContainer& ueNodes,
         LeoSimOperatorId opId = "default";
         if (m_loader)
         {
-            opId = m_loader->GetGroundDeviceOperator(i);
+            uint32_t deviceId = i;
+            Ptr<LeoSimMobilityModel> mobility = node->GetObject<LeoSimMobilityModel>();
+            if (mobility)
+            {
+                deviceId = mobility->GetNodeId();
+            }
+            opId = m_loader->GetGroundDeviceOperator(deviceId);
         }
 
         m_model->RegisterNode(node->GetId(), opId, LEOSIM_ROLE_SERVER);

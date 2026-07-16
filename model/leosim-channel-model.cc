@@ -17,11 +17,13 @@
 
 #include "leosim-channel-model.h"
 #include "leosim-mobility-model.h"
+#include "leosim-task-profiler.h"
 
 #include "ns3/log.h"
 #include "ns3/simulator.h"
 #include "ns3/double.h"
 #include "ns3/boolean.h"
+#include "ns3/fatal-error.h"
 
 #include <algorithm>
 #include <cmath>
@@ -36,6 +38,10 @@ NS_OBJECT_ENSURE_REGISTERED(LeoSimChannelModel);
 static const double SPEED_OF_LIGHT = 299792458.0; // m/s
 static const double BOLTZMANN_CONSTANT = 1.380649e-23; // J/K
 static const double EARTH_RADIUS = 6371000.0; // meters
+
+// A full mesh grows as N(N-1)/2. At this limit it already creates 499,500
+// links; larger constellations must use a bounded-degree topology.
+static constexpr uint32_t MAX_FULL_MESH_SATELLITES = 1000;
 
 TypeId
 LeoSimChannelModel::GetTypeId()
@@ -167,7 +173,7 @@ LeoSimChannelModel::AddLink(Ptr<Node> node1, Ptr<Node> node2, LeoSimLinkType lin
     auto it = m_nodePairToLink.find(nodePair);
     if (it != m_nodePairToLink.end())
     {
-        NS_LOG_INFO("Link already exists between nodes " << id1 << " and " << id2);
+        NS_LOG_DEBUG("Link already exists between nodes " << id1 << " and " << id2);
         return it->second;
     }
 
@@ -191,7 +197,7 @@ LeoSimChannelModel::AddLink(Ptr<Node> node1, Ptr<Node> node2, LeoSimLinkType lin
     if (m_verbose)
     {
         const char* typeStr = (linkType == LEOSIM_LINK_ISL) ? "ISL" : "Ground";
-        NS_LOG_INFO("Added " << typeStr << " link " << linkId << " between nodes " << id1 << " and " << id2);
+        NS_LOG_DEBUG("Added " << typeStr << " link " << linkId << " between nodes " << id1 << " and " << id2);
     }
 
     return linkId;
@@ -215,7 +221,7 @@ LeoSimChannelModel::RemoveLink(Ptr<Node> node1, Ptr<Node> node2)
 
         if (m_verbose)
         {
-            NS_LOG_INFO("Removed link " << linkId << " between nodes " << id1 << " and " << id2);
+            NS_LOG_DEBUG("Removed link " << linkId << " between nodes " << id1 << " and " << id2);
         }
     }
 }
@@ -223,6 +229,7 @@ LeoSimChannelModel::RemoveLink(Ptr<Node> node1, Ptr<Node> node2)
 void
 LeoSimChannelModel::UpdateAllLinks()
 {
+    LeoSimTaskProfiler::ScopedEvent profile("run_simulation.channel_update_all_links");
     NS_LOG_FUNCTION(this);
 
     for (auto& pair : m_links)
@@ -314,7 +321,7 @@ LeoSimChannelModel::UpdateLink(uint32_t linkId)
             if (m_verbose)
             {
                 const char* typeStr = isIsl ? "ISL" : "Ground";
-                NS_LOG_INFO(typeStr << " link " << linkId << " DOWN: distance " << distance/1000.0 
+                NS_LOG_DEBUG(typeStr << " link " << linkId << " DOWN: distance " << distance/1000.0 
                            << " km exceeds maximum " << maxDistance/1000.0 << " km");
             }
         }
@@ -375,7 +382,7 @@ LeoSimChannelModel::UpdateLink(uint32_t linkId)
                 m_linkStateChangeTrace(node1, node2, LEOSIM_LINK_DOWN);
                 if (m_verbose)
                 {
-                    NS_LOG_INFO("Ground link " << linkId << " DOWN: elevation angle " << elevationAngle 
+                    NS_LOG_DEBUG("Ground link " << linkId << " DOWN: elevation angle " << elevationAngle 
                                << "° below minimum " << m_minElevationAngle << "°");
                 }
             }
@@ -506,13 +513,13 @@ LeoSimChannelModel::UpdateLink(uint32_t linkId)
         {
             const char* stateStr[] = {"UP", "DOWN", "DEGRADED"};
             const char* typeStr = isIsl ? "ISL" : "Ground";
-            NS_LOG_INFO(typeStr << " link " << linkId << " state changed to " << stateStr[newState] 
+            NS_LOG_DEBUG(typeStr << " link " << linkId << " state changed to " << stateStr[newState] 
                        << " (SNR: " << snr << " dB, distance: " << distance/1000.0 << " km");
             if (!isIsl)
             {
-                NS_LOG_INFO(", elevation: " << elevationAngle << "°");
+                NS_LOG_DEBUG(", elevation: " << elevationAngle << "°");
             }
-            NS_LOG_INFO(")");
+            NS_LOG_DEBUG(")");
         }
         NS_LOG_DEBUG("Link state changed from " << oldState << " to " << newState);
     }
@@ -520,7 +527,7 @@ LeoSimChannelModel::UpdateLink(uint32_t linkId)
     {
         // Log why link stays DOWN
         const char* typeStr = isIsl ? "ISL" : "Ground";
-        NS_LOG_INFO(typeStr << " link " << linkId << " remains DOWN (SNR: " << snr 
+        NS_LOG_DEBUG(typeStr << " link " << linkId << " remains DOWN (SNR: " << snr 
                    << " dB, distance: " << distance/1000.0 << " km, elev: " << elevationAngle << "°)");
     }
 
@@ -695,7 +702,7 @@ LeoSimChannelModel::StartUpdates()
         m_updateEvent = Simulator::Schedule(m_updateInterval, &LeoSimChannelModel::PeriodicUpdate, this);
         if (m_verbose)
         {
-            NS_LOG_INFO("Started periodic channel updates (interval: " << m_updateInterval.GetSeconds() << "s)");
+            NS_LOG_DEBUG("Started periodic channel updates (interval: " << m_updateInterval.GetSeconds() << "s)");
         }
     }
 }
@@ -710,7 +717,7 @@ LeoSimChannelModel::StopUpdates()
         Simulator::Cancel(m_updateEvent);
         if (m_verbose)
         {
-            NS_LOG_INFO("Stopped periodic channel updates");
+            NS_LOG_DEBUG("Stopped periodic channel updates");
         }
     }
 }
@@ -722,7 +729,7 @@ LeoSimChannelModel::GetActiveLinks() const
     
     if (m_verbose)
     {
-        NS_LOG_INFO("GetActiveLinks: Checking " << m_links.size() << " total links");
+        NS_LOG_DEBUG("GetActiveLinks: Checking " << m_links.size() << " total links");
     }
     
     for (const auto& pair : m_links)
@@ -733,7 +740,7 @@ LeoSimChannelModel::GetActiveLinks() const
         {
             const char* stateStr[] = {"UP", "DOWN", "DEGRADED"};
             const char* typeStr = (info.linkType == LEOSIM_LINK_ISL) ? "ISL" : "Ground";
-            NS_LOG_INFO("  Link " << info.linkId << " (" << typeStr << "): " 
+            NS_LOG_DEBUG("  Link " << info.linkId << " (" << typeStr << "): " 
                        << info.node1->GetId() << "<->" << info.node2->GetId() 
                        << " state=" << stateStr[info.quality.linkState]);
         }
@@ -746,7 +753,7 @@ LeoSimChannelModel::GetActiveLinks() const
     
     if (m_verbose)
     {
-        NS_LOG_INFO("GetActiveLinks: Returning " << activeLinks.size() << " active links");
+        NS_LOG_DEBUG("GetActiveLinks: Returning " << activeLinks.size() << " active links");
     }
     
     return activeLinks;
@@ -946,6 +953,13 @@ uint32_t
 LeoSimChannelModel::CreateIslMesh(NodeContainer satellites)
 {
     NS_LOG_FUNCTION(this << satellites.GetN());
+
+    NS_ABORT_MSG_IF(satellites.GetN() > MAX_FULL_MESH_SATELLITES,
+                    "Refusing to create a full-mesh ISL topology for "
+                        << satellites.GetN() << " satellites (limit "
+                        << MAX_FULL_MESH_SATELLITES
+                        << "). Use CreateIslGridTopology or "
+                           "CreateIslNearestNeighborMesh instead.");
     
     uint32_t linkCount = 0;
     for (uint32_t i = 0; i < satellites.GetN(); ++i)
@@ -959,7 +973,7 @@ LeoSimChannelModel::CreateIslMesh(NodeContainer satellites)
     
     if (m_verbose)
     {
-        NS_LOG_INFO("Created ISL mesh with " << linkCount << " links between " 
+        NS_LOG_DEBUG("Created ISL mesh with " << linkCount << " links between " 
                    << satellites.GetN() << " satellites");
     }
     
@@ -970,6 +984,12 @@ uint32_t
 LeoSimChannelModel::UpdateIslTopology(NodeContainer satellites, double maxDistance)
 {
     NS_LOG_FUNCTION(this << satellites.GetN() << maxDistance);
+
+    NS_ABORT_MSG_IF(satellites.GetN() > MAX_FULL_MESH_SATELLITES,
+                    "Refusing O(N^2) distance-based ISL discovery for "
+                        << satellites.GetN() << " satellites (limit "
+                        << MAX_FULL_MESH_SATELLITES
+                        << "). Use a bounded-degree topology or spatial index.");
     
     uint32_t activeLinks = 0;
     
@@ -1014,7 +1034,7 @@ LeoSimChannelModel::UpdateIslTopology(NodeContainer satellites, double maxDistan
                     AddIslLink(sat1, sat2);
                     if (m_verbose)
                     {
-                        NS_LOG_INFO("Created ISL: Sat " << id1 << " <-> Sat " << id2 
+                        NS_LOG_DEBUG("Created ISL: Sat " << id1 << " <-> Sat " << id2 
                                    << " (distance: " << distance/1000.0 << " km)");
                     }
                 }
@@ -1026,7 +1046,7 @@ LeoSimChannelModel::UpdateIslTopology(NodeContainer satellites, double maxDistan
                 RemoveLink(sat1, sat2);
                 if (m_verbose)
                 {
-                    NS_LOG_INFO("Removed ISL: Sat " << id1 << " <-> Sat " << id2 
+                    NS_LOG_DEBUG("Removed ISL: Sat " << id1 << " <-> Sat " << id2 
                                << " (distance: " << distance/1000.0 << " km > " 
                                << maxDistance/1000.0 << " km)");
                 }
@@ -1259,4 +1279,3 @@ LeoSimChannelModel::GetAlpha(uint32_t nodeA, uint32_t nodeB, LeoSimLinkDirection
 }
 
 } // namespace ns3
-

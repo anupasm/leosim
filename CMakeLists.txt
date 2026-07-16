@@ -11,7 +11,6 @@ build_lib(
     model/leosim-loader.cc
     model/leosim-mobility-model.cc
     model/leosim-channel-model.cc
-    model/leosim-isl-routing-model.cc
     model/leosim-routing-calculator.cc
     model/leosim-weather-model.cc
     helper/leosim-helper.cc
@@ -19,6 +18,7 @@ build_lib(
     helper/leosim-mobility-helper.cc
     helper/leosim-channel-helper.cc
     helper/leosim-routing-calculator-helper.cc
+    helper/leosim-external-routing-helper.cc
     helper/leosim-beam-manager-helper.cc
     helper/leosim-visualization-helper.cc
     helper/leosim-device-installer.cc
@@ -26,6 +26,7 @@ build_lib(
     model/leosim-operator-model.cc
     helper/leosim-operator-helper.cc
     helper/leosim-weather-helper.cc
+    helper/leosim-statistics-helper.cc
     
   HEADER_FILES
     model/leosim.h
@@ -39,14 +40,15 @@ build_lib(
     model/leosim-mobility-model.h
     model/leosim-multi-beam-model.h
     model/leosim-channel-model.h
-    model/leosim-isl-routing-model.h
     model/leosim-routing-calculator.h
+    model/leosim-task-profiler.h
     model/leosim-weather-model.h
     helper/leosim-helper.h
     helper/leosim-loader-helper.h
     helper/leosim-mobility-helper.h
     helper/leosim-channel-helper.h
     helper/leosim-routing-calculator-helper.h
+    helper/leosim-external-routing-helper.h
     helper/leosim-beam-manager-helper.h
     helper/leosim-visualization-helper.h
     helper/leosim-device-installer.h
@@ -54,6 +56,7 @@ build_lib(
     model/leosim-operator-model.h
     helper/leosim-operator-helper.h
     helper/leosim-weather-helper.h
+    helper/leosim-statistics-helper.h
     
   LIBRARIES_TO_LINK
     ${libcore}
@@ -68,4 +71,5 @@ build_lib(
     ${libpoint-to-point-layout}
   TEST_SOURCES
     test/leosim-test-suite.cc
+    test/leosim-statistics-test-suite.cc
 )

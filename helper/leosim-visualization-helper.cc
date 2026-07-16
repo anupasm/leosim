@@ -16,6 +16,8 @@
  */
 
 #include "leosim-visualization-helper.h"
+#include "ns3/leosim-beam-layout-engine.h"
+#include "ns3/leosim-task-profiler.h"
 
 #include "ns3/channel.h"
 #include "ns3/config.h"
@@ -26,6 +28,7 @@
 #include "ns3/node.h"
 #include "ns3/simulator.h"
 
+#include <cmath>
 #include <iomanip>
 #include <limits>
 #include <ios>
@@ -140,19 +143,86 @@ LinkStateToString(LeoSimLinkState state)
         return "UNKNOWN";
     }
 }
+
+std::string
+BeamStateToString(LeoSimBeamState state)
+{
+    switch (state)
+    {
+    case LEOSIM_BEAM_CONNECTED:
+        return "CONNECTED";
+    case LEOSIM_BEAM_MEASURING:
+        return "MEASURING";
+    case LEOSIM_BEAM_PREPARING:
+        return "PREPARING";
+    case LEOSIM_BEAM_EVALUATING:
+        return "EVALUATING";
+    case LEOSIM_BEAM_EXECUTING:
+        return "EXECUTING";
+    case LEOSIM_BEAM_SEARCHING:
+        return "SEARCHING";
+    default:
+        return "UNKNOWN";
+    }
+}
+
+int64_t
+CsvId(uint32_t id)
+{
+    return id == std::numeric_limits<uint32_t>::max() ? -1 : static_cast<int64_t>(id);
+}
+
+double
+SanitizePathLoss(double pathLoss)
+{
+    return (!std::isfinite(pathLoss) || pathLoss < 50.0 || pathLoss > 250.0) ? 0.0 : pathLoss;
+}
+
+std::string
+DegradationReason(const LeoSimChannelQuality& quality, Ptr<LeoSimChannelModel> channelModel)
+{
+    if (quality.linkState == LEOSIM_LINK_UP)
+    {
+        return "OPERATIONAL";
+    }
+    if (quality.linkState == LEOSIM_LINK_DEGRADED)
+    {
+        return "SNR_DEGRADED";
+    }
+    if (channelModel && quality.elevationAngle < channelModel->GetMinElevationAngle())
+    {
+        return "LOW_ELEVATION_ANGLE";
+    }
+    if (channelModel &&
+        quality.distance > (quality.linkType == LEOSIM_LINK_ISL
+                                ? channelModel->GetIslMaxDistance()
+                                : channelModel->GetMaxLinkDistance()))
+    {
+        return "DISTANCE_EXCEEDED";
+    }
+    if (quality.snr <= 0.0)
+    {
+        return "SNR_FLOOR_EXCEEDED";
+    }
+    return "UNKNOWN";
+}
 } // namespace
 
 NS_LOG_COMPONENT_DEFINE("LeoSimVisualizationHelper");
 
 LeoSimVisualizationHelper::LeoSimVisualizationHelper()
     : m_outputFile("leosim_positions.csv"),
-      m_linkFile("leosim_links.csv"),
+      m_linkFile(""),
       m_packetFile("leosim_packets.csv"),
-      m_beamFile("leosim_beams_multibeam.csv"),
+      m_beamFile(""),
       m_handoverFile("leosim_handovers.csv"),
       m_choFile("leosim_cho.csv"),
-    m_operatorFile("leosim_operators.csv"),
-    m_sharingFile("leosim_sharing.csv"),
+      m_operatorFile("leosim_operators.csv"),
+      m_sharingFile("leosim_sharing.csv"),
+      m_coverageFile("leosim_coverage.csv"),
+      m_linkQualityFile(""),
+      m_unifiedLinkStateFile("leosim_link_state.csv"),
+      m_beamAssociationFile("leosim_beam_associations.csv"),
       m_loaderHelper(nullptr),
       m_channelModel(nullptr),
       m_islChannelModel(nullptr),
@@ -191,6 +261,22 @@ LeoSimVisualizationHelper::~LeoSimVisualizationHelper()
     if (m_choFileStream.is_open())
     {
         m_choFileStream.close();
+    }
+    if (m_coverageFileStream.is_open())
+    {
+        m_coverageFileStream.close();
+    }
+    if (m_linkQualityFileStream.is_open())
+    {
+        m_linkQualityFileStream.close();
+    }
+    if (m_unifiedLinkStateFileStream.is_open())
+    {
+        m_unifiedLinkStateFileStream.close();
+    }
+    if (m_beamAssociationFileStream.is_open())
+    {
+        m_beamAssociationFileStream.close();
     }
 }
 
@@ -246,7 +332,18 @@ void
 LeoSimVisualizationHelper::SetBeamManager(Ptr<LeoSimBeamManager> beamManager)
 {
     m_beamManager = beamManager;
+    // Automatically extract multi-beam model from beam manager if available
+    if (beamManager)
+    {
+        m_multiBeamModel = beamManager->GetMultiBeamModel();
+    }
     InstallBeamManagerCallbacks();
+}
+
+void
+LeoSimVisualizationHelper::SetMultiBeamModel(Ptr<LeoSimMultiBeamModel> multiBeamModel)
+{
+    m_multiBeamModel = multiBeamModel;
 }
 
 void
@@ -262,15 +359,37 @@ LeoSimVisualizationHelper::Initialize()
     // Write CSV header for positions
     m_posFile << "time,type,id,name,x,y,z" << std::endl;
 
-    m_linkFileStream.open(m_linkFile);
-    if (!m_linkFileStream.is_open())
+    if (!m_linkFile.empty())
     {
-        NS_LOG_ERROR("Could not open link file: " << m_linkFile);
+        m_linkFileStream.open(m_linkFile);
+        if (!m_linkFileStream.is_open())
+        {
+            NS_LOG_ERROR("Could not open link file: " << m_linkFile);
+        }
+        else
+        {
+            // Write CSV header for links
+            m_linkFileStream << "time,sat_id,ground_id,ground_type,beam_id" << std::endl;
+        }
     }
-    else
+
+    if (!m_unifiedLinkStateFile.empty())
     {
-        // Write CSV header for links
-        m_linkFileStream << "time,sat_id,ground_id,ground_type" << std::endl;
+        m_unifiedLinkStateFileStream.open(m_unifiedLinkStateFile, std::ios::out | std::ios::trunc);
+        if (!m_unifiedLinkStateFileStream.is_open())
+        {
+            NS_LOG_ERROR("Could not open unified link-state file: " << m_unifiedLinkStateFile);
+        }
+        else
+        {
+            m_unifiedLinkStateFileStream
+                << "time,node1_id,node2_id,link_type,sat_id,ground_id,ground_type,"
+                << "channel_state,snr_db,distance_m,elevation_deg,path_loss_db,"
+                << "signal_strength_dbm,degradation_reason,beam_id,cell_id,color_group,"
+                << "beam_state,beam_active,beam_covered,is_prepared_candidate,"
+                << "is_serving_access,access_state"
+                << std::endl;
+        }
     }
 
     if (m_enablePacketLogging)
@@ -293,6 +412,9 @@ LeoSimVisualizationHelper::Initialize()
         m_beamLoggingInitialized = true;
         InstallBeamManagerCallbacks();
     }
+
+    // Initialize coverage and link quality logging
+    InitCoverageAndLinkQualityLogging();
 }
 
 void
@@ -309,6 +431,14 @@ LeoSimVisualizationHelper::Finalize()
     if (m_packetFileStream.is_open())
     {
         m_packetFileStream.close();
+    }
+    if (m_unifiedLinkStateFileStream.is_open())
+    {
+        m_unifiedLinkStateFileStream.close();
+    }
+    if (m_beamAssociationFileStream.is_open())
+    {
+        m_beamAssociationFileStream.close();
     }
 
     FinalizeBeamLogging();
@@ -337,13 +467,36 @@ LeoSimVisualizationHelper::InstallBeamManagerCallbacks()
     m_beamManager->SetChoConfigCallback(MakeCallback(&LeoSimVisualizationHelper::OnChoConfig, this));
 
     m_beamCallbacksInstalled = true;
-    NS_LOG_INFO("Beam manager callbacks installed for visualization logging");
+    NS_LOG_DEBUG("Beam manager callbacks installed for visualization logging");
 }
 
 void
-LeoSimVisualizationHelper::OnBeamState(uint32_t ueId, LeoSimBeamRecord rec, double topsisScore)
+LeoSimVisualizationHelper::OnBeamState(uint32_t nodeId, LeoSimBeamRecord rec, double topsisScore)
 {
-    LogBeamState(ueId, rec, topsisScore);
+    // Determine node type (UE or SERVER)
+    std::string nodeType = "UNKNOWN";
+    for (uint32_t i = 0; i < m_ues.GetN(); ++i)
+    {
+        if (m_ues.Get(i)->GetId() == nodeId)
+        {
+            nodeType = "UE";
+            break;
+        }
+    }
+    
+    if (nodeType == "UNKNOWN")
+    {
+        for (uint32_t i = 0; i < m_servers.GetN(); ++i)
+        {
+            if (m_servers.Get(i)->GetId() == nodeId)
+            {
+                nodeType = "SERVER";
+                break;
+            }
+        }
+    }
+    
+    LogBeamState(nodeId, nodeType, rec, topsisScore);
 }
 
 void
@@ -390,6 +543,8 @@ LeoSimVisualizationHelper::LogNodePosition(Ptr<Node> node,
 void
 LeoSimVisualizationHelper::LogIslConnections()
 {
+    LeoSimTaskProfiler::ScopedEvent profile("run_simulation.log_isl_connections");
+
     if (!m_islChannelModel || !m_linkFileStream.is_open())
     {
         return;
@@ -402,13 +557,15 @@ LeoSimVisualizationHelper::LogIslConnections()
     {
         m_linkFileStream << std::fixed << std::setprecision(3);
         m_linkFileStream << time << "," << link.node1->GetId() << ","
-                        << link.node2->GetId() << ",ISL" << std::endl;
+                        << link.node2->GetId() << ",ISL,-1" << std::endl;
     }
 }
 
 void
 LeoSimVisualizationHelper::LogGroundConnections()
 {
+    LeoSimTaskProfiler::ScopedEvent profile("run_simulation.log_ground_connections");
+
     if (!m_channelModel || !m_linkFileStream.is_open())
     {
         return;
@@ -482,11 +639,291 @@ LeoSimVisualizationHelper::LogGroundConnections()
 
         if (!groundType.empty())
         {
+            int32_t beamId = -1;
+            if (m_beamManager)
+            {
+                LeoSimBeamRecord rec = m_beamManager->GetCurrentBeam(ground->GetId());
+                if (rec.satelliteNodeId == sat->GetId())
+                {
+                    beamId = static_cast<int32_t>(rec.beamId);
+                }
+            }
+
+            if (beamId < 0 && m_multiBeamModel)
+            {
+                const auto& satBeams = m_multiBeamModel->GetBeamsForSatellite(sat->GetId());
+                if (!satBeams.empty())
+                {
+                    Ptr<MobilityModel> groundMobility = ground->GetObject<MobilityModel>();
+                    if (groundMobility)
+                    {
+                        const Vector groundPos = groundMobility->GetPosition();
+                        const double r = std::sqrt(groundPos.x * groundPos.x + groundPos.y * groundPos.y +
+                                                   groundPos.z * groundPos.z);
+                        if (r > 0.0)
+                        {
+                            constexpr double kRadToDeg = 180.0 / 3.14159265358979323846;
+                            const double groundLatDeg = std::asin(groundPos.z / r) * kRadToDeg;
+                            const double groundLonDeg = std::atan2(groundPos.y, groundPos.x) * kRadToDeg;
+                            const int32_t inferredBeamId = LeoSimBeamLayoutEngine::FindBeamForPosition(
+                                satBeams,
+                                groundLatDeg,
+                                groundLonDeg);
+                            if (inferredBeamId >= 0)
+                            {
+                                beamId = inferredBeamId;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Keep SAT-ground link logs consistent with beam coverage geometry:
+            // if no beam footprint contains this ground node, skip logging this link.
+            if (beamId < 0)
+            {
+                NS_LOG_DEBUG("Skipping SAT-ground link without valid beam mapping: sat="
+                             << sat->GetId() << " ground=" << ground->GetId());
+                continue;
+            }
+
             m_linkFileStream << std::fixed << std::setprecision(3);
             m_linkFileStream << time << "," << sat->GetId() << ","
-                            << ground->GetId() << "," << groundType << std::endl;
+                            << ground->GetId() << "," << groundType << "," << beamId << std::endl;
         }
     }
+}
+
+void
+LeoSimVisualizationHelper::LogUnifiedLinkState()
+{
+    LeoSimTaskProfiler::ScopedEvent profile("run_simulation.log_unified_link_state");
+
+    if (!m_unifiedLinkStateFileStream.is_open())
+    {
+        return;
+    }
+
+    const double time = Simulator::Now().GetSeconds();
+
+    auto writeLink = [&](Ptr<LeoSimChannelModel> channelModel,
+                         const LeoSimChannelModel::LinkSnapshot& link) {
+        if (!channelModel || !link.node1 || !link.node2)
+        {
+            return;
+        }
+
+        Ptr<Node> node1 = link.node1;
+        Ptr<Node> node2 = link.node2;
+        LeoSimChannelQuality quality = channelModel->GetChannelQuality(node1, node2);
+
+        const bool node1IsSat = IsSatelliteNode(node1);
+        const bool node2IsSat = IsSatelliteNode(node2);
+        Ptr<Node> sat = nullptr;
+        Ptr<Node> ground = nullptr;
+        std::string linkType = (link.linkType == LEOSIM_LINK_ISL) ? "ISL" : "SAT_GROUND";
+        std::string groundType;
+
+        if (link.linkType == LEOSIM_LINK_SATELLITE_TO_GROUND)
+        {
+            if (node1IsSat && !node2IsSat)
+            {
+                sat = node1;
+                ground = node2;
+                linkType = "DOWNLINK";
+            }
+            else if (!node1IsSat && node2IsSat)
+            {
+                sat = node2;
+                ground = node1;
+                linkType = "UPLINK";
+            }
+
+            if (ground)
+            {
+                for (uint32_t i = 0; i < m_servers.GetN(); ++i)
+                {
+                    if (m_servers.Get(i) == ground)
+                    {
+                        groundType = "SERVER";
+                        break;
+                    }
+                }
+                if (groundType.empty())
+                {
+                    for (uint32_t i = 0; i < m_ues.GetN(); ++i)
+                    {
+                        if (m_ues.Get(i) == ground)
+                        {
+                            groundType = "UE";
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        int64_t satId = sat ? static_cast<int64_t>(sat->GetId()) : -1;
+        int64_t groundId = ground ? static_cast<int64_t>(ground->GetId()) : -1;
+        int64_t beamId = -1;
+        int64_t cellId = -1;
+        int32_t colorGroup = -1;
+        std::string beamState = "";
+        bool beamActive = false;
+        bool beamCovered = false;
+        bool isPreparedCandidate = false;
+        bool isServingAccess = false;
+        std::string accessState;
+
+        if (sat && ground)
+        {
+            LeoSimBeamRecord rec;
+            bool hasServingRecordForSat = false;
+            if (m_beamManager)
+            {
+                rec = m_beamManager->GetCurrentBeam(ground->GetId());
+                hasServingRecordForSat = (rec.satelliteNodeId == sat->GetId());
+                isServingAccess = m_beamManager->IsServingAccessLink(ground->GetId(), sat->GetId());
+                for (const auto& candidate : m_beamManager->GetPreparedCandidateBeams(ground->GetId()))
+                {
+                    if (candidate.satelliteNodeId == sat->GetId())
+                    {
+                        isPreparedCandidate = true;
+                        break;
+                    }
+                }
+                if (hasServingRecordForSat)
+                {
+                    beamId = CsvId(rec.beamId);
+                    cellId = CsvId(rec.cellId);
+                    colorGroup = rec.colorGroup;
+                    beamState = BeamStateToString(rec.state);
+                    beamActive = rec.beamActive;
+                    beamCovered = beamId >= 0;
+                }
+            }
+
+            if (beamId < 0 && m_multiBeamModel)
+            {
+                const auto& satBeams = m_multiBeamModel->GetBeamsForSatellite(sat->GetId());
+                Ptr<MobilityModel> groundMobility = ground->GetObject<MobilityModel>();
+                if (!satBeams.empty() && groundMobility)
+                {
+                    const Vector groundPos = groundMobility->GetPosition();
+                    const double r = std::sqrt(groundPos.x * groundPos.x +
+                                               groundPos.y * groundPos.y +
+                                               groundPos.z * groundPos.z);
+                    if (r > 0.0)
+                    {
+                        constexpr double kRadToDeg = 180.0 / 3.14159265358979323846;
+                        const double groundLatDeg = std::asin(groundPos.z / r) * kRadToDeg;
+                        const double groundLonDeg = std::atan2(groundPos.y, groundPos.x) * kRadToDeg;
+                        const int32_t inferredBeamId =
+                            LeoSimBeamLayoutEngine::FindBeamForPosition(satBeams,
+                                                                         groundLatDeg,
+                                                                         groundLonDeg);
+                        if (inferredBeamId >= 0)
+                        {
+                            beamId = inferredBeamId;
+                            for (const auto& beam : satBeams)
+                            {
+                                if (beam.beamId == static_cast<uint32_t>(inferredBeamId))
+                                {
+                                    cellId = CsvId(beam.cellId);
+                                    colorGroup = beam.colorGroup;
+                                    beamActive = beam.activeInCurrentSlot;
+                                    beamCovered = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (beamState.empty())
+            {
+                beamState = isServingAccess ? "CONNECTED" : "NOT_SERVING";
+            }
+
+            const bool channelUsable = quality.linkState == LEOSIM_LINK_UP ||
+                                       quality.linkState == LEOSIM_LINK_DEGRADED;
+            if (!channelUsable)
+            {
+                accessState = "CHANNEL_DOWN";
+            }
+            else if (!beamCovered)
+            {
+                accessState = "NO_BEAM_COVERAGE";
+            }
+            else if (!beamActive)
+            {
+                accessState = "BEAM_INACTIVE";
+            }
+            else if (isServingAccess)
+            {
+                accessState = "SERVING";
+            }
+            else if (isPreparedCandidate)
+            {
+                accessState = "PREPARED_CANDIDATE";
+            }
+            else
+            {
+                accessState = "BEAM_COVERED";
+            }
+        }
+        else if (link.linkType == LEOSIM_LINK_ISL)
+        {
+            accessState = LinkStateToString(quality.linkState);
+        }
+
+        m_unifiedLinkStateFileStream << std::fixed << std::setprecision(3)
+                                     << time << ","
+                                     << node1->GetId() << ","
+                                     << node2->GetId() << ","
+                                     << linkType << ","
+                                     << satId << ","
+                                     << groundId << ","
+                                     << groundType << ","
+                                     << LinkStateToString(quality.linkState) << ","
+                                     << quality.snr << ","
+                                     << quality.distance << ","
+                                     << quality.elevationAngle << ","
+                                     << SanitizePathLoss(quality.pathLoss) << ","
+                                     << quality.signalStrength << ","
+                                     << DegradationReason(quality, channelModel) << ","
+                                     << beamId << ","
+                                     << cellId << ","
+                                     << colorGroup << ","
+                                     << beamState << ","
+                                     << (beamActive ? "1" : "0") << ","
+                                     << (beamCovered ? "1" : "0") << ","
+                                     << (isPreparedCandidate ? "1" : "0") << ","
+                                     << (isServingAccess ? "1" : "0") << ","
+                                     << accessState
+                                     << std::endl;
+    };
+
+    if (m_channelModel)
+    {
+        auto groundLinks = m_channelModel->GetLinksByType(LEOSIM_LINK_SATELLITE_TO_GROUND, true);
+        for (const auto& link : groundLinks)
+        {
+            writeLink(m_channelModel, link);
+        }
+    }
+
+    if (m_islChannelModel)
+    {
+        auto islLinks = m_islChannelModel->GetLinksByType(LEOSIM_LINK_ISL, true);
+        for (const auto& link : islLinks)
+        {
+            writeLink(m_islChannelModel, link);
+        }
+    }
+
+    m_unifiedLinkStateFileStream.flush();
 }
 
 void
@@ -564,42 +1001,31 @@ LeoSimVisualizationHelper::SchedulePositionLogging(NodeContainer satellites,
                                 this);
         }
 
-        // Log serving beam state snapshot (if beam logging is enabled and a beam manager is set)
-        if (m_enableBeamLogging && m_beamManager)
+        if (m_unifiedLinkStateFileStream.is_open())
         {
             Simulator::Schedule(Seconds(t),
-                                &LeoSimVisualizationHelper::LogServingBeamSnapshot,
+                                &LeoSimVisualizationHelper::LogUnifiedLinkState,
+                                this);
+        }
+
+        // Log satellite ground coverage
+        if (m_channelModel && m_coverageFileStream.is_open())
+        {
+            Simulator::Schedule(Seconds(t),
+                                &LeoSimVisualizationHelper::LogSatelliteGroundCoverage,
+                                this);
+        }
+
+        // Log out-of-threshold links
+        if (m_channelModel && m_linkQualityFileStream.is_open())
+        {
+            Simulator::Schedule(Seconds(t),
+                                &LeoSimVisualizationHelper::LogOutOfThresholdLinks,
                                 this);
         }
     }
 }
 
-void
-LeoSimVisualizationHelper::LogServingBeamSnapshot()
-{
-    if (!m_enableBeamLogging || !m_beamManager)
-    {
-        return;
-    }
-
-    for (uint32_t i = 0; i < m_ues.GetN(); ++i)
-    {
-        Ptr<Node> ueNode = m_ues.Get(i);
-        if (!ueNode)
-        {
-            continue;
-        }
-
-        uint32_t ueId = ueNode->GetId();
-        LeoSimBeamRecord rec = m_beamManager->GetCurrentBeam(ueId);
-        if (rec.satelliteNodeId == std::numeric_limits<uint32_t>::max())
-        {
-            continue;
-        }
-
-        LogBeamState(ueId, rec, 0.0);
-    }
-}
 
 bool
 LeoSimVisualizationHelper::ParseContextIds(const std::string& context,
@@ -630,7 +1056,7 @@ LeoSimVisualizationHelper::ParseContextIds(const std::string& context,
     std::size_t devEnd = context.find("/", devPos);
     if (devEnd == std::string::npos)
     {
-        return false;
+        devEnd = context.size();
     }
 
     try
@@ -847,30 +1273,34 @@ LeoSimVisualizationHelper::InstallPacketLogging(NodeContainer satellites,
     m_servers = servers;
     m_ues = ues;
 
+    uint64_t connectedTraceCount = 0;
+    auto connectDevice = [this, &connectedTraceCount](Ptr<Node> node, uint32_t deviceIndex) {
+        Ptr<NetDevice> device = node->GetDevice(deviceIndex);
+        if (!device || device->GetInstanceTypeId().GetName() != "ns3::PointToPointNetDevice")
+        {
+            return;
+        }
+
+        // Attach directly to the known device. Config::Connect performs a
+        // global namespace lookup for every path and becomes effectively
+        // quadratic when tens of thousands of ISL devices are present.
+        std::ostringstream context;
+        context << "/NodeList/" << node->GetId() << "/DeviceList/" << deviceIndex;
+        connectedTraceCount += device->TraceConnect(
+            "PhyTxBegin", context.str(), MakeCallback(&LeoSimVisualizationHelper::OnPhyTx, this));
+        connectedTraceCount += device->TraceConnect(
+            "PhyRxEnd", context.str(), MakeCallback(&LeoSimVisualizationHelper::OnPhyRxBasic, this));
+        connectedTraceCount += device->TraceConnect(
+            "PhyRxDrop", context.str(), MakeCallback(&LeoSimVisualizationHelper::OnPhyRxDrop, this));
+    };
+
     // Install packet tracing on all nodes by connecting to device traces
     for (uint32_t i = 0; i < satellites.GetN(); i++)
     {
         Ptr<Node> node = satellites.Get(i);
         for (uint32_t j = 0; j < node->GetNDevices(); j++)
         {
-            Ptr<NetDevice> device = node->GetDevice(j);
-            if (!device)
-                continue;
-            // Only install on PointToPointNetDevices
-            if (device->GetInstanceTypeId().GetName() != "ns3::PointToPointNetDevice")
-                continue;
-
-            std::ostringstream pathTx, pathRx, pathDrop;
-            pathTx << "/NodeList/" << node->GetId() << "/DeviceList/" << j << "/$ns3::PointToPointNetDevice/PhyTxBegin";
-            pathRx << "/NodeList/" << node->GetId() << "/DeviceList/" << j << "/$ns3::PointToPointNetDevice/PhyRxEnd";
-            pathDrop << "/NodeList/" << node->GetId() << "/DeviceList/" << j << "/$ns3::PointToPointNetDevice/PhyRxDrop";
-            
-            Config::Connect(pathTx.str(),
-                          MakeCallback(&LeoSimVisualizationHelper::OnPhyTx, this));
-            Config::Connect(pathRx.str(),
-                          MakeCallback(&LeoSimVisualizationHelper::OnPhyRxBasic, this));
-            Config::Connect(pathDrop.str(),
-                          MakeCallback(&LeoSimVisualizationHelper::OnPhyRxDrop, this));
+            connectDevice(node, j);
         }
     }
 
@@ -880,24 +1310,7 @@ LeoSimVisualizationHelper::InstallPacketLogging(NodeContainer satellites,
         Ptr<Node> node = servers.Get(i);
         for (uint32_t j = 0; j < node->GetNDevices(); j++)
         {
-            Ptr<NetDevice> device = node->GetDevice(j);
-            if (!device)
-                continue;
-            // Only install on PointToPointNetDevices
-            if (device->GetInstanceTypeId().GetName() != "ns3::PointToPointNetDevice")
-                continue;
-
-            std::ostringstream pathTx, pathRx, pathDrop;
-            pathTx << "/NodeList/" << node->GetId() << "/DeviceList/" << j << "/$ns3::PointToPointNetDevice/PhyTxBegin";
-            pathRx << "/NodeList/" << node->GetId() << "/DeviceList/" << j << "/$ns3::PointToPointNetDevice/PhyRxEnd";
-            pathDrop << "/NodeList/" << node->GetId() << "/DeviceList/" << j << "/$ns3::PointToPointNetDevice/PhyRxDrop";
-            
-            Config::Connect(pathTx.str(),
-                          MakeCallback(&LeoSimVisualizationHelper::OnPhyTx, this));
-            Config::Connect(pathRx.str(),
-                          MakeCallback(&LeoSimVisualizationHelper::OnPhyRxBasic, this));
-            Config::Connect(pathDrop.str(),
-                          MakeCallback(&LeoSimVisualizationHelper::OnPhyRxDrop, this));
+            connectDevice(node, j);
         }
     }
 
@@ -907,29 +1320,17 @@ LeoSimVisualizationHelper::InstallPacketLogging(NodeContainer satellites,
         Ptr<Node> node = ues.Get(i);
         for (uint32_t j = 0; j < node->GetNDevices(); j++)
         {
-            Ptr<NetDevice> device = node->GetDevice(j);
-            if (!device)
-                continue;
-            // Only install on PointToPointNetDevices
-            if (device->GetInstanceTypeId().GetName() != "ns3::PointToPointNetDevice")
-                continue;
-
-            std::ostringstream pathTx, pathRx, pathDrop;
-            pathTx << "/NodeList/" << node->GetId() << "/DeviceList/" << j << "/$ns3::PointToPointNetDevice/PhyTxBegin";
-            pathRx << "/NodeList/" << node->GetId() << "/DeviceList/" << j << "/$ns3::PointToPointNetDevice/PhyRxEnd";
-            pathDrop << "/NodeList/" << node->GetId() << "/DeviceList/" << j << "/$ns3::PointToPointNetDevice/PhyRxDrop";
-            
-            Config::Connect(pathTx.str(),
-                          MakeCallback(&LeoSimVisualizationHelper::OnPhyTx, this));
-            Config::Connect(pathRx.str(),
-                          MakeCallback(&LeoSimVisualizationHelper::OnPhyRxBasic, this));
-            Config::Connect(pathDrop.str(),
-                          MakeCallback(&LeoSimVisualizationHelper::OnPhyRxDrop, this));
+            connectDevice(node, j);
         }
     }
 
-    NS_LOG_INFO("Packet logging installed for " << (satellites.GetN() + servers.GetN() + ues.GetN())
-                                                  << " nodes");
+    NS_LOG_DEBUG("Packet logging installed for " << (satellites.GetN() + servers.GetN() + ues.GetN())
+                                                  << " nodes using " << connectedTraceCount
+                                                  << " trace connections");
+    if (connectedTraceCount == 0)
+    {
+        NS_LOG_ERROR("Packet logging enabled but no compatible device traces were connected");
+    }
     m_packetLoggingInstalled = true;
 }
 
@@ -1003,6 +1404,8 @@ LeoSimVisualizationHelper::LogSharingState(Ptr<LeoSimOperatorModel> model,
                                            Ptr<LeoSimChannelModel> islChannelModel,
                                            double simTime)
 {
+    LeoSimTaskProfiler::ScopedEvent profile("run_simulation.log_operator_sharing_state");
+
     if (!model)
     {
         NS_LOG_WARN("Operator model not set; skipping sharing-state logging");
@@ -1062,19 +1465,22 @@ LeoSimVisualizationHelper::InitBeamLogging()
 {
     NS_LOG_FUNCTION(this);
 
-    // Open beam state file and write header
-    m_beamFileStream.open(m_beamFile, std::ios::out | std::ios::trunc);
-    if (m_beamFileStream.is_open())
+    if (!m_beamFile.empty())
     {
-        m_beamFileStream << "time,ue_id,sat_id,beam_id,cell_id,color_group,rsrp_dbm,sinr_db,"
-                         << "intra_ici_dbm,inter_ici_dbm,elevation_deg,tte_sec,beam_load,"
-                         << "beam_util,beam_active,topsis_score,state\n";
-        m_beamFileStream.flush();
-        NS_LOG_INFO("Opened beam state file: " << m_beamFile);
-    }
-    else
-    {
-        NS_LOG_WARN("Could not open beam state file: " << m_beamFile);
+        // Open legacy beam state file and write header, when explicitly configured.
+        m_beamFileStream.open(m_beamFile, std::ios::out | std::ios::trunc);
+        if (m_beamFileStream.is_open())
+        {
+            m_beamFileStream << "time,ground_id,ground_type,sat_id,beam_id,cell_id,color_group,rsrp_dbm,sinr_db,"
+                             << "intra_ici_dbm,inter_ici_dbm,elevation_deg,tte_sec,beam_load,"
+                             << "beam_util,beam_active,topsis_score,state\n";
+            m_beamFileStream.flush();
+            NS_LOG_DEBUG("Opened beam state file: " << m_beamFile);
+        }
+        else
+        {
+            NS_LOG_WARN("Could not open beam state file: " << m_beamFile);
+        }
     }
 
     // Open handover event file and write header
@@ -1085,7 +1491,7 @@ LeoSimVisualizationHelper::InitBeamLogging()
                              << "mode,type,trigger,latency_ms,buff_pkts,drop_pkts,success,"
                              << "route_change,sinr_before,sinr_after\n";
         m_handoverFileStream.flush();
-        NS_LOG_INFO("Opened handover event file: " << m_handoverFile);
+        NS_LOG_DEBUG("Opened handover event file: " << m_handoverFile);
     }
     else
     {
@@ -1098,79 +1504,103 @@ LeoSimVisualizationHelper::InitBeamLogging()
     {
         m_choFileStream << "time,ue_id,serving_sat,candidate_sat,topsis_rank,topsis_score,tte_sec,config_expiry\n";
         m_choFileStream.flush();
-        NS_LOG_INFO("Opened CHO config file: " << m_choFile);
+        NS_LOG_DEBUG("Opened CHO config file: " << m_choFile);
     }
     else
     {
         NS_LOG_WARN("Could not open CHO config file: " << m_choFile);
     }
+
+    if (!m_beamAssociationFile.empty())
+    {
+        m_beamAssociationFileStream.open(m_beamAssociationFile, std::ios::out | std::ios::trunc);
+        if (m_beamAssociationFileStream.is_open())
+        {
+            m_beamAssociationFileStream
+                << "time,ground_id,ground_type,sat_id,beam_id,cell_id,color_group,state,"
+                << "beam_active,is_serving,rsrp_dbm,sinr_db,elevation_deg,tte_sec,beam_load,"
+                << "beam_util,topsis_score"
+                << std::endl;
+            m_beamAssociationFileStream.flush();
+            NS_LOG_DEBUG("Opened beam association file: " << m_beamAssociationFile);
+        }
+        else
+        {
+            NS_LOG_WARN("Could not open beam association file: " << m_beamAssociationFile);
+        }
+    }
 }
 
 void
-LeoSimVisualizationHelper::LogBeamState(uint32_t ueId, const LeoSimBeamRecord& rec, double topsisScore)
+LeoSimVisualizationHelper::LogBeamState(uint32_t groundId,
+                                        const std::string& groundType,
+                                        const LeoSimBeamRecord& rec,
+                                        double topsisScore)
 {
-    NS_LOG_FUNCTION(this << ueId << topsisScore);
-
-    if (!m_beamFileStream.is_open())
-    {
-        return;
-    }
+    NS_LOG_FUNCTION(this << groundId << groundType << topsisScore);
 
     Time now = Simulator::Now();
-    std::string state;
-    switch (rec.state)
-    {
-        case LEOSIM_BEAM_CONNECTED:
-            state = "CONNECTED";
-            break;
-        case LEOSIM_BEAM_MEASURING:
-            state = "MEASURING";
-            break;
-        case LEOSIM_BEAM_PREPARING:
-            state = "PREPARING";
-            break;
-        case LEOSIM_BEAM_EVALUATING:
-            state = "EVALUATING";
-            break;
-        case LEOSIM_BEAM_EXECUTING:
-            state = "EXECUTING";
-            break;
-        case LEOSIM_BEAM_SEARCHING:
-            state = "SEARCHING";
-            break;
-        default:
-            state = "UNKNOWN";
-    }
+    std::string state = BeamStateToString(rec.state);
 
     // Compute beam utilization
     double beamUtil = (m_maxUesPerBeam > 0) ? (rec.beamLoad / (double)m_maxUesPerBeam) : 0.0;
+    const bool isServing = rec.state != LEOSIM_BEAM_SEARCHING &&
+                           rec.satelliteNodeId != std::numeric_limits<uint32_t>::max() &&
+                           rec.beamId != std::numeric_limits<uint32_t>::max();
 
-    m_beamFileStream << std::fixed << std::setprecision(3)
-                     << now.GetSeconds() << ","
-                     << ueId << ","
-                     << rec.satelliteNodeId << ","
-                     << rec.beamId << ","
-                     << rec.cellId << ","
-                     << rec.colorGroup << ","
-                     << rec.rsrp << ","
-                     << rec.sinr << ","
-                     << rec.intraBeamInterference_dBm << ","
-                     << rec.interSatInterference_dBm << ","
-                     << rec.elevationAngle << ","
-                     << rec.remainingServiceTime << ","
-                     << rec.beamLoad << ","
-                     << beamUtil << ","
-                     << (rec.beamActive ? "1" : "0") << ","
-                     << topsisScore << ","
-                     << state << "\n";
-    m_beamFileStream.flush();
+    if (m_beamFileStream.is_open())
+    {
+        m_beamFileStream << std::fixed << std::setprecision(3)
+                         << now.GetSeconds() << ","
+                         << groundId << ","
+                         << groundType << ","
+                         << CsvId(rec.satelliteNodeId) << ","
+                         << CsvId(rec.beamId) << ","
+                         << CsvId(rec.cellId) << ","
+                         << rec.colorGroup << ","
+                         << rec.rsrp << ","
+                         << rec.sinr << ","
+                         << rec.intraBeamInterference_dBm << ","
+                         << rec.interSatInterference_dBm << ","
+                         << rec.elevationAngle << ","
+                         << rec.remainingServiceTime << ","
+                         << rec.beamLoad << ","
+                         << beamUtil << ","
+                         << (rec.beamActive ? "1" : "0") << ","
+                         << topsisScore << ","
+                         << state << "\n";
+        m_beamFileStream.flush();
+    }
+
+    if (m_beamAssociationFileStream.is_open())
+    {
+        m_beamAssociationFileStream << std::fixed << std::setprecision(3)
+                                    << now.GetSeconds() << ","
+                                    << groundId << ","
+                                    << groundType << ","
+                                    << CsvId(rec.satelliteNodeId) << ","
+                                    << CsvId(rec.beamId) << ","
+                                    << CsvId(rec.cellId) << ","
+                                    << rec.colorGroup << ","
+                                    << state << ","
+                                    << (rec.beamActive ? "1" : "0") << ","
+                                    << (isServing ? "1" : "0") << ","
+                                    << rec.rsrp << ","
+                                    << rec.sinr << ","
+                                    << rec.elevationAngle << ","
+                                    << rec.remainingServiceTime << ","
+                                    << rec.beamLoad << ","
+                                    << beamUtil << ","
+                                    << topsisScore << "\n";
+        m_beamAssociationFileStream.flush();
+    }
 }
 
 void
 LeoSimVisualizationHelper::LogHandoverEvent(const LeoSimHandoverEvent& evt)
 {
     NS_LOG_FUNCTION(this << evt.ueNodeId);
-
+    
     if (!m_handoverFileStream.is_open())
     {
         return;
@@ -1236,7 +1666,12 @@ LeoSimVisualizationHelper::LogHandoverEvent(const LeoSimHandoverEvent& evt)
     std::string routeChange = (evt.type == LEOSIM_HO_INTER_SATELLITE || evt.type == LEOSIM_HO_INTER_ORBIT)
                                   ? "true"
                                   : "false";
-
+    std::cout << "Logging handover event: time=" << timeMs << "ms, ue=" << evt.ueNodeId
+              << ", srcSat=" << evt.sourceSatId << ", tgtSat=" << evt.targetSatId
+              << ", srcBeam=" << evt.sourceBeamId << ", tgtBeam=" << evt.targetBeamId
+              << ", mode=" << mode << ", type=" << type << ", trigger=" << trigger
+              << ", latency=" << evt.handoverLatencyMs << "ms, success=" << evt.success
+              << std::endl;
     m_handoverFileStream << std::fixed << std::setprecision(1)
                          << timeMs << ","
                          << evt.ueNodeId << ","
@@ -1298,17 +1733,22 @@ LeoSimVisualizationHelper::FinalizeBeamLogging()
     if (m_beamFileStream.is_open())
     {
         m_beamFileStream.close();
-        NS_LOG_INFO("Closed beam state file");
+        NS_LOG_DEBUG("Closed beam state file");
     }
     if (m_handoverFileStream.is_open())
     {
         m_handoverFileStream.close();
-        NS_LOG_INFO("Closed handover event file");
+        NS_LOG_DEBUG("Closed handover event file");
     }
     if (m_choFileStream.is_open())
     {
         m_choFileStream.close();
-        NS_LOG_INFO("Closed CHO config file");
+        NS_LOG_DEBUG("Closed CHO config file");
+    }
+    if (m_beamAssociationFileStream.is_open())
+    {
+        m_beamAssociationFileStream.close();
+        NS_LOG_DEBUG("Closed beam association file");
     }
 }
 
@@ -1448,5 +1888,232 @@ LeoSimVisualizationHelper::LogAttenuationState(Ptr<LeoSimChannelModel> channelMo
     }
 }
 
-} // namespace ns3
+void
+LeoSimVisualizationHelper::SetCoverageFile(const std::string& filename)
+{
+    m_coverageFile = filename;
+}
 
+void
+LeoSimVisualizationHelper::SetLinkQualityFile(const std::string& filename)
+{
+    m_linkQualityFile = filename;
+}
+
+void
+LeoSimVisualizationHelper::SetUnifiedLinkStateFile(const std::string& filename)
+{
+    m_unifiedLinkStateFile = filename;
+}
+
+void
+LeoSimVisualizationHelper::SetBeamAssociationFile(const std::string& filename)
+{
+    m_beamAssociationFile = filename;
+}
+
+void
+LeoSimVisualizationHelper::InitCoverageAndLinkQualityLogging()
+{
+    // Initialize coverage file
+    if (!m_coverageFile.empty())
+    {
+        m_coverageFileStream.open(m_coverageFile, std::ios::out | std::ios::trunc);
+        if (m_coverageFileStream.is_open())
+        {
+            // CSV header: Coverage footprint data for satellite beams
+            // time: simulation time (seconds)
+            // satellite_id: satellite node ID
+            // beam_id: unique beam identifier
+            // cell_id: logical cell ID for the beam
+            // color_group: frequency reuse color index
+            // center_lat: beam center latitude (degrees)
+            // center_lon: beam center longitude (degrees)
+            // radius_km: beam footprint radius (kilometers)
+            // active_in_slot: whether beam is active in current hopping slot
+            m_coverageFileStream << "time,satellite_id,beam_id,cell_id,color_group,center_lat,center_lon,radius_km,active_in_slot"
+                                 << std::endl;
+            NS_LOG_DEBUG("Opened ground coverage file (beam footprints): " << m_coverageFile);
+        }
+        else
+        {
+            NS_LOG_ERROR("Could not open coverage file: " << m_coverageFile);
+        }
+    }
+
+    // Initialize link quality file
+    if (!m_linkQualityFile.empty())
+    {
+        m_linkQualityFileStream.open(m_linkQualityFile, std::ios::out | std::ios::trunc);
+        if (m_linkQualityFileStream.is_open())
+        {
+            // CSV header: time, node1_id, node2_id, link_type, snr_db, distance_m, elevation_deg, 
+            //             path_loss_db, signal_strength_dbm, link_state, out_of_threshold_reason
+            m_linkQualityFileStream << "time,node1_id,node2_id,link_type,snr_db,distance_m,elevation_deg,"
+                                    << "path_loss_db,signal_strength_dbm,link_state,degradation_reason"
+                                    << std::endl;
+            NS_LOG_DEBUG("Opened link quality file: " << m_linkQualityFile);
+        }
+        else
+        {
+            NS_LOG_ERROR("Could not open link quality file: " << m_linkQualityFile);
+        }
+    }
+}
+
+void
+LeoSimVisualizationHelper::LogSatelliteGroundCoverage()
+{
+    LeoSimTaskProfiler::ScopedEvent profile("run_simulation.log_satellite_ground_coverage");
+
+    if (!m_coverageFileStream.is_open())
+    {
+        return;
+    }
+
+    // Log only real beam footprints from the multi-beam model.
+    if (m_multiBeamModel && !m_multiBeamModel->GetAllBeams().empty())
+    {
+        double time = Simulator::Now().GetSeconds();
+        const auto& allBeams = m_multiBeamModel->GetAllBeams();
+
+        // Log each beam's footprint
+        for (const auto& satBeamPair : allBeams)
+        {
+            uint32_t satId = satBeamPair.first;
+            const auto& beams = satBeamPair.second;
+
+            for (const auto& beam : beams)
+            {
+                m_coverageFileStream << std::fixed << std::setprecision(6);
+                m_coverageFileStream << time << ","
+                                    << satId << ","
+                                    << beam.beamId << ","
+                                    << beam.cellId << ","
+                                    << beam.colorGroup << ","
+                                    << beam.centerLat << ","
+                                    << beam.centerLon << ","
+                                    << std::setprecision(3)
+                                    << beam.radiusKm << ","
+                                    << (beam.activeInCurrentSlot ? "1" : "0") << std::endl;
+            }
+        }
+    }
+    else
+    {
+        NS_LOG_DEBUG("Coverage logging skipped: multi-beam model is not set or has no beams.");
+    }
+}
+
+void
+LeoSimVisualizationHelper::LogOutOfThresholdLinks()
+{
+    LeoSimTaskProfiler::ScopedEvent profile("run_simulation.log_out_of_threshold_links");
+
+    if (!m_channelModel || !m_linkQualityFileStream.is_open())
+    {
+        return;
+    }
+
+    double time = Simulator::Now().GetSeconds();
+
+    // Log all ground links that are out of threshold (DOWN or DEGRADED)
+    auto groundLinks = m_channelModel->GetLinksByType(LEOSIM_LINK_SATELLITE_TO_GROUND, true);
+
+    for (const auto& link : groundLinks)
+    {
+        Ptr<Node> node1 = link.node1;
+        Ptr<Node> node2 = link.node2;
+
+        // Get detailed channel quality
+        LeoSimChannelQuality quality = m_channelModel->GetChannelQuality(node1, node2);
+
+        // Determine link type
+        std::string linkType = "UNKNOWN";
+        bool node1IsSat = false;
+        for (uint32_t i = 0; i < m_satellites.GetN(); ++i)
+        {
+            if (m_satellites.Get(i) == node1)
+            {
+                node1IsSat = true;
+                break;
+            }
+        }
+        bool node2IsSat = false;
+        for (uint32_t i = 0; i < m_satellites.GetN(); ++i)
+        {
+            if (m_satellites.Get(i) == node2)
+            {
+                node2IsSat = true;
+                break;
+            }
+        }
+
+        if (node1IsSat && !node2IsSat)
+        {
+            linkType = "DOWNLINK";
+        }
+        else if (!node1IsSat && node2IsSat)
+        {
+            linkType = "UPLINK";
+        }
+        else if (node1IsSat && node2IsSat)
+        {
+            linkType = "ISL";
+        }
+
+        // Determine reason for degradation or status
+        std::string degradationReason;
+        if (quality.linkState == LEOSIM_LINK_UP)
+        {
+            degradationReason = "OPERATIONAL";
+        }
+        else if (quality.linkState == LEOSIM_LINK_DOWN)
+        {
+            if (quality.snr <= 0.0)
+            {
+                degradationReason = "SNR_FLOOR_EXCEEDED";
+            }
+            else if (quality.elevationAngle < m_channelModel->GetMinElevationAngle())
+            {
+                degradationReason = "LOW_ELEVATION_ANGLE";
+            }
+            else if (quality.distance > m_channelModel->GetMaxLinkDistance())
+            {
+                degradationReason = "DISTANCE_EXCEEDED";
+            }
+            else
+            {
+                degradationReason = "UNKNOWN";
+            }
+        }
+        else if (quality.linkState == LEOSIM_LINK_DEGRADED)
+        {
+            degradationReason = "SNR_DEGRADED";
+        }
+
+        m_linkQualityFileStream << std::fixed << std::setprecision(3);
+        
+        // Sanitize pathLoss: clamp to reasonable range [50, 250] dB
+        // This prevents garbage values from uninitialized variables in early returns
+        double pathLossToLog = quality.pathLoss;
+        if (!std::isfinite(pathLossToLog) || pathLossToLog < 50.0 || pathLossToLog > 250.0)
+        {
+            pathLossToLog = 0.0;  // Log as 0.0 if out of reasonable range
+        }
+        
+        m_linkQualityFileStream << time << ","
+                               << node1->GetId() << ","
+                               << node2->GetId() << ","
+                               << linkType << ","
+                               << quality.snr << ","
+                               << quality.distance << ","
+                               << quality.elevationAngle << ","
+                               << pathLossToLog << ","
+                               << quality.signalStrength << ","
+                               << LinkStateToString(quality.linkState) << ","
+                               << degradationReason << std::endl;
+    }
+}
+
+} // namespace ns3

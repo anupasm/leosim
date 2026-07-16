@@ -39,7 +39,6 @@
 #include "leosim-beam-load-balancer.h"
 #include "leosim-channel.h"
 #include "leosim-channel-model.h"
-#include "leosim-isl-routing-model.h"
 #include "leosim-loader.h"
 #include "leosim-mobility-model.h"
 #include "leosim-multi-beam-model.h"
@@ -49,6 +48,8 @@
 #include "leosim-weather-model.h"
 
 #include "../helper/leosim-operator-helper.h"
+#include "../helper/leosim-external-routing-helper.h"
 #include "../helper/leosim-weather-helper.h"
+#include "../helper/leosim-statistics-helper.h"
 
 #endif /* LEOSIM_H */

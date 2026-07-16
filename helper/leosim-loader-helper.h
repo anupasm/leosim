@@ -22,6 +22,7 @@
 #include "ns3/node-container.h"
 
 #include <string>
+#include <vector>
 
 namespace ns3
 {
@@ -66,6 +67,26 @@ class LeoSimLoaderHelper
      * \return True if successful
      */
     bool LoadGroundDevicesFromCsv(const std::string& filename);
+
+    /**
+     * \brief Load ground stations and UEs from contrib/leosim/data layout.
+     *
+     * Operator IDs are inferred from .txt file names under gss and ues.
+     *
+     * \param dataDir LeoSim data directory
+     * \return True if at least one ground device was loaded
+     */
+    bool LoadGroundDevicesFromDataDirectory(const std::string& dataDir);
+
+    /**
+     * \brief Load ground stations and UEs from contrib/leosim/data layout.
+     *
+     * \param dataDir LeoSim data directory
+     * \param operators Operator identifiers to load; empty means discover from file names
+     * \return True if at least one ground device was loaded
+     */
+    bool LoadGroundDevicesFromDataDirectory(const std::string& dataDir,
+                                            const std::vector<LeoSimOperatorId>& operators);
 
     /**
      * \brief Create satellite nodes with mobility

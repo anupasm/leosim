@@ -70,7 +70,7 @@ LeoSimMobilityHelper::ConvertToWaypoints(uint32_t satId)
         waypoints.push_back(wp);
     }
 
-    NS_LOG_INFO("Converted " << waypoints.size() << " waypoints for satellite " << satId);
+    NS_LOG_DEBUG("Converted " << waypoints.size() << " waypoints for satellite " << satId);
     return waypoints;
 }
 
@@ -101,7 +101,7 @@ LeoSimMobilityHelper::InstallSatellites(NodeContainer& nodes)
         }
     }
 
-    NS_LOG_INFO("Installed satellite mobility on " << numSatellites << " nodes");
+    NS_LOG_DEBUG("Installed satellite mobility on " << numSatellites << " nodes");
     return numSatellites;
 }
 
@@ -133,7 +133,7 @@ LeoSimMobilityHelper::InstallGateways(NodeContainer& nodes)
         }
     }
 
-    NS_LOG_INFO("Installed gateway mobility on " << numDevices << " nodes");
+    NS_LOG_DEBUG("Installed gateway mobility on " << numDevices << " nodes");
     return numDevices;
 }
 
@@ -165,7 +165,7 @@ LeoSimMobilityHelper::InstallUEs(NodeContainer& nodes)
         }
     }
 
-    NS_LOG_INFO("Installed UE mobility on " << numDevices << " nodes");
+    NS_LOG_DEBUG("Installed UE mobility on " << numDevices << " nodes");
     return numDevices;
 }
 
@@ -275,7 +275,7 @@ LeoSimMobilityHelper::StartAll()
         mobility->Start();
     }
 
-    NS_LOG_INFO("Started mobility for " << m_mobilityModels.size() << " nodes");
+    NS_LOG_DEBUG("Started mobility for " << m_mobilityModels.size() << " nodes");
 }
 
 void
@@ -288,7 +288,7 @@ LeoSimMobilityHelper::StopAll()
         mobility->Stop();
     }
 
-    NS_LOG_INFO("Stopped mobility for " << m_mobilityModels.size() << " nodes");
+    NS_LOG_DEBUG("Stopped mobility for " << m_mobilityModels.size() << " nodes");
 }
 
 void
