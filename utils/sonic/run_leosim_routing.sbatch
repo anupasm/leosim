@@ -10,6 +10,11 @@
 
 set -euo pipefail
 
+if command -v module >/dev/null 2>&1; then
+  module purge
+  module load "${APPTAINER_MODULE:-apptainer/1.3.4-gcc-11.5.0-ojp6nts}"
+fi
+
 # Matrix: 5 metrics x 1 constellation size x 1 duration x 3 update intervals.
 METRICS=(hop distance path-loss snr signal-strength)
 SATELLITE_COUNTS=(11514)
@@ -17,8 +22,14 @@ SIM_TIMES=(1800)
 UPDATE_INTERVALS=(5 10 30)
 
 REPO_ROOT="${REPO_ROOT:-${SLURM_SUBMIT_DIR}}"
-NS3_ROOT="${REPO_ROOT}/ns3"
+SIF="${SIF:-${REPO_ROOT}/leosim.sif}"
 RESULTS_ROOT="${RESULTS_ROOT:-${REPO_ROOT}/results/leosim-routing/${SLURM_ARRAY_JOB_ID}}"
+if [[ "$RESULTS_ROOT" != /* ]]; then
+  RESULTS_ROOT="${REPO_ROOT}/${RESULTS_ROOT}"
+fi
+CONTAINER_ROOT="/opt/leosim"
+CONTAINER_NS3_ROOT="${CONTAINER_ROOT}/ns3"
+CONTAINER_RESULTS_ROOT="/results"
 task_id="${SLURM_ARRAY_TASK_ID}"
 matrix_size=$((${#METRICS[@]} * ${#SATELLITE_COUNTS[@]} * ${#SIM_TIMES[@]} * ${#UPDATE_INTERVALS[@]}))
 
@@ -47,48 +58,45 @@ statistics_interval="${STATISTICS_INTERVAL:-1}"
 max_isl_neighbors="${MAX_ISL_NEIGHBORS:-4}"
 tle_timestep="${TLE_TIMESTEP:-5}"
 tle_workers="${TLE_WORKERS:-${SLURM_CPUS_PER_TASK:-1}}"
-tle_python="${TLE_PYTHON:-${REPO_ROOT}/.venv-leosim-sonic/bin/python}"
 
-tle_dir="${NS3_ROOT}/contrib/leosim/data/tles"
-tle_converter="${NS3_ROOT}/contrib/leosim/utils/tle_to_positions.py"
 prepro_dir="${RESULTS_ROOT}/_preprocessed"
 satellite_positions="${prepro_dir}/alpha-beta-gamma_duration-${sim_time}s_step-${tle_timestep}s.csv"
+container_satellite_positions="${CONTAINER_RESULTS_ROOT}/_preprocessed/$(basename "$satellite_positions")"
 prepro_lock="${satellite_positions}.lock"
 
 run_id="metric-${metric}_sats-${satellites}_dynamic_duration-${sim_time}s-interval-${interval}s"
 run_dir="${RESULTS_ROOT}/${run_id}"
-prefix="${run_dir}/result"
+container_prefix="${CONTAINER_RESULTS_ROOT}/${run_id}/result"
 mkdir -p "${REPO_ROOT}/logs" "$run_dir"
 
-if [[ ! -x "${NS3_ROOT}/ns3" ]]; then
-  echo "Missing ${NS3_ROOT}/ns3; set REPO_ROOT to the LeoSim checkout." >&2
+if ! command -v apptainer >/dev/null 2>&1; then
+  echo "Apptainer is unavailable; load the site Apptainer module or set APPTAINER_MODULE." >&2
+  exit 2
+fi
+if [[ ! -f "$SIF" ]]; then
+  echo "Missing LeoSim container image: ${SIF}" >&2
+  echo "Build it with ns3/contrib/leosim/utils/sonic/build_leosim_container.sh." >&2
+  exit 2
+fi
+if ! apptainer exec --cleanenv "$SIF" /opt/venv/bin/python -c 'import numpy, skyfield' 2>/dev/null; then
+  echo "The container does not provide the required LeoSim Python environment: ${SIF}" >&2
   exit 2
 fi
 
-if [[ ! -f "${tle_dir}/alpha.csv" || ! -f "${tle_dir}/beta.csv" || ! -f "${tle_dir}/gamma.csv" ]]; then
-  echo "Expected alpha.csv, beta.csv, and gamma.csv under ${tle_dir}." >&2
-  exit 2
-fi
-if [[ ! -f "$tle_converter" ]]; then
-  echo "Missing TLE converter: ${tle_converter}" >&2
-  exit 2
-fi
-if [[ ! -x "$tle_python" ]] || ! "$tle_python" -c 'import numpy, skyfield' 2>/dev/null; then
-  echo "TLE Python environment is unavailable or lacks numpy/skyfield: ${tle_python}" >&2
-  echo "Run ns3/contrib/leosim/utils/sonic/build_leosim.sh before submitting." >&2
-  exit 2
-fi
-
-# All array elements share one generated position file. The lock prevents 75
+# All array elements share one generated position file. The lock prevents 15
 # simultaneous conversions; the first task generates it and the rest reuse it.
 mkdir -p "$prepro_dir"
 exec 9>"$prepro_lock"
 flock -w 21600 9
 if [[ ! -s "$satellite_positions" ]]; then
   temporary_positions="${satellite_positions}.tmp-${SLURM_ARRAY_JOB_ID}-${task_id}-$$"
-  "$tle_python" "$tle_converter" \
-    --input "$tle_dir" \
-    --output "$temporary_positions" \
+  container_temporary_positions="${CONTAINER_RESULTS_ROOT}/_preprocessed/$(basename "$temporary_positions")"
+  apptainer exec --cleanenv \
+    --bind "${RESULTS_ROOT}:${CONTAINER_RESULTS_ROOT}" \
+    "$SIF" \
+    /opt/venv/bin/python "${CONTAINER_NS3_ROOT}/contrib/leosim/utils/tle_to_positions.py" \
+    --input "${CONTAINER_NS3_ROOT}/contrib/leosim/data/tles" \
+    --output "$container_temporary_positions" \
     --duration "$sim_time" \
     --timestep "$tle_timestep" \
     --workers "$tle_workers"
@@ -96,9 +104,8 @@ if [[ ! -s "$satellite_positions" ]]; then
 fi
 flock -u 9
 
-cd "$NS3_ROOT"
 scenario="leosim-param-scenario"
-scenario+=" --satellites=${satellite_positions}"
+scenario+=" --satellites=${container_satellite_positions}"
 scenario+=" --useTrace=0"
 scenario+=" --numSatellites=${satellites}"
 scenario+=" --numServers=${num_servers}"
@@ -117,8 +124,12 @@ scenario+=" --statisticsInterval=${statistics_interval}"
 scenario+=" --enableRouteLogging=1"
 scenario+=" --enableVisualization=0"
 scenario+=" --writeFlowMonitor=1"
-scenario+=" --outputPrefix=${prefix}"
-command=(./ns3 run "$scenario" --no-build)
+scenario+=" --outputPrefix=${container_prefix}"
+command=(apptainer exec --cleanenv
+  --bind "${RESULTS_ROOT}:${CONTAINER_RESULTS_ROOT}"
+  --pwd "$CONTAINER_NS3_ROOT"
+  "$SIF"
+  ./ns3 run "$scenario" --no-build)
 
 {
   echo "job_id=${SLURM_ARRAY_JOB_ID}_${task_id}"
@@ -132,14 +143,15 @@ command=(./ns3 run "$scenario" --no-build)
   echo "num_servers=${num_servers}"
   echo "all_to_all_traffic=${all_to_all}"
   echo "tcp_rate_per_flow=${tcp_rate}"
-  echo "satellite_positions=${satellite_positions}"
+  echo "satellite_positions_host=${satellite_positions}"
+  echo "satellite_positions_container=${container_satellite_positions}"
   echo "tle_sources=alpha.csv,beta.csv,gamma.csv"
   echo "tle_catalog_satellites=11514"
   echo "tle_timestep_s=${tle_timestep}"
-  echo "tle_python=${tle_python}"
+  echo "container_image=${SIF}"
   echo "host=$(hostname)"
   echo "started=${SLURM_JOB_START_TIME:-unknown}"
-  echo "git_commit=$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+  echo "git_commit=$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo embedded-in-image)"
   printf 'command='; printf ' %q' "${command[@]}"; printf '\n'
 } | tee "${run_dir}/metadata.txt"
 

@@ -1,0 +1,39 @@
+Bootstrap: docker
+From: ubuntu:24.04
+
+%labels
+    Description "ns-3 with LeoSim routing scenario and TLE preprocessing"
+
+%files
+    . /opt/leosim
+
+%post
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y --no-install-recommends \
+        build-essential ca-certificates cmake git ninja-build pkg-config \
+        python3 python3-pip python3-venv \
+        libsqlite3-dev libxml2-dev
+    rm -rf /var/lib/apt/lists/*
+
+    python3 -m venv /opt/venv
+    /opt/venv/bin/pip install --no-cache-dir --upgrade pip
+    /opt/venv/bin/pip install --no-cache-dir numpy skyfield
+    mkdir -p /results
+
+    cd /opt/leosim/ns3
+    ./ns3 configure --enable-examples --disable-tests --build-profile=optimized
+    ./ns3 build leosim-param-scenario
+    ./ns3 run "leosim-param-scenario --PrintHelp" --no-build
+
+%environment
+    export PATH="/opt/venv/bin:$PATH"
+
+%runscript
+    cd /opt/leosim/ns3
+    exec ./ns3 "$@"
+
+%test
+    /opt/venv/bin/python -c 'import numpy, skyfield'
+    cd /opt/leosim/ns3
+    ./ns3 run "leosim-param-scenario --PrintHelp" --no-build
