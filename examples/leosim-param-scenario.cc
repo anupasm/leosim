@@ -19,6 +19,8 @@
 #include "ns3/leosim-operator-helper.h"
 #include "ns3/leosim-routing-calculator-helper.h"
 #include "ns3/leosim-routing-calculator.h"
+#include "ns3/leosim-statistics-helper.h"
+#include "ns3/leosim-visualization-helper.h"
 #include "ns3/mobility-module.h"
 #include "ns3/network-module.h"
 #include "ns3/point-to-point-module.h"
@@ -31,6 +33,25 @@ using namespace ns3;
 
 namespace
 {
+
+LeoSimRoutingCalculator::RoutingMetric
+ParseRoutingMetric(const std::string& value)
+{
+    if (value == "hop" || value == "hop-count")
+        return LeoSimRoutingCalculator::LEOSIM_METRIC_HOP_COUNT;
+    if (value == "distance")
+        return LeoSimRoutingCalculator::LEOSIM_METRIC_DISTANCE;
+    if (value == "path-loss")
+        return LeoSimRoutingCalculator::LEOSIM_METRIC_PATH_LOSS;
+    if (value == "snr")
+        return LeoSimRoutingCalculator::LEOSIM_METRIC_SNR;
+    if (value == "signal-strength")
+        return LeoSimRoutingCalculator::LEOSIM_METRIC_SIGNAL_STRENGTH;
+
+    NS_FATAL_ERROR("Unknown routingMetric '" << value
+                                              << "'; use hop, distance, path-loss, snr, or signal-strength");
+    return LeoSimRoutingCalculator::LEOSIM_METRIC_HOP_COUNT;
+}
 
 Ipv4Address
 GetFirstNonLoopbackAddress(Ptr<Node> node)
@@ -128,6 +149,44 @@ InstallSingleTcpFlow(NodeContainer ueNodes,
     return apps;
 }
 
+ApplicationContainer
+InstallAllTcpFlows(NodeContainer ueNodes,
+                   NodeContainer serverNodes,
+                   uint16_t basePort,
+                   double startTime,
+                   double stopTime,
+                   const std::string& tcpRate,
+                   uint32_t packetSize)
+{
+    ApplicationContainer apps;
+    uint32_t flowIndex = 0;
+    for (uint32_t ue = 0; ue < ueNodes.GetN(); ++ue)
+    {
+        for (uint32_t server = 0; server < serverNodes.GetN(); ++server)
+        {
+            const uint32_t port = static_cast<uint32_t>(basePort) + flowIndex;
+            if (port > 65535)
+            {
+                NS_FATAL_ERROR("Too many UE-to-server flows for base port " << basePort);
+            }
+            apps.Add(InstallSingleTcpFlow(ueNodes,
+                                          serverNodes,
+                                          ue,
+                                          server,
+                                          static_cast<uint16_t>(port),
+                                          startTime,
+                                          stopTime,
+                                          tcpRate,
+                                          packetSize));
+            ++flowIndex;
+        }
+    }
+
+    std::cout << "Installed full traffic matrix: " << ueNodes.GetN() << " UEs x "
+              << serverNodes.GetN() << " servers = " << flowIndex << " TCP flows" << std::endl;
+    return apps;
+}
+
 void
 PrintFlowMonitorSummary(Ptr<FlowMonitor> monitor, Ptr<Ipv4FlowClassifier> classifier)
 {
@@ -171,8 +230,8 @@ main(int argc, char* argv[])
     bool verbose = false;
 
     uint32_t numSatellites = 0;
-    uint32_t numServers = 1;
-    uint32_t numUes = 1;
+    uint32_t numServers = 0;
+    uint32_t numUes = 0;
     double minElevation = 10.0;
     double accessMaxDistance = 2500000.0;
     std::string accessDataRate = "100Mbps";
@@ -188,16 +247,23 @@ main(int argc, char* argv[])
     std::string islDataRate = "10Gbps";
     std::string islDelay = "100us";
 
-    bool enableDynamicRouting = false;
+    bool enableDynamicRouting = true;
     double routingUpdateInterval = 10.0;
+    std::string routingMetricName = "hop";
     uint32_t serverId = 0;
     uint32_t ueId = 0;
     uint16_t port = 9000;
     double appStart = 1.0;
-    double appStop = 50.0;
+    double appStop = 59.0;
     std::string tcpRate = "1Mbps";
     uint32_t tcpPacketSize = 1024;
+    bool allToAllTraffic = true;
     bool writeFlowMonitor = true;
+    bool enableVisualization = false;
+    double visualizationInterval = 1.0;
+    bool enableStatistics = true;
+    double statisticsInterval = 1.0;
+    bool enableRouteLogging = true;
 
     CommandLine cmd;
     cmd.AddValue("satellites", "Path to satellite mobility trace or position CSV", satelliteFile);
@@ -224,6 +290,9 @@ main(int argc, char* argv[])
     cmd.AddValue("islDelay", "ISL propagation delay, e.g. 100us", islDelay);
     cmd.AddValue("enableDynamicRouting", "Recompute routes periodically during the run", enableDynamicRouting);
     cmd.AddValue("routingUpdateInterval", "Dynamic routing update interval in seconds", routingUpdateInterval);
+    cmd.AddValue("routingMetric",
+                 "Dijkstra metric: hop, distance, path-loss, snr, or signal-strength",
+                 routingMetricName);
     cmd.AddValue("serverId", "Server/GSS index used by this single scenario", serverId);
     cmd.AddValue("ueId", "UE index used by this single scenario", ueId);
     cmd.AddValue("port", "TCP destination port", port);
@@ -231,9 +300,33 @@ main(int argc, char* argv[])
     cmd.AddValue("appStop", "TCP application stop time in seconds", appStop);
     cmd.AddValue("tcpRate", "TCP OnOff offered rate, e.g. 1Mbps", tcpRate);
     cmd.AddValue("tcpPacketSize", "TCP application packet size in bytes", tcpPacketSize);
+    cmd.AddValue("allToAllTraffic",
+                 "Install one TCP flow from every UE to every server/GSS",
+                 allToAllTraffic);
     cmd.AddValue("outputPrefix", "Prefix used for FlowMonitor XML output", outputPrefix);
     cmd.AddValue("writeFlowMonitor", "Write FlowMonitor XML output", writeFlowMonitor);
+    cmd.AddValue("enableVisualization",
+                 "Write CSV files for the LeoSim 3D visualizer",
+                 enableVisualization);
+    cmd.AddValue("visualizationInterval",
+                 "Visualization logging interval in seconds",
+                 visualizationInterval);
+    cmd.AddValue("enableStatistics", "Write periodic CSV and summary JSON statistics", enableStatistics);
+    cmd.AddValue("statisticsInterval", "Statistics sampling interval in seconds", statisticsInterval);
+    cmd.AddValue("enableRouteLogging",
+                 "Write selected paths and path-specific routing metrics",
+                 enableRouteLogging);
     cmd.Parse(argc, argv);
+
+    if (enableVisualization && visualizationInterval <= 0.0)
+    {
+        NS_FATAL_ERROR("visualizationInterval must be greater than zero");
+    }
+    if (enableStatistics && statisticsInterval <= 0.0)
+    {
+        NS_FATAL_ERROR("statisticsInterval must be greater than zero");
+    }
+    const auto routingMetric = ParseRoutingMetric(routingMetricName);
 
     Time::SetResolution(Time::NS);
 
@@ -330,6 +423,22 @@ main(int argc, char* argv[])
     opHelper.RegisterGroundDevices(ueNodes, serverNodes);
     Ptr<LeoSimOperatorModel> operatorModel = opHelper.Build();
 
+    LeoSimVisualizationHelper visualizationHelper;
+    const std::string positionFile = outputPrefix + "-positions.csv";
+    const std::string linkFile = outputPrefix + "-links.csv";
+    const std::string packetFile = outputPrefix + "-packets.csv";
+    if (enableVisualization)
+    {
+        visualizationHelper.SetOutputFile(positionFile);
+        visualizationHelper.EnablePositionGeolocationLogging(true);
+        visualizationHelper.SetUnifiedLinkStateFile(linkFile);
+        visualizationHelper.SetPacketFile(packetFile);
+        visualizationHelper.EnablePacketLogging(true);
+        visualizationHelper.EnablePacketGeolocationLogging(true);
+        visualizationHelper.SetLoaderHelper(loaderHelper);
+        visualizationHelper.Initialize();
+    }
+
     NodeContainer allGroundNodes;
     allGroundNodes.Add(ueNodes);
     allGroundNodes.Add(serverNodes);
@@ -360,6 +469,17 @@ main(int argc, char* argv[])
         islChannel->SetOperatorModel(operatorModel);
     }
 
+    if (enableVisualization)
+    {
+        visualizationHelper.SetChannelModel(accessChannel);
+        visualizationHelper.SetIslChannelModel(islChannel);
+        visualizationHelper.SchedulePositionLogging(satelliteNodes,
+                                                    serverNodes,
+                                                    ueNodes,
+                                                    visualizationInterval,
+                                                    simTime);
+    }
+
     LeoSimDeviceInstaller accessInstaller;
     accessInstaller.SetChannelModel(accessChannel);
     accessInstaller.SetOperatorModel(operatorModel);
@@ -369,11 +489,12 @@ main(int argc, char* argv[])
     accessInstaller.SetVerbose(verbose);
     NetDeviceContainer accessDevices = accessInstaller.Install(satelliteNodes, allGroundNodes);
     accessInstaller.ApplySharingRates(accessDevices);
+    accessInstaller.EnableLinkStateCallbacks(accessChannel);
 
     NetDeviceContainer islDevices;
+    LeoSimDeviceInstaller islInstaller;
     if (enableIsl && islChannel)
     {
-        LeoSimDeviceInstaller islInstaller;
         islInstaller.SetChannelModel(islChannel);
         islInstaller.SetOperatorModel(operatorModel);
         islInstaller.SetDeviceDataRate(islDataRate);
@@ -382,6 +503,7 @@ main(int argc, char* argv[])
         islInstaller.SetVerbose(verbose);
         islDevices = islInstaller.Install(satelliteNodes, NodeContainer());
         islInstaller.ApplySharingRates(islDevices);
+        islInstaller.EnableLinkStateCallbacks(islChannel);
     }
 
     InternetStackHelper stack;
@@ -412,6 +534,11 @@ main(int argc, char* argv[])
     routingDestinations.Add(ueNodes);
 
     LeoSimRoutingCalculatorHelper routingHelper;
+    const std::string routeLogFile = outputPrefix + "-routes.csv";
+    if (enableRouteLogging)
+    {
+        routingHelper.EnableRouteLogging(routeLogFile);
+    }
     Ptr<LeoSimRoutingCalculator> routingCalculator =
         routingHelper.CreateUnifiedRoutingCalculator(accessChannel, islChannel, verbose);
     routingCalculator->SetOperatorModel(operatorModel);
@@ -422,36 +549,101 @@ main(int argc, char* argv[])
                                            routingDestinations,
                                            Seconds(routingUpdateInterval),
                                            simTime,
-                                           verbose);
+                                           verbose,
+                                           routingMetric);
     }
     else
     {
-        routingHelper.SetStaticRoutes(routingCalculator, allNodes, routingDestinations, verbose);
+        routingHelper.SetStaticRoutes(routingCalculator,
+                                      allNodes,
+                                      routingDestinations,
+                                      verbose,
+                                      routingMetric);
     }
 
-    ApplicationContainer trafficApps = InstallSingleTcpFlow(ueNodes,
-                                                            serverNodes,
-                                                            ueId,
-                                                            serverId,
-                                                            port,
-                                                            appStart,
-                                                            appStop,
-                                                            tcpRate,
-                                                            tcpPacketSize);
+    ApplicationContainer trafficApps;
+    if (allToAllTraffic)
+    {
+        trafficApps = InstallAllTcpFlows(ueNodes,
+                                         serverNodes,
+                                         port,
+                                         appStart,
+                                         appStop,
+                                         tcpRate,
+                                         tcpPacketSize);
+    }
+    else
+    {
+        trafficApps = InstallSingleTcpFlow(ueNodes,
+                                           serverNodes,
+                                           ueId,
+                                           serverId,
+                                           port,
+                                           appStart,
+                                           appStop,
+                                           tcpRate,
+                                           tcpPacketSize);
+    }
     (void)trafficApps;
 
     FlowMonitorHelper flowmonHelper;
     Ptr<FlowMonitor> flowMonitor = flowmonHelper.InstallAll();
+    Ptr<Ipv4FlowClassifier> classifier =
+        DynamicCast<Ipv4FlowClassifier>(flowmonHelper.GetClassifier());
+
+    Ptr<LeoSimStatisticsHelper> statistics;
+    const std::string statisticsCsvFile = outputPrefix + "-statistics.csv";
+    const std::string statisticsJsonFile = outputPrefix + "-statistics.json";
+    if (enableStatistics)
+    {
+        statistics = CreateObject<LeoSimStatisticsHelper>();
+        statistics->SetFlowMonitor(flowMonitor, classifier);
+        if (!statistics->AttachChannelModel(accessChannel))
+        {
+            std::cerr << "Warning: failed to attach statistics to access channel traces"
+                      << std::endl;
+        }
+        if (enableIsl && islChannel && !statistics->AttachChannelModel(islChannel))
+        {
+            std::cerr << "Warning: failed to attach statistics to ISL channel traces" << std::endl;
+        }
+        statistics->StartPeriodicSampling(Seconds(statisticsInterval), statisticsCsvFile);
+    }
+
+    if (enableVisualization)
+    {
+        visualizationHelper.InstallPacketLogging(satelliteNodes, serverNodes, ueNodes);
+    }
 
     Simulator::Stop(Seconds(simTime));
     Simulator::Run();
 
-    Ptr<Ipv4FlowClassifier> classifier =
-        DynamicCast<Ipv4FlowClassifier>(flowmonHelper.GetClassifier());
     PrintFlowMonitorSummary(flowMonitor, classifier);
     if (writeFlowMonitor)
     {
         flowMonitor->SerializeToXmlFile(outputPrefix + "-flowmon.xml", true, true);
+    }
+    if (enableStatistics)
+    {
+        statistics->StopPeriodicSampling();
+        statistics->WriteSummary(statisticsJsonFile);
+        std::cout << "Statistics data: " << statisticsCsvFile << ", " << statisticsJsonFile
+                  << std::endl;
+    }
+    if (enableRouteLogging)
+    {
+        std::cout << "Route data: " << routeLogFile << std::endl;
+    }
+
+    if (enableVisualization)
+    {
+        visualizationHelper.Finalize();
+        std::cout << "Visualization data: " << positionFile << ", " << linkFile << ", "
+                  << packetFile << std::endl;
+        std::cout << "Render with: python3 contrib/leosim/utils/visualize_3d.py"
+                  << " --position_file " << positionFile << " --links " << linkFile
+                  << " --packets " << packetFile
+                  << " --output " << outputPrefix << "-visualization.html" << std::endl;
     }
 
     Simulator::Destroy();

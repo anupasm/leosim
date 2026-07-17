@@ -86,6 +86,8 @@ LeoSimStatisticsHelper::AttachChannelModel(Ptr<LeoSimChannelModel> model)
     if (!model) return false;
     bool ok = model->TraceConnectWithoutContext("LinkStateChange", MakeCallback(&LeoSimStatisticsHelper::OnModelLinkState, this));
     ok = model->TraceConnectWithoutContext("PathLoss", MakeCallback(&LeoSimStatisticsHelper::OnPathLoss, this)) && ok;
+    ok = model->TraceConnectWithoutContext("SnrDb", MakeCallback(&LeoSimStatisticsHelper::OnModelSnr, this)) && ok;
+    ok = model->TraceConnectWithoutContext("DopplerHz", MakeCallback(&LeoSimStatisticsHelper::OnModelDoppler, this)) && ok;
     return ok;
 }
 
@@ -107,6 +109,8 @@ void LeoSimStatisticsHelper::OnDoppler(Ptr<const Packet>, Ptr<const NetDevice>, 
 void LeoSimStatisticsHelper::OnLinkState(Ptr<const Packet>, Ptr<const NetDevice>, Ptr<const NetDevice>, bool up) { RecordLinkState(up ? LEOSIM_LINK_UP : LEOSIM_LINK_DOWN); }
 void LeoSimStatisticsHelper::OnModelLinkState(Ptr<Node>, Ptr<Node>, LeoSimLinkState s) { RecordLinkState(s); }
 void LeoSimStatisticsHelper::OnPathLoss(Ptr<Node>, Ptr<Node>, double v) { RecordPathLoss(v); }
+void LeoSimStatisticsHelper::OnModelSnr(Ptr<Node>, Ptr<Node>, double v) { RecordSnr(v); }
+void LeoSimStatisticsHelper::OnModelDoppler(Ptr<Node>, Ptr<Node>, double v) { RecordDoppler(v); }
 
 std::vector<LeoSimFlowStatistics>
 LeoSimStatisticsHelper::GetFlowStatistics() const

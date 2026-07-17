@@ -66,6 +66,7 @@ struct LeoSimChannelQuality
     double elevationAngle;     //!< Elevation angle from ground node (degrees)
     double signalStrength;     //!< Received signal strength (dBm)
     double snr;                //!< Signal-to-noise ratio (dB)
+    double dopplerHz{0.0};     //!< Signed radial Doppler shift (Hz)
     uint32_t peerNodeId;       //!< Peer node ID for node-scoped link queries
     LeoSimLinkState linkState; //!< Current link state
     LeoSimLinkType linkType;   //!< Link type (ground or ISL)
@@ -546,6 +547,8 @@ class LeoSimChannelModel : public Object
     // Traced callbacks
     TracedCallback<Ptr<Node>, Ptr<Node>, LeoSimLinkState> m_linkStateChangeTrace; //!< Link state change
     TracedCallback<Ptr<Node>, Ptr<Node>, double> m_pathLossTrace; //!< Path loss update
+    TracedCallback<Ptr<Node>, Ptr<Node>, double> m_snrTrace; //!< SNR update
+    TracedCallback<Ptr<Node>, Ptr<Node>, double> m_dopplerTrace; //!< Doppler update
 };
 
 } // namespace ns3

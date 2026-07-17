@@ -529,30 +529,17 @@ def load_packet_data(filename):
 
     try:
         with open(filename, 'r') as f:
-            next(f)
-
-            for line in f:
-                parts = line.strip().split(',')
-                if len(parts) < 7:
-                    continue
-
-                time = float(parts[0])
-                event = parts[1]
-                node_id = int(parts[2])
-                device_id = int(parts[3])
-
-                if len(parts) >= 9:
-                    peer_node_id = int(parts[4])
-                    link_type = parts[5]
-                    size_bytes = int(parts[6])
-                    snr_db = float(parts[7])
-                    doppler_hz = float(parts[8])
-                else:
-                    peer_node_id = -1
-                    link_type = "UNKNOWN"
-                    size_bytes = int(parts[4])
-                    snr_db = float(parts[5])
-                    doppler_hz = float(parts[6])
+            for raw in csv.DictReader(f):
+                row = _norm_row(raw)
+                time = float(row['time'])
+                event = row['event']
+                node_id = int(row['node_id'])
+                device_id = int(row['device_id'])
+                peer_node_id = int(row.get('peer_node_id', -1))
+                link_type = row.get('link_type', 'UNKNOWN')
+                size_bytes = int(row['size_bytes'])
+                snr_db = float(row.get('snr_db') or 0.0)
+                doppler_hz = float(row.get('doppler_hz') or 0.0)
 
                 time_key = f"{time:.3f}"
                 packets.setdefault(time_key, []).append({

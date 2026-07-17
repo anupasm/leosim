@@ -20,6 +20,7 @@
 
 #include "ns3/leosim-channel-model.h"
 #include "ns3/leosim-operator-model.h"
+#include "ns3/error-model.h"
 #include "ns3/net-device-container.h"
 #include "ns3/node-container.h"
 #include "ns3/ptr.h"
@@ -284,6 +285,9 @@ class LeoSimDeviceInstaller
     std::map<std::string, std::pair<Ptr<NetDevice>, Ptr<NetDevice>>>
         m_installedLinks; //!< Map of node pair keys to installed devices
     std::map<Ptr<Node>, NetDeviceContainer> m_nodeDevices; //!< Devices per node
+    std::map<std::string, std::pair<Ptr<RateErrorModel>, Ptr<RateErrorModel>>>
+        m_linkErrorModels; //!< Receive-side gates enforcing logical link state
+    bool m_linkStateCallbacksEnabled{false};
 
     // Shared channel for ISL links
     Ptr<SimpleChannel> m_islChannel; //!< Channel for ISL devices

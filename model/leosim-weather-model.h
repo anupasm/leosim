@@ -70,15 +70,15 @@ struct LeoSimWeatherParams
  */
 struct LeoSimAttenuationResult
 {
-    double rainAttenuation_dB;         //!< ITU-R P.618 / P.838 rain attenuation
-    double cloudAttenuation_dB;        //!< ITU-R P.840 cloud attenuation
-    double gaseousAttenuation_dB;      //!< ITU-R P.676 (O2 + H2O) attenuation
-    double scintillationAmplitude_dB;  //!< ITU-R P.618 1-sigma scintillation
-    double scintillationSample_dB;     //!< Instantaneous scintillation draw
-    double totalAttenuation_dB;        //!< Sum of all attenuation components
-    double elevationAngle_deg;         //!< Elevation at time of computation
-    LeoSimWeatherState groundState;    //!< Ground weather state during compute
-    Time computedAt;                   //!< Simulation timestamp of computation
+    double rainAttenuation_dB{0.0};         //!< ITU-R P.618 / P.838 rain attenuation
+    double cloudAttenuation_dB{0.0};        //!< ITU-R P.840 cloud attenuation
+    double gaseousAttenuation_dB{0.0};      //!< ITU-R P.676 (O2 + H2O) attenuation
+    double scintillationAmplitude_dB{0.0};  //!< ITU-R P.618 1-sigma scintillation
+    double scintillationSample_dB{0.0};     //!< Instantaneous scintillation draw
+    double totalAttenuation_dB{0.0};        //!< Sum of all attenuation components
+    double elevationAngle_deg{0.0};         //!< Elevation at time of computation
+    LeoSimWeatherState groundState{LEOSIM_WX_CLEAR}; //!< Ground weather state during compute
+    Time computedAt{Seconds(0.0)};           //!< Simulation timestamp of computation
 };
 
 /**

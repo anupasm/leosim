@@ -128,7 +128,15 @@ LeoSimChannelModel::GetTypeId()
             .AddTraceSource("PathLoss",
                             "Trace path loss updates",
                             MakeTraceSourceAccessor(&LeoSimChannelModel::m_pathLossTrace),
-                            "ns3::LeoSimChannelModel::PathLossCallback");
+                            "ns3::LeoSimChannelModel::PathLossCallback")
+            .AddTraceSource("SnrDb",
+                            "Trace SNR updates",
+                            MakeTraceSourceAccessor(&LeoSimChannelModel::m_snrTrace),
+                            "ns3::LeoSimChannelModel::QualityMetricCallback")
+            .AddTraceSource("DopplerHz",
+                            "Trace Doppler updates",
+                            MakeTraceSourceAccessor(&LeoSimChannelModel::m_dopplerTrace),
+                            "ns3::LeoSimChannelModel::QualityMetricCallback");
     return tid;
 }
 
@@ -299,6 +307,22 @@ LeoSimChannelModel::UpdateLink(uint32_t linkId)
     double txGain = isIsl ? m_islAntennaGain : m_txAntennaGain;
     double rxGain = isIsl ? m_islAntennaGain : m_rxAntennaGain;
     double frequency = isIsl ? m_islFrequency : m_frequency;
+
+    // Signed radial Doppler: positive when the endpoints are separating.
+    const Vector velocity1 = mob1->GetVelocity();
+    const Vector velocity2 = mob2->GetVelocity();
+    if (distance > 0.0)
+    {
+        const double radialVelocity = ((velocity2.x - velocity1.x) * dx +
+                                       (velocity2.y - velocity1.y) * dy +
+                                       (velocity2.z - velocity1.z) * dz) /
+                                      distance;
+        info.quality.dopplerHz = radialVelocity * frequency / SPEED_OF_LIGHT;
+    }
+    else
+    {
+        info.quality.dopplerHz = 0.0;
+    }
 
     NS_LOG_DEBUG("Link type: " << (isIsl ? "ISL" : "Ground"));
     NS_LOG_DEBUG("Parameters: maxDistance=" << maxDistance/1000.0 << " km, txPower=" << txPower 
@@ -531,7 +555,9 @@ LeoSimChannelModel::UpdateLink(uint32_t linkId)
                    << " dB, distance: " << distance/1000.0 << " km, elev: " << elevationAngle << "°)");
     }
 
-    m_pathLossTrace(node1, node2, pathLoss);
+    m_pathLossTrace(node1, node2, info.quality.pathLoss);
+    m_snrTrace(node1, node2, info.quality.snr);
+    m_dopplerTrace(node1, node2, info.quality.dopplerHz);
 }
 
 LeoSimChannelQuality
@@ -557,6 +583,7 @@ LeoSimChannelModel::GetChannelQuality(Ptr<Node> node1, Ptr<Node> node2)
     quality.elevationAngle = 0.0;
     quality.signalStrength = -200.0;
     quality.snr = -100.0;
+    quality.dopplerHz = 0.0;
     quality.peerNodeId = 0;
     quality.lastUpdate = Simulator::Now();
     return quality;
@@ -1181,6 +1208,7 @@ LeoSimChannelModel::GetLinkQuality(uint32_t nodeA, uint32_t nodeB) const
     defaultQuality.elevationAngle = 0.0;
     defaultQuality.signalStrength = -200.0;
     defaultQuality.snr = -100.0;
+    defaultQuality.dopplerHz = 0.0;
     defaultQuality.peerNodeId = 0;
     defaultQuality.lastUpdate = Simulator::Now();
     defaultQuality.linkType = LEOSIM_LINK_SATELLITE_TO_GROUND; // Default type

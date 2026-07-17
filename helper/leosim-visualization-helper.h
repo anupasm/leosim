@@ -59,6 +59,12 @@ class LeoSimVisualizationHelper
     void SetOutputFile(std::string outputFile);
 
     /**
+     * \brief Append WGS84 latitude, longitude, and altitude to position rows
+     * \param enable True to add latitude_deg, longitude_deg, and altitude_m columns
+     */
+    void EnablePositionGeolocationLogging(bool enable);
+
+    /**
      * \brief Set the output file for channel/link data
      * \param linkFile Path to output link CSV file
      */
@@ -75,6 +81,12 @@ class LeoSimVisualizationHelper
      * \param enable True to enable packet logging
      */
     void EnablePacketLogging(bool enable);
+
+    /**
+     * \brief Append the reporting node's current Cartesian position to packet rows
+     * \param enable True to add x, y, and z columns in meters
+     */
+    void EnablePacketGeolocationLogging(bool enable);
 
     /**
      * \brief Enable/disable beam + handover logging
@@ -368,6 +380,7 @@ class LeoSimVisualizationHelper
     void OnPhyRx(std::string context, Ptr<const Packet> packet, double snrDb, double dopplerHz);
     void OnPhyRxBasic(std::string context, Ptr<const Packet> packet);
     void OnPhyRxDrop(std::string context, Ptr<const Packet> packet);
+    void AppendPacketGeolocation(int nodeId);
 
     Ptr<Node> GetDevicePeerNode(int nodeId, int deviceId) const;
     std::string GetLinkType(Ptr<Node> node, Ptr<Node> peerNode) const;
@@ -415,6 +428,8 @@ class LeoSimVisualizationHelper
     NodeContainer m_servers;
     NodeContainer m_ues;
     bool m_enablePacketLogging;
+    bool m_enablePacketGeolocationLogging;
+    bool m_enablePositionGeolocationLogging;
     bool m_packetLoggingInstalled;
     bool m_enableBeamLogging;
     bool m_beamLoggingInitialized;

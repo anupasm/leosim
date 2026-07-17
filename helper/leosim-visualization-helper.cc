@@ -228,6 +228,8 @@ LeoSimVisualizationHelper::LeoSimVisualizationHelper()
       m_islChannelModel(nullptr),
       m_beamManager(nullptr),
       m_enablePacketLogging(false),
+      m_enablePacketGeolocationLogging(false),
+      m_enablePositionGeolocationLogging(false),
       m_packetLoggingInstalled(false),
       m_enableBeamLogging(false),
       m_beamLoggingInitialized(false),
@@ -287,6 +289,12 @@ LeoSimVisualizationHelper::SetOutputFile(std::string outputFile)
 }
 
 void
+LeoSimVisualizationHelper::EnablePositionGeolocationLogging(bool enable)
+{
+    m_enablePositionGeolocationLogging = enable;
+}
+
+void
 LeoSimVisualizationHelper::SetLinkFile(std::string linkFile)
 {
     m_linkFile = linkFile;
@@ -302,6 +310,12 @@ void
 LeoSimVisualizationHelper::EnablePacketLogging(bool enable)
 {
     m_enablePacketLogging = enable;
+}
+
+void
+LeoSimVisualizationHelper::EnablePacketGeolocationLogging(bool enable)
+{
+    m_enablePacketGeolocationLogging = enable;
 }
 
 void
@@ -357,7 +371,12 @@ LeoSimVisualizationHelper::Initialize()
     }
 
     // Write CSV header for positions
-    m_posFile << "time,type,id,name,x,y,z" << std::endl;
+    m_posFile << "time,type,id,name,x,y,z";
+    if (m_enablePositionGeolocationLogging)
+    {
+        m_posFile << ",latitude_deg,longitude_deg,altitude_m";
+    }
+    m_posFile << std::endl;
 
     if (!m_linkFile.empty())
     {
@@ -384,8 +403,12 @@ LeoSimVisualizationHelper::Initialize()
         {
             m_unifiedLinkStateFileStream
                 << "time,node1_id,node2_id,link_type,sat_id,ground_id,ground_type,"
-                << "channel_state,snr_db,distance_m,elevation_deg,path_loss_db,"
-                << "signal_strength_dbm,degradation_reason,beam_id,cell_id,color_group,"
+                << "channel_state,snr_db,doppler_hz,distance_m,elevation_deg,path_loss_db,"
+                << "signal_strength_dbm,quality_last_update_s,rain_attenuation_db,"
+                << "cloud_attenuation_db,gaseous_attenuation_db,scintillation_amplitude_db,"
+                << "scintillation_sample_db,total_weather_attenuation_db,"
+                << "weather_elevation_deg,weather_state,weather_computed_at_s,"
+                << "degradation_reason,beam_id,cell_id,color_group,"
                 << "beam_state,beam_active,beam_covered,is_prepared_candidate,"
                 << "is_serving_access,access_state"
                 << std::endl;
@@ -401,8 +424,12 @@ LeoSimVisualizationHelper::Initialize()
         }
         else
         {
-            m_packetFileStream << "time,event,node_id,device_id,peer_node_id,link_type,size_bytes,snr_db,doppler_hz"
-                               << std::endl;
+            m_packetFileStream << "time,event,node_id,device_id,peer_node_id,link_type,size_bytes";
+            if (m_enablePacketGeolocationLogging)
+            {
+                m_packetFileStream << ",x,y,z";
+            }
+            m_packetFileStream << std::endl;
         }
     }
 
@@ -534,10 +561,16 @@ LeoSimVisualizationHelper::LogNodePosition(Ptr<Node> node,
     {
         resolvedName = nodeName;
     }
-    // Write to file: time, type, id, name, x, y, z
+    // Write Cartesian ECEF coordinates, with optional WGS84 geolocation.
     m_posFile << std::fixed << std::setprecision(3);
     m_posFile << time << "," << nodeType << "," << nodeId << "," << resolvedName << "," << pos.x << ","
-              << pos.y << "," << pos.z << std::endl;
+              << pos.y << "," << pos.z;
+    if (m_enablePositionGeolocationLogging)
+    {
+        const Vector geodetic = LeoSimLoader::CartesianToGeodetic(pos);
+        m_posFile << "," << geodetic.x << "," << geodetic.y << "," << geodetic.z;
+    }
+    m_posFile << std::endl;
 }
 
 void
@@ -888,10 +921,21 @@ LeoSimVisualizationHelper::LogUnifiedLinkState()
                                      << groundType << ","
                                      << LinkStateToString(quality.linkState) << ","
                                      << quality.snr << ","
+                                     << quality.dopplerHz << ","
                                      << quality.distance << ","
                                      << quality.elevationAngle << ","
                                      << SanitizePathLoss(quality.pathLoss) << ","
                                      << quality.signalStrength << ","
+                                     << quality.lastUpdate.GetSeconds() << ","
+                                     << quality.weatherAtten.rainAttenuation_dB << ","
+                                     << quality.weatherAtten.cloudAttenuation_dB << ","
+                                     << quality.weatherAtten.gaseousAttenuation_dB << ","
+                                     << quality.weatherAtten.scintillationAmplitude_dB << ","
+                                     << quality.weatherAtten.scintillationSample_dB << ","
+                                     << quality.weatherAtten.totalAttenuation_dB << ","
+                                     << quality.weatherAtten.elevationAngle_deg << ","
+                                     << WeatherStateToString(quality.weatherAtten.groundState) << ","
+                                     << quality.weatherAtten.computedAt.GetSeconds() << ","
                                      << DegradationReason(quality, channelModel) << ","
                                      << beamId << ","
                                      << cellId << ","
@@ -1135,6 +1179,27 @@ LeoSimVisualizationHelper::GetLinkType(Ptr<Node> node, Ptr<Node> peerNode) const
 
 
 void
+LeoSimVisualizationHelper::AppendPacketGeolocation(int nodeId)
+{
+    if (!m_enablePacketGeolocationLogging)
+    {
+        return;
+    }
+
+    Ptr<Node> node = NodeList::GetNode(nodeId);
+    Ptr<MobilityModel> mobility = node ? node->GetObject<MobilityModel>() : nullptr;
+    if (mobility)
+    {
+        const Vector position = mobility->GetPosition();
+        m_packetFileStream << ',' << position.x << ',' << position.y << ',' << position.z;
+    }
+    else
+    {
+        m_packetFileStream << ",nan,nan,nan";
+    }
+}
+
+void
 LeoSimVisualizationHelper::OnPhyTx(std::string context, Ptr<const Packet> packet)
 {
     if (!m_packetFileStream.is_open())
@@ -1166,8 +1231,9 @@ LeoSimVisualizationHelper::OnPhyTx(std::string context, Ptr<const Packet> packet
 
     m_packetFileStream << std::fixed << std::setprecision(3);
     m_packetFileStream << Simulator::Now().GetSeconds() << ",TX," << nodeId << "," << deviceId
-                       << "," << peerNodeId << "," << linkType << "," << packet->GetSize()
-                       << "," << 0.0 << "," << 0.0 << std::endl;
+                       << "," << peerNodeId << "," << linkType << "," << packet->GetSize();
+    AppendPacketGeolocation(nodeId);
+    m_packetFileStream << std::endl;
 }
 
 void
@@ -1176,6 +1242,8 @@ LeoSimVisualizationHelper::OnPhyRx(std::string context,
                                    double snrDb,
                                    double dopplerHz)
 {
+    (void)snrDb;
+    (void)dopplerHz;
     if (!m_packetFileStream.is_open())
     {
         return;
@@ -1205,8 +1273,9 @@ LeoSimVisualizationHelper::OnPhyRx(std::string context,
 
     m_packetFileStream << std::fixed << std::setprecision(3);
     m_packetFileStream << Simulator::Now().GetSeconds() << ",RX," << nodeId << "," << deviceId
-                       << "," << peerNodeId << "," << linkType << "," << packet->GetSize()
-                       << "," << snrDb << "," << dopplerHz << std::endl;
+                       << "," << peerNodeId << "," << linkType << "," << packet->GetSize();
+    AppendPacketGeolocation(nodeId);
+    m_packetFileStream << std::endl;
 }
 
 void
@@ -1249,8 +1318,9 @@ LeoSimVisualizationHelper::OnPhyRxDrop(std::string context, Ptr<const Packet> pa
 
     m_packetFileStream << std::fixed << std::setprecision(3);
     m_packetFileStream << Simulator::Now().GetSeconds() << ",DROP," << nodeId << "," << deviceId
-                       << "," << peerNodeId << "," << linkType << "," << packet->GetSize()
-                       << "," << 0.0 << "," << 0.0 << std::endl;
+                       << "," << peerNodeId << "," << linkType << "," << packet->GetSize();
+    AppendPacketGeolocation(nodeId);
+    m_packetFileStream << std::endl;
 }
 
 void

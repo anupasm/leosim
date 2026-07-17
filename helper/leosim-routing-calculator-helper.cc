@@ -29,6 +29,8 @@
 #include "ns3/event-id.h"
 
 #include <algorithm>
+#include <iomanip>
+#include <sstream>
 #include <vector>
 
 NS_LOG_COMPONENT_DEFINE("LeoSimRoutingCalculatorHelper");
@@ -43,6 +45,83 @@ LeoSimRoutingCalculatorHelper::LeoSimRoutingCalculatorHelper()
 
 LeoSimRoutingCalculatorHelper::~LeoSimRoutingCalculatorHelper()
 {
+}
+
+void
+LeoSimRoutingCalculatorHelper::EnableRouteLogging(const std::string& filename)
+{
+    if (m_routeLog.is_open())
+    {
+        m_routeLog.close();
+    }
+    m_previousRoutePaths.clear();
+    m_routeLog.open(filename, std::ios::out | std::ios::trunc);
+    if (!m_routeLog.is_open())
+    {
+        NS_LOG_ERROR("Could not open route log: " << filename);
+        return;
+    }
+    m_routeLog << "time_s,source_node,destination_node,metric,valid,path,hop_count,"
+                  "total_distance_m,min_snr_db,total_path_loss_db,min_signal_strength_dbm,"
+                  "route_changed"
+               << std::endl;
+}
+
+void
+LeoSimRoutingCalculatorHelper::LogRoute(
+    const LeoSimRoute& route,
+    Ptr<Node> source,
+    Ptr<Node> destination,
+    LeoSimRoutingCalculator::RoutingMetric metric)
+{
+    if (!m_routeLog.is_open() || !source || !destination)
+    {
+        return;
+    }
+
+    const char* metricName = "hop";
+    switch (metric)
+    {
+    case LeoSimRoutingCalculator::LEOSIM_METRIC_DISTANCE: metricName = "distance"; break;
+    case LeoSimRoutingCalculator::LEOSIM_METRIC_PATH_LOSS: metricName = "path-loss"; break;
+    case LeoSimRoutingCalculator::LEOSIM_METRIC_SNR: metricName = "snr"; break;
+    case LeoSimRoutingCalculator::LEOSIM_METRIC_SIGNAL_STRENGTH:
+        metricName = "signal-strength";
+        break;
+    default: break;
+    }
+
+    std::ostringstream path;
+    if (route.valid)
+    {
+        for (std::size_t i = 0; i < route.path.size(); ++i)
+        {
+            if (i > 0)
+            {
+                path << '>';
+            }
+            path << route.path[i]->GetId();
+        }
+    }
+    else
+    {
+        path << "NO_ROUTE";
+    }
+
+    const auto key = std::make_pair(source->GetId(), destination->GetId());
+    const auto previous = m_previousRoutePaths.find(key);
+    const bool changed = previous != m_previousRoutePaths.end() && previous->second != path.str();
+    m_previousRoutePaths[key] = path.str();
+
+    m_routeLog << std::fixed << std::setprecision(6) << Simulator::Now().GetSeconds() << ','
+               << source->GetId() << ',' << destination->GetId() << ',' << metricName << ','
+               << (route.valid ? 1 : 0) << ',' << path.str() << ','
+               << (route.valid ? route.hopCount : 0) << ','
+               << (route.valid ? route.totalDistance : 0.0) << ','
+               << (route.valid ? route.minSnr : 0.0) << ','
+               << (route.valid ? route.totalPathLoss : 0.0) << ','
+               << (route.valid ? route.minSignalStrength : 0.0) << ','
+               << (changed ? 1 : 0) << std::endl;
 }
 
 Ptr<LeoSimRoutingCalculator>
@@ -221,7 +300,8 @@ void
 LeoSimRoutingCalculatorHelper::SetStaticRoutes(Ptr<LeoSimRoutingCalculator> calculator,
                                                    const NodeContainer& sources,
                                                    const NodeContainer& destinations,
-                                                   bool verbose)
+                                                   bool verbose,
+                                                   LeoSimRoutingCalculator::RoutingMetric metric)
 {
     double currentTime = Simulator::Now().GetSeconds();
     bool isUpdate = (currentTime > 0.0);  // True if this is a dynamic update (not initial)
@@ -322,8 +402,9 @@ LeoSimRoutingCalculatorHelper::SetStaticRoutes(Ptr<LeoSimRoutingCalculator> calc
             computedRoutes[j] = calculator->ComputeRoute(
                 srcNode,
                 dstNode,
-                LeoSimRoutingCalculator::LEOSIM_METRIC_HOP_COUNT);
+                metric);
             routeComputed[j] = true;
+            LogRoute(computedRoutes[j], srcNode, dstNode, metric);
         }
 
         // For each destination node
@@ -382,7 +463,8 @@ LeoSimRoutingCalculatorHelper::EnableDynamicRouting(Ptr<LeoSimRoutingCalculator>
                                                      const NodeContainer& destinations,
                                                      Time updateInterval,
                                                      double stopTime,
-                                                     bool verbose)
+                                                     bool verbose,
+                                                     LeoSimRoutingCalculator::RoutingMetric metric)
 {
     if (!calculator)
     {
@@ -401,7 +483,7 @@ LeoSimRoutingCalculatorHelper::EnableDynamicRouting(Ptr<LeoSimRoutingCalculator>
     }
 
     // Perform initial route calculation
-    SetStaticRoutes(calculator, sources, destinations, verbose);
+    SetStaticRoutes(calculator, sources, destinations, verbose, metric);
 
     // Schedule periodic updates
     m_dynamicRoutingUpdate =
@@ -413,7 +495,8 @@ LeoSimRoutingCalculatorHelper::EnableDynamicRouting(Ptr<LeoSimRoutingCalculator>
                             destinations,
                             updateInterval,
                             stopTime,
-                            verbose);
+                            verbose,
+                            metric);
 }
 
 void
@@ -422,7 +505,8 @@ LeoSimRoutingCalculatorHelper::UpdateRoutesAndReschedule(Ptr<LeoSimRoutingCalcul
                                                           const NodeContainer& destinations,
                                                           Time updateInterval,
                                                           double stopTime,
-                                                          bool verbose)
+                                                          bool verbose,
+                                                          LeoSimRoutingCalculator::RoutingMetric metric)
 {
     LeoSimTaskProfiler::ScopedEvent profile("run_simulation.dynamic_routing_update");
     double currentTime = Simulator::Now().GetSeconds();
@@ -443,7 +527,7 @@ LeoSimRoutingCalculatorHelper::UpdateRoutesAndReschedule(Ptr<LeoSimRoutingCalcul
     }
 
     // Reinstall routes with fresh calculations
-    SetStaticRoutes(calculator, sources, destinations, verbose);
+    SetStaticRoutes(calculator, sources, destinations, verbose, metric);
 
     // Get active link count after update
     if (verbose && calculator)
@@ -474,7 +558,8 @@ LeoSimRoutingCalculatorHelper::UpdateRoutesAndReschedule(Ptr<LeoSimRoutingCalcul
                             destinations,
                             updateInterval,
                             stopTime,
-                            verbose);
+                            verbose,
+                            metric);
 }
 
 bool

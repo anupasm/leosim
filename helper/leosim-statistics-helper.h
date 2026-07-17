@@ -127,6 +127,8 @@ class LeoSimStatisticsHelper : public Object
     void OnLinkState(Ptr<const Packet>, Ptr<const NetDevice>, Ptr<const NetDevice>, bool up);
     void OnModelLinkState(Ptr<Node>, Ptr<Node>, LeoSimLinkState state);
     void OnPathLoss(Ptr<Node>, Ptr<Node>, double value);
+    void OnModelSnr(Ptr<Node>, Ptr<Node>, double value);
+    void OnModelDoppler(Ptr<Node>, Ptr<Node>, double value);
     void Sample();
     void WriteCsvHeader();
 

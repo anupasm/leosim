@@ -464,6 +464,7 @@ LeoSimDeviceInstaller::Clear()
 {
     NS_LOG_FUNCTION(this);
     m_installedLinks.clear();
+    m_linkErrorModels.clear();
     m_nodeDevices.clear();
     m_numInstalledDevices = 0;
     if (m_verbose)
@@ -494,12 +495,44 @@ LeoSimDeviceInstaller::EnableLinkStateCallbacks(Ptr<LeoSimChannelModel> channelM
     }
     
     m_channelModel = channelModel;
+
+    if (m_linkStateCallbacksEnabled)
+    {
+        return;
+    }
+
+    // Gate both receive directions of each point-to-point link. DOWN links
+    // corrupt every received frame; UP and DEGRADED links pass every frame.
+    for (const auto& installed : m_installedLinks)
+    {
+        Ptr<PointToPointNetDevice> devA =
+            DynamicCast<PointToPointNetDevice>(installed.second.first);
+        Ptr<PointToPointNetDevice> devB =
+            DynamicCast<PointToPointNetDevice>(installed.second.second);
+        if (!devA || !devB)
+        {
+            continue;
+        }
+
+        Ptr<RateErrorModel> gateA = CreateObject<RateErrorModel>();
+        Ptr<RateErrorModel> gateB = CreateObject<RateErrorModel>();
+        devA->SetReceiveErrorModel(gateA);
+        devB->SetReceiveErrorModel(gateB);
+        m_linkErrorModels.emplace(installed.first, std::make_pair(gateA, gateB));
+
+        const LeoSimLinkState state =
+            channelModel->GetLinkState(devA->GetNode()->GetId(), devB->GetNode()->GetId());
+        const double errorRate = state == LEOSIM_LINK_DOWN ? 1.0 : 0.0;
+        gateA->SetRate(errorRate);
+        gateB->SetRate(errorRate);
+    }
     
     // Connect to the channel model's link state change trace
     // This lets us track which devices are actually being used
     channelModel->TraceConnectWithoutContext(
         "LinkStateChange",
         MakeCallback(&LeoSimDeviceInstaller::OnLinkStateChange, this));
+    m_linkStateCallbacksEnabled = true;
     
     if (m_verbose)
     {
@@ -530,9 +563,17 @@ LeoSimDeviceInstaller::OnLinkStateChange(Ptr<Node> node1, Ptr<Node> node2, LeoSi
                   << " state: " << (newState == LEOSIM_LINK_UP ? "UP" : "DOWN") << std::endl;
     }
     
-    // With pooled devices, all devices are already created and IP addresses assigned.
-    // This callback just logs state changes for tracking purposes.
-    // The routing layer will use available devices regardless of link state.
+    auto errorModels = m_linkErrorModels.find(GetNodePairKey(node1, node2));
+    if (errorModels == m_linkErrorModels.end())
+    {
+        NS_LOG_WARN("No receive gate found for link " << node1->GetId() << "<->"
+                                                       << node2->GetId());
+        return;
+    }
+
+    const double errorRate = newState == LEOSIM_LINK_DOWN ? 1.0 : 0.0;
+    errorModels->second.first->SetRate(errorRate);
+    errorModels->second.second->SetRate(errorRate);
 }
 
 LeoSimLinkDirection

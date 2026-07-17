@@ -971,7 +971,9 @@ LeoSimRoutingCalculator::GetLinkMetricValue(Ptr<Node> source,
     case LEOSIM_METRIC_PATH_LOSS:
         return quality.pathLoss; // Lower is better
     case LEOSIM_METRIC_SNR:
-        return -quality.snr; // Negative SNR so we minimize it (maximize SNR)
+        // Dijkstra requires non-negative edge weights. Reciprocal SNR minimizes
+        // cost while preferring stronger usable links.
+        return 1.0 / std::max(quality.snr, 1e-9);
     case LEOSIM_METRIC_DISTANCE:
         return quality.distance; // Lower is better
     case LEOSIM_METRIC_SIGNAL_STRENGTH:

@@ -26,6 +26,9 @@
 #include "ns3/leosim-channel-model.h"
 #include "ns3/leosim-routing-calculator.h"
 
+#include <fstream>
+#include <map>
+#include <string>
 #include <vector>
 
 namespace ns3
@@ -84,6 +87,9 @@ class LeoSimRoutingCalculatorHelper
                                                                  Ptr<LeoSimChannelModel> islChannelModel,
                                                                  bool verbose = false);
 
+    /** Enable CSV logging for every selected route and subsequent route change. */
+    void EnableRouteLogging(const std::string& filename);
+
     /**
      * \brief Set computed routes into static routing tables of nodes
      * \param calculator The routing calculator to use for computing routes
@@ -98,7 +104,9 @@ class LeoSimRoutingCalculatorHelper
     void SetStaticRoutes(Ptr<LeoSimRoutingCalculator> calculator,
                              const NodeContainer& sources,
                              const NodeContainer& destinations,
-                             bool verbose = false);
+                             bool verbose = false,
+                             LeoSimRoutingCalculator::RoutingMetric metric =
+                                 LeoSimRoutingCalculator::LEOSIM_METRIC_HOP_COUNT);
 
     /**
      * \brief Install a computed route into the source node's IPv4 static routing table.
@@ -135,7 +143,9 @@ class LeoSimRoutingCalculatorHelper
                               const NodeContainer& destinations,
                               Time updateInterval,
                               double stopTime = 0.0,
-                              bool verbose = false);
+                              bool verbose = false,
+                              LeoSimRoutingCalculator::RoutingMetric metric =
+                                  LeoSimRoutingCalculator::LEOSIM_METRIC_HOP_COUNT);
 
     /**
      * \brief Enable reactive routing updates triggered by link state changes
@@ -183,7 +193,8 @@ class LeoSimRoutingCalculatorHelper
                                    const NodeContainer& destinations,
                                    Time updateInterval,
                                    double stopTime,
-                                   bool verbose);
+                                   bool verbose,
+                                   LeoSimRoutingCalculator::RoutingMetric metric);
 
     /**
      * \brief Callback fired when a link changes state (used for reactive routing)
@@ -197,6 +208,11 @@ class LeoSimRoutingCalculatorHelper
      */
     void DoReactiveUpdate();
 
+    void LogRoute(const LeoSimRoute& route,
+                  Ptr<Node> source,
+                  Ptr<Node> destination,
+                  LeoSimRoutingCalculator::RoutingMetric metric);
+
     Ptr<LeoSimRoutingCalculator> m_reactiveCalculator;
     NodeContainer m_reactiveSources;
     NodeContainer m_reactiveDestinations;
@@ -204,6 +220,8 @@ class LeoSimRoutingCalculatorHelper
     bool m_reactiveVerbose = false;
     EventId m_dynamicRoutingUpdate;       //!< Pending periodic dynamic routing event
     EventId m_pendingReactiveUpdate; //!< Pending debounced reactive update event
+    std::ofstream m_routeLog;
+    std::map<std::pair<uint32_t, uint32_t>, std::string> m_previousRoutePaths;
 };
 
 } // namespace ns3
