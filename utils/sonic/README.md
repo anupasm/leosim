@@ -1,82 +1,71 @@
-# Running the RP1 routing pilot on Sonic
+# Running the LeoSim routing sweep on Sonic
 
-This directory runs the currently implemented
-`leosim-routing-research-example` as a Slurm job array: one independent routing
-metric per array task. It does **not** yet run the full experiment described in
-`ns3/contrib/leosim/doc/rp1_routing.txt`.
+This directory runs `leosim-param-scenario` as a 15-task Slurm array:
 
-## 1. Copy the repository to Sonic
+- metrics: hop, distance, path loss, SNR, signal strength;
+- satellites: all 11,514 catalog satellites;
+- duration: 1800 seconds (30 minutes);
+- dynamic-routing intervals: 5, 10, and 30 seconds.
 
-Connect through the UCD network/VPN and log in using the hostname and account
-details supplied with your Sonic account. Transfer the checkout with `rsync`
-from your own computer (replace both placeholders):
+Before simulation, the array combines `data/tles/alpha.csv`, `beta.csv`, and
+`gamma.csv` using `tle_to_positions.py`. A shared file lock ensures the
+30-minute, 5-second-resolution position CSV is generated only once per array
+job and reused by every routing run.
 
-```bash
-rsync -az --exclude ns3/build --exclude ns3/cmake-cache \
-  /path/to/LeoSim/ UCD_USER@SONIC_LOGIN:~/LeoSim/
-```
+Every task writes FlowMonitor XML, periodic/summary statistics, selected-route
+history, resource usage, and metadata. By default it loads all UEs and ground
+stations and creates every UE-to-GSS TCP flow at 1 Mbps per flow.
 
-For production output, use your assigned Sonic scratch/project path rather
-than home: home has a 50 GB quota and Sonic scratch is computational,
-non-archival storage. The exact scratch path is account-specific, so do not
-hard-code one copied from another user.
+## Build once
 
-## 2. Build once
-
-Never compile separately in every array element. First request an interactive
-CPU allocation using the account/partition values assigned to you, then build:
+Run the setup helper before submitting. It creates `.venv-leosim-sonic`,
+installs NumPy and Skyfield for TLE preprocessing, and builds the scenario.
+Each array task then uses `--no-build`:
 
 ```bash
 cd ~/LeoSim
 srun --pty --nodes=1 --ntasks=1 --cpus-per-task=4 --time=01:00:00 bash -l
-./scripts/sonic/build_leosim.sh
+ns3/contrib/leosim/utils/sonic/build_leosim.sh
 exit
 ```
 
-If Sonic requires an account or partition, add `--account=YOUR_ACCOUNT` and/or
-`--partition=YOUR_PARTITION` to `srun` and `sbatch`. Do not guess these values;
-check them with `sacctmgr show assoc user=$USER` and `sinfo` or use the values
-from Research IT.
+Add the account/partition arguments assigned to you by Sonic where required.
 
-## 3. Submit the nine metrics in parallel
+## Submit
 
-Slurm creates the log directory before the script starts, so create it before
-submission:
+Slurm opens output files before the job script starts, so create `logs` first:
 
 ```bash
 cd ~/LeoSim
 mkdir -p logs
-sbatch scripts/sonic/run_leosim_routing.sbatch
+sbatch ns3/contrib/leosim/utils/sonic/run_leosim_routing.sbatch
 ```
 
-To put results on assigned scratch storage:
+Use assigned scratch storage for the 15-run output, including the preprocessed
+position CSV:
 
 ```bash
-mkdir -p /YOUR/SCRATCH/LeoSim-results
-sbatch --export=ALL,RESULTS_ROOT=/YOUR/SCRATCH/LeoSim-results/rp1-pilot \
-  scripts/sonic/run_leosim_routing.sbatch
+mkdir -p /YOUR/SCRATCH/leosim-routing
+sbatch --export=ALL,RESULTS_ROOT=/YOUR/SCRATCH/leosim-routing \
+  ns3/contrib/leosim/utils/sonic/run_leosim_routing.sbatch
 ```
 
-Useful controls:
+Useful optional overrides include:
+
+```bash
+sbatch --export=ALL,NUM_UES=4,NUM_SERVERS=4,TCP_RATE=500Kbps \
+  ns3/contrib/leosim/utils/sonic/run_leosim_routing.sbatch
+```
+
+`NUM_UES=0` and `NUM_SERVERS=0` mean all loaded endpoints. The array throttle
+is `%10`; reduce it if `sacct` shows excessive memory pressure. Override the
+position resolution with `TLE_TIMESTEP` or converter parallelism with
+`TLE_WORKERS` when needed. `TLE_PYTHON` can select another Python environment
+that already contains NumPy and Skyfield.
+
+Monitor and inspect jobs with:
 
 ```bash
 squeue -u "$USER"
 sacct -j JOB_ID --format=JobID,State,Elapsed,MaxRSS,TotalCPU,ExitCode
-scancel JOB_ID
 ```
-
-Results are grouped by metric under `results/rp1-routing/JOB_ID/` by default.
-The `%9` in `#SBATCH --array=0-8%9` caps simultaneous tasks at nine. For a
-larger future matrix, keep a concurrency cap (for example `%20`) rather than
-launching every simulation at once.
-
-## Research-plan gap before the full campaign
-
-The present example is a deterministic, static eight-node routing calculation.
-It has no random seed, 24-hour duration, traffic class/load, failure rate,
-topology selection, or full-scale constellation arguments. Repeating it for
-multiple seeds would therefore produce duplicate rows. Before launching the
-full study, extend one scenario executable to accept those factors and write
-network, routing, reliability, and resource KPIs. Then map a manifest row (not
-a fragile hard-coded arithmetic product) to each Slurm array task and use
-common random seeds across routing metrics for paired comparisons.
