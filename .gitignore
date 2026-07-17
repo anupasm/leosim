@@ -16,6 +16,6 @@ __pycache__/
 .DS_Store
 *.tmp
 CMakeFiles/*
-data*/
+data-*/
 
 data/prepro/*
