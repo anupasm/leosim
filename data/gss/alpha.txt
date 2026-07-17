@@ -1,7 +1,1 @@
-alpha_Yellowknife_Ground_Station,62.4539717,-114.3717886,10.0
-alpha_Iqaluit_Ground_Station,63.7570222,-68.5450017,10.0
-alpha_Punta_Arenas_Ground_Station,-53.1633778,-70.907705,10.0
-alpha_Wahiawa_Ground_Station,21.4959617,-158.0297748,10.0
-alpha_Izhevsk_Ground_Station,56.8618601,53.2324285,10.0
-alpha_Chandler_Ground_Station,33.3061605,-111.8412502,10.0
-alpha_Tempe_Gateway,33.4280646,-111.9404185,10.0
+alpha_Nairobi,-1.286389,36.817223,1795.0
