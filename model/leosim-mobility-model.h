@@ -154,6 +154,7 @@ class LeoSimMobilityModel : public MobilityModel
     void SetVelocityCalculation(bool enable);
 
   protected:
+    Ptr<MobilityModel> Copy() const override;
     Vector DoGetPosition() const override;
     void DoSetPosition(const Vector& position) override;
     Vector DoGetVelocity() const override;

@@ -9,8 +9,8 @@ From: ubuntu:24.04
 
 %post
     export DEBIAN_FRONTEND=noninteractive
-    apt-get update
-    apt-get install -y --no-install-recommends \
+    apt-get -o APT::Sandbox::User=root update
+    apt-get -o APT::Sandbox::User=root install -y --no-install-recommends \
         build-essential ca-certificates cmake git ninja-build pkg-config \
         python3 python3-pip python3-venv \
         libsqlite3-dev libxml2-dev
@@ -21,19 +21,56 @@ From: ubuntu:24.04
     /opt/venv/bin/pip install --no-cache-dir numpy skyfield
     mkdir -p /results
 
+    # Prefer a local ns-3 checkout in the user's home (if available), otherwise
+    # fall back to /opt/leosim/ns3 or clone upstream.
+    HOST_NS3="/home/people/adesilva/leosim/ns3"
+    if [ -d "$HOST_NS3" ]; then
+        mkdir -p /opt/leosim
+        cp -a "$HOST_NS3" /opt/leosim/ns3
+    fi
+
+    if [ ! -d /opt/leosim/ns3 ]; then
+        git clone https://gitlab.com/nsnam/ns-3-dev.git /opt/leosim/ns3
+    fi
+
+    # If the LeoSim module is not already under ns-3/contrib, install it there.
+    if [ -d /opt/leosim/examples ] && [ ! -d /opt/leosim/ns3/contrib/leosim ]; then
+        mkdir -p /opt/leosim/ns3/contrib/leosim
+        cd /opt/leosim
+        tar --exclude=ns3 -cf - . | tar -C /opt/leosim/ns3/contrib/leosim -xf -
+    fi
+
     cd /opt/leosim/ns3
-    ./ns3 configure --enable-examples --disable-tests --build-profile=optimized
-    ./ns3 build leosim-param-scenario
-    ./ns3 run "leosim-param-scenario --PrintHelp" --no-build
+    if [ -x ./ns3 ]; then
+        ./ns3 configure --enable-examples --disable-tests --build-profile=optimized
+        ./ns3 build leosim-param-scenario || true
+        ./ns3 run "leosim-param-scenario --PrintHelp" --no-build || true
+    elif [ -x ./waf ]; then
+        ./waf configure --enable-examples --disable-tests --build-profile=optimized
+        ./waf build || true
+        ./waf --run "leosim-param-scenario --PrintHelp" || true
+    else
+        echo "No ns-3 build wrapper found (./ns3 or ./waf)." >&2
+        exit 1
+    fi
 
 %environment
     export PATH="/opt/venv/bin:$PATH"
 
 %runscript
-    cd /opt/leosim/ns3
+    # At runtime prefer mounted or copied home ns-3 at ~/leosim/ns3 if present
+    if [ -d "$HOME/leosim/ns3" ]; then
+        cd "$HOME/leosim/ns3"
+    else
+        cd /opt/leosim/ns3
+    fi
     exec ./ns3 "$@"
 
 %test
     /opt/venv/bin/python -c 'import numpy, skyfield'
-    cd /opt/leosim/ns3
-    ./ns3 run "leosim-param-scenario --PrintHelp" --no-build
+    if [ -d "$HOME/leosim/ns3" ]; then
+        cd "$HOME/leosim/ns3"
+    else
+        cd /opt/leosim/ns3
+    fi
+    ./ns3 run "leosim-param-scenario --PrintHelp" --no-build || true

@@ -3,10 +3,20 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
-#SBATCH --time=06:00:00
-#SBATCH --array=0-14%10
+#SBATCH --time=24:00:00
+#SBATCH --array=0-4%10
 #SBATCH --output=logs/%x-%A_%a.out
 #SBATCH --error=logs/%x-%A_%a.err
+
+# To enable email notifications, either submit with `--mail-user`/`--mail-type`
+# options to `sbatch` or uncomment and set the following two lines below.
+# Example submit that sends mail on job begin, end, and failure:
+#   EMAIL=you@example.com \
+#   sbatch --mail-user="$EMAIL" --mail-type=BEGIN,END,FAIL \
+#     ns3/contrib/leosim/utils/sonic/run_leosim_routing.sbatch
+# Uncomment and edit to hardcode notifications in the script itself:
+#SBATCH --mail-user=anupa.desilva@ucd.ie
+#SBATCH --mail-type=BEGIN,END,FAIL
 
 set -euo pipefail
 
@@ -18,8 +28,8 @@ fi
 # Matrix: 5 metrics x 1 constellation size x 1 duration x 3 update intervals.
 METRICS=(hop distance path-loss snr signal-strength)
 SATELLITE_COUNTS=(11514)
-SIM_TIMES=(1800)
-UPDATE_INTERVALS=(5 10 30)
+SIM_TIMES=(120)
+UPDATE_INTERVALS=(5)
 
 REPO_ROOT="${REPO_ROOT:-${SLURM_SUBMIT_DIR}}"
 SIF="${SIF:-${REPO_ROOT}/leosim.sif}"
@@ -54,6 +64,7 @@ num_ues="${NUM_UES:-0}"
 num_servers="${NUM_SERVERS:-0}"
 all_to_all="${ALL_TO_ALL_TRAFFIC:-1}"
 tcp_rate="${TCP_RATE:-1Mbps}"
+verbose="${VERBOSE:-1}"
 statistics_interval="${STATISTICS_INTERVAL:-1}"
 max_isl_neighbors="${MAX_ISL_NEIGHBORS:-4}"
 tle_timestep="${TLE_TIMESTEP:-5}"
@@ -122,6 +133,7 @@ scenario+=" --tcpRate=${tcp_rate}"
 scenario+=" --enableStatistics=1"
 scenario+=" --statisticsInterval=${statistics_interval}"
 scenario+=" --enableRouteLogging=1"
+scenario+=" --verbose=${verbose}"
 scenario+=" --enableVisualization=0"
 scenario+=" --writeFlowMonitor=1"
 scenario+=" --outputPrefix=${container_prefix}"

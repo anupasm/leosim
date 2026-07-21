@@ -296,6 +296,22 @@ LeoSimMobilityModel::InterpolatePosition(const LeoSimWaypoint& wp1,
     return position;
 }
 
+Ptr<MobilityModel>
+LeoSimMobilityModel::Copy() const
+{
+    Ptr<LeoSimMobilityModel> copy = CreateObject<LeoSimMobilityModel>();
+    copy->SetNodeType(m_nodeType);
+    copy->SetNodeId(m_nodeId);
+    copy->SetNodeName(m_nodeName);
+    copy->SetWaypoints(m_waypoints);
+    copy->SetVelocityCalculation(m_calculateVelocity);
+    copy->m_position = m_position;
+    copy->m_velocity = m_velocity;
+    copy->m_currentWaypoint = m_currentWaypoint;
+    copy->m_active = m_active;
+    return copy;
+}
+
 Vector
 LeoSimMobilityModel::DoGetPosition() const
 {

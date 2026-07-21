@@ -1,11 +1,12 @@
 # Running the LeoSim routing sweep on Sonic
 
-This directory runs `leosim-param-scenario` as a 15-task Slurm array:
+This directory runs `leosim-param-scenario` as a 5-task Slurm array (indices
+0..4):
 
-- metrics: hop, distance, path loss, SNR, signal strength;
+- metrics: hop distance, path-loss, SNR, signal-strength;
 - satellites: all 11,514 catalog satellites;
-- duration: 1800 seconds (30 minutes);
-- dynamic-routing intervals: 5, 10, and 30 seconds.
+- duration: 1200 seconds by default (see `SIM_TIMES` in the job script);
+- dynamic-routing intervals: 5 seconds (see `UPDATE_INTERVALS` in the job script).
 
 The compute job runs from `leosim.sif`; ns-3, LeoSim, the compiled scenario,
 Python, NumPy, Skyfield, the converter, and TLE inputs are embedded in that
@@ -129,3 +130,45 @@ Monitor and inspect jobs with:
 squeue -u "$USER"
 sacct -j JOB_ID --format=JobID,State,Elapsed,MaxRSS,TotalCPU,ExitCode
 ```
+
+## Cancel jobs
+
+To cancel the entire array job (all tasks), use the array job ID:
+
+```bash
+scancel JOB_ID
+```
+
+To cancel a single array element, use the job array element identifier (the
+array task shown by `squeue`/`sacct`, e.g. `629746_7`):
+
+```bash
+scancel 629746_7
+```
+
+If you accidentally submitted a larger array than intended, cancel it and
+resubmit with the corrected `--array=0-4` (or adjust the parameter arrays in
+`run_leosim_routing.sbatch` to enlarge the search matrix).
+
+## Email notifications
+
+You can request email notifications when jobs start, end, or fail. Two
+approaches are supported:
+
+- Preferred (dynamic): export your address and pass `--mail-user`/`--mail-type`
+  to `sbatch` at submission time. Example:
+
+```bash
+EMAIL=you@example.com
+sbatch --mail-user="$EMAIL" --mail-type=BEGIN,END,FAIL \
+  ns3/contrib/leosim/utils/sonic/run_leosim_routing.sbatch
+```
+
+- Static (edit-in-place): uncomment and set the `#SBATCH --mail-user` and
+  `#SBATCH --mail-type` lines near the top of
+  `ns3/contrib/leosim/utils/sonic/run_leosim_routing.sbatch`.
+
+Note: `BEGIN`, `END`, and `FAIL` are common mail types; change them as
+desired (for example, `ALL` to receive everything). Some sites support
+additional flags for array-task-specific notifications — check your cluster's
+Slurm documentation if you need per-task emails.
