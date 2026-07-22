@@ -27,8 +27,8 @@ fi
 
 # Matrix: 5 metrics x 1 constellation size x 1 duration x 3 update intervals.
 METRICS=(hop distance path-loss snr signal-strength)
-SATELLITE_COUNTS=(11514)
-SIM_TIMES=(120)
+SATELLITE_COUNTS=(1000)
+SIM_TIMES=(1200)
 UPDATE_INTERVALS=(5)
 
 REPO_ROOT="${REPO_ROOT:-${SLURM_SUBMIT_DIR}}"

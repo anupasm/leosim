@@ -10,6 +10,7 @@
 #include "ns3/core-module.h"
 #include "ns3/flow-monitor-module.h"
 #include "ns3/internet-module.h"
+#include "ns3/leosim-beam-manager-helper.h"
 #include "ns3/leosim-channel-helper.h"
 #include "ns3/leosim-channel-model.h"
 #include "ns3/leosim-device-installer.h"
@@ -25,6 +26,7 @@
 #include "ns3/network-module.h"
 #include "ns3/point-to-point-module.h"
 
+#include <chrono>
 #include <iomanip>
 #include <iostream>
 #include <string>
@@ -33,6 +35,60 @@ using namespace ns3;
 
 namespace
 {
+
+class DebugTimer
+{
+  public:
+    DebugTimer()
+        : m_start(std::chrono::steady_clock::now()),
+          m_last(m_start)
+    {
+    }
+
+    void Log(const std::string& operation)
+    {
+        const auto now = std::chrono::steady_clock::now();
+        const double stepSeconds = std::chrono::duration<double>(now - m_last).count();
+        const double totalSeconds = std::chrono::duration<double>(now - m_start).count();
+        std::cout << "[timing] " << operation << " completed; step=" << std::fixed
+                  << std::setprecision(3) << stepSeconds << "s, total=" << totalSeconds
+                  << "s, sim=" << Simulator::Now().GetSeconds() << "s" << std::endl;
+        m_last = now;
+    }
+
+    void Begin(const std::string& operation) const
+    {
+        const double totalSeconds =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - m_start).count();
+        std::cout << "[timing] BEGIN " << operation << "; total=" << std::fixed
+                  << std::setprecision(3) << totalSeconds << "s, sim="
+                  << Simulator::Now().GetSeconds() << "s" << std::endl;
+    }
+
+  private:
+    std::chrono::steady_clock::time_point m_start;
+    std::chrono::steady_clock::time_point m_last;
+};
+
+struct SimulationProgress
+{
+    std::chrono::steady_clock::time_point wallStart;
+};
+
+void
+LogSimulationProgress(Time interval, Time stopTime, SimulationProgress* progress)
+{
+    const double wallSeconds = std::chrono::duration<double>(
+                                   std::chrono::steady_clock::now() - progress->wallStart)
+                                   .count();
+    std::cout << "[timing] simulation progress; sim=" << std::fixed << std::setprecision(3)
+              << Simulator::Now().GetSeconds() << "/" << stopTime.GetSeconds()
+              << "s, run-wall=" << wallSeconds << "s" << std::endl;
+    if (Simulator::Now() + interval <= stopTime)
+    {
+        Simulator::Schedule(interval, &LogSimulationProgress, interval, stopTime, progress);
+    }
+}
 
 LeoSimRoutingCalculator::RoutingMetric
 ParseRoutingMetric(const std::string& value)
@@ -264,6 +320,7 @@ main(int argc, char* argv[])
     bool enableStatistics = true;
     double statisticsInterval = 1.0;
     bool enableRouteLogging = true;
+    double progressLogInterval = 5.0;
 
     CommandLine cmd;
     cmd.AddValue("satellites", "Path to satellite mobility trace or position CSV", satelliteFile);
@@ -316,7 +373,13 @@ main(int argc, char* argv[])
     cmd.AddValue("enableRouteLogging",
                  "Write selected paths and path-specific routing metrics",
                  enableRouteLogging);
+    cmd.AddValue("progressLogInterval",
+                 "Simulation-time interval for wall-clock progress logs; 0 disables",
+                 progressLogInterval);
     cmd.Parse(argc, argv);
+
+    DebugTimer timer;
+    timer.Log("command-line parsing");
 
     if (enableVisualization && visualizationInterval <= 0.0)
     {
@@ -330,6 +393,7 @@ main(int argc, char* argv[])
 
     Time::SetResolution(Time::NS);
 
+    timer.Begin("input data loading");
     LeoSimLoaderHelper loaderHelper;
     loaderHelper.SetVerbose(verbose);
     if (useTrace)
@@ -348,6 +412,7 @@ main(int argc, char* argv[])
     {
         loaderHelper.LoadGroundDevicesFromDataDirectory(leosimDataDir);
     }
+    timer.Log("input data loading");
 
     Ptr<LeoSimLoader> loader = loaderHelper.GetLoader();
     auto serverDeviceIds = loader->GetGroundDeviceIdsByType("SERVER");
@@ -388,7 +453,9 @@ main(int argc, char* argv[])
     satelliteNodes.Create(numSatellites);
     serverNodes.Create(numServers);
     ueNodes.Create(numUes);
+    timer.Log("node creation");
 
+    timer.Begin("mobility installation");
     LeoSimMobilityHelper mobilityHelper;
     mobilityHelper.SetLoader(loader);
     mobilityHelper.SetVerbose(verbose);
@@ -414,7 +481,9 @@ main(int argc, char* argv[])
                                  loader->GetGroundDevicePosition(id));
     }
     mobilityHelper.StartAll();
+    timer.Log("mobility installation and startup");
 
+    timer.Begin("operator model construction");
     loader->LoadSatelliteOperatorsFromDataDirectory(leosimDataDir);
     LeoSimOperatorHelper opHelper;
     opHelper.SetLoader(loader);
@@ -422,6 +491,7 @@ main(int argc, char* argv[])
     opHelper.RegisterSatellites(satelliteNodes);
     opHelper.RegisterGroundDevices(ueNodes, serverNodes);
     Ptr<LeoSimOperatorModel> operatorModel = opHelper.Build();
+    timer.Log("operator model construction");
 
     LeoSimVisualizationHelper visualizationHelper;
     const std::string positionFile = outputPrefix + "-positions.csv";
@@ -437,6 +507,7 @@ main(int argc, char* argv[])
         visualizationHelper.EnablePacketGeolocationLogging(true);
         visualizationHelper.SetLoaderHelper(loaderHelper);
         visualizationHelper.Initialize();
+        timer.Log("visualization initialization");
     }
 
     NodeContainer allGroundNodes;
@@ -444,6 +515,7 @@ main(int argc, char* argv[])
     allGroundNodes.Add(serverNodes);
 
     LeoSimChannelHelper accessChannelHelper;
+    timer.Begin("access channel creation");
     accessChannelHelper.SetMinElevationAngle(minElevation);
     accessChannelHelper.SetMaxLinkDistance(accessMaxDistance);
     accessChannelHelper.SetUpdateInterval(Seconds(1.0));
@@ -451,10 +523,12 @@ main(int argc, char* argv[])
     Ptr<LeoSimChannelModel> accessChannel =
         accessChannelHelper.CreateChannels(satelliteNodes, allGroundNodes);
     accessChannel->SetOperatorModel(operatorModel);
+    timer.Log("access channel creation");
 
     Ptr<LeoSimChannelModel> islChannel;
     if (enableIsl)
     {
+        timer.Begin("ISL channel creation");
         LeoSimChannelHelper islChannelHelper;
         islChannelHelper.SetIslFrequency(islFrequency);
         islChannelHelper.SetIslMaxDistance(islMaxDistance);
@@ -467,7 +541,7 @@ main(int argc, char* argv[])
                          : islChannelHelper.CreateIslNearestNeighborMesh(satelliteNodes,
                                                                          maxIslNeighbors);
         islChannel->SetOperatorModel(operatorModel);
-        std::cout << "MAIN: islChannel created and operator model set" << std::endl;
+        timer.Log("ISL channel creation");
     }
 
     if (enableVisualization)
@@ -479,10 +553,10 @@ main(int argc, char* argv[])
                                                     ueNodes,
                                                     visualizationInterval,
                                                     simTime);
-        std::cout << "MAIN: scheduled visualization logging" << std::endl;
     }
 
     LeoSimDeviceInstaller accessInstaller;
+    timer.Begin("access device installation");
     accessInstaller.SetChannelModel(accessChannel);
     accessInstaller.SetOperatorModel(operatorModel);
     accessInstaller.SetDeviceDataRate(accessDataRate);
@@ -490,14 +564,15 @@ main(int argc, char* argv[])
     accessInstaller.SetDeviceMtu(1500);
     accessInstaller.SetVerbose(verbose);
     NetDeviceContainer accessDevices = accessInstaller.Install(satelliteNodes, allGroundNodes);
-    std::cout << "MAIN: access devices installed: " << accessDevices.GetN() << std::endl;
     accessInstaller.ApplySharingRates(accessDevices);
     accessInstaller.EnableLinkStateCallbacks(accessChannel);
+    timer.Log("access device installation");
 
     NetDeviceContainer islDevices;
     LeoSimDeviceInstaller islInstaller;
     if (enableIsl && islChannel)
     {
+        timer.Begin("ISL device installation");
         islInstaller.SetChannelModel(islChannel);
         islInstaller.SetOperatorModel(operatorModel);
         islInstaller.SetDeviceDataRate(islDataRate);
@@ -505,30 +580,34 @@ main(int argc, char* argv[])
         islInstaller.SetDeviceMtu(1500);
         islInstaller.SetVerbose(verbose);
         islDevices = islInstaller.Install(satelliteNodes, NodeContainer());
-        std::cout << "MAIN: isl devices installed: " << islDevices.GetN() << std::endl;
         islInstaller.ApplySharingRates(islDevices);
         islInstaller.EnableLinkStateCallbacks(islChannel);
+        timer.Log("ISL device installation");
     }
 
+    timer.Begin("internet stack installation");
     InternetStackHelper stack;
     stack.Install(satelliteNodes);
     stack.Install(serverNodes);
     stack.Install(ueNodes);
+    timer.Log("internet stack installation");
 
+    timer.Begin("IPv4 address assignment");
     Ipv4AddressHelper accessIpv4;
     accessIpv4.SetBase(Ipv4Address("10.0.0.0"), Ipv4Mask("255.255.255.252"));
     AssignPerLinkSubnets(accessDevices, accessIpv4);
-    std::cout << "MAIN: assigned access subnets" << std::endl;
 
     if (enableIsl && islDevices.GetN() > 0)
     {
         Ipv4AddressHelper islIpv4;
         islIpv4.SetBase(Ipv4Address("10.128.0.0"), Ipv4Mask("255.255.255.252"));
         AssignPerLinkSubnets(islDevices, islIpv4);
-        std::cout << "MAIN: assigned ISL subnets" << std::endl;
     }
+    timer.Log("IPv4 address assignment");
 
+    timer.Begin("global routing table population");
     Ipv4GlobalRoutingHelper::PopulateRoutingTables();
+    timer.Log("global routing table population");
 
     NodeContainer allNodes;
     allNodes.Add(satelliteNodes);
@@ -548,7 +627,43 @@ main(int argc, char* argv[])
     Ptr<LeoSimRoutingCalculator> routingCalculator =
         routingHelper.CreateUnifiedRoutingCalculator(accessChannel, islChannel, verbose);
     routingCalculator->SetOperatorModel(operatorModel);
-    std::cout << "MAIN: created routing calculator" << std::endl;
+    timer.Log("routing calculator construction");
+
+    // === Beam Management & Handover (3GPP NTN CHO) ===
+    LeoSimBeamManagerHelper beamHelper;
+    beamHelper.SetVerbose(verbose);
+    beamHelper.SetChannelModel(accessChannel);
+    if (enableIsl && islChannel)
+    {
+        beamHelper.SetIslChannelModel(islChannel);
+    }
+    beamHelper.SetRoutingCalculator(routingCalculator);
+    beamHelper.SetLoader(loader);
+    beamHelper.SetHandoverMode(LEOSIM_HO_MODE_CHO);
+    beamHelper.SetTtt(Seconds(1.0));
+    beamHelper.SetT310(Seconds(1.0));
+    beamHelper.SetN310(3);
+    beamHelper.SetN311(3);
+    beamHelper.SetA3Offset(3.0);
+    beamHelper.SetA4Threshold(-110.0);
+    beamHelper.SetTteThreshold(Seconds(30.0));
+    beamHelper.SetSinrThreshold(-10.0);
+    beamHelper.SetChoPreparationDelay(Seconds(0.1));
+    beamHelper.SetChoExecutionDelay(Seconds(0.15));
+    beamHelper.SetTopsisWeights(0.30, 0.25, 0.20, 0.15, 0.10, 0.05, 0.05);
+    beamHelper.SetMaxCandidates(3);
+    beamHelper.SetUpdateInterval(MilliSeconds(1000.0));
+    beamHelper.EnableLoadBalancing(true);
+    beamHelper.EnableHandoverBuffering(true);
+
+    timer.Begin("beam manager installation");
+    Ptr<LeoSimBeamManager> beamManager =
+        beamHelper.Install(allGroundNodes, satelliteNodes, Seconds(simTime));
+    beamManager->SetOperatorModel(operatorModel);
+    routingCalculator->SetBeamManager(beamManager);
+    timer.Log("beam manager installation");
+
+    timer.Begin("routing setup");
     if (enableDynamicRouting)
     {
         routingHelper.EnableDynamicRouting(routingCalculator,
@@ -558,7 +673,6 @@ main(int argc, char* argv[])
                                            simTime,
                                            verbose,
                                            routingMetric);
-        std::cout << "MAIN: enabled dynamic routing" << std::endl;
     }
     else
     {
@@ -567,9 +681,23 @@ main(int argc, char* argv[])
                                       routingDestinations,
                                       verbose,
                                       routingMetric);
-        std::cout << "MAIN: set static routes" << std::endl;
     }
 
+    // Reactive routing: update routes when links change or handover occurs
+    routingHelper.EnableReactiveLinkTriggeredRouting(
+        routingCalculator,
+        allNodes,
+        routingDestinations,
+        accessChannel,
+        enableIsl ? islChannel : nullptr,
+        MilliSeconds(200),
+        verbose);
+    beamManager->SetAccessStateChangeCallback(
+        MakeCallback(&LeoSimRoutingCalculatorHelper::RequestRouteRefresh,
+                     &routingHelper));
+    timer.Log("routing setup");
+
+    timer.Begin("traffic application installation");
     ApplicationContainer trafficApps;
     if (allToAllTraffic)
     {
@@ -580,7 +708,6 @@ main(int argc, char* argv[])
                                          appStop,
                                          tcpRate,
                                          tcpPacketSize);
-        std::cout << "MAIN: installed all-to-all TCP flows" << std::endl;
     }
     else
     {
@@ -593,14 +720,16 @@ main(int argc, char* argv[])
                                            appStop,
                                            tcpRate,
                                            tcpPacketSize);
-        std::cout << "MAIN: installed single TCP flow" << std::endl;
     }
     (void)trafficApps;
+    timer.Log("traffic application installation");
 
+    timer.Begin("FlowMonitor installation");
     FlowMonitorHelper flowmonHelper;
     Ptr<FlowMonitor> flowMonitor = flowmonHelper.InstallAll();
     Ptr<Ipv4FlowClassifier> classifier =
         DynamicCast<Ipv4FlowClassifier>(flowmonHelper.GetClassifier());
+    timer.Log("FlowMonitor installation");
 
     Ptr<LeoSimStatisticsHelper> statistics;
     const std::string statisticsCsvFile = outputPrefix + "-statistics.csv";
@@ -619,6 +748,7 @@ main(int argc, char* argv[])
             std::cerr << "Warning: failed to attach statistics to ISL channel traces" << std::endl;
         }
         statistics->StartPeriodicSampling(Seconds(statisticsInterval), statisticsCsvFile);
+        timer.Log("statistics setup");
     }
 
     if (enableVisualization)
@@ -626,10 +756,21 @@ main(int argc, char* argv[])
         visualizationHelper.InstallPacketLogging(satelliteNodes, serverNodes, ueNodes);
     }
 
+    SimulationProgress simulationProgress{std::chrono::steady_clock::now()};
+    if (progressLogInterval > 0.0 && progressLogInterval <= simTime)
+    {
+        Simulator::Schedule(Seconds(progressLogInterval),
+                            &LogSimulationProgress,
+                            Seconds(progressLogInterval),
+                            Seconds(simTime),
+                            &simulationProgress);
+    }
+    timer.Begin("Simulator::Run");
     Simulator::Stop(Seconds(simTime));
-    std::cout << "MAIN: starting Simulator::Run()" << std::endl;
     Simulator::Run();
+    timer.Log("Simulator::Run");
 
+    timer.Begin("result post-processing");
     PrintFlowMonitorSummary(flowMonitor, classifier);
     if (writeFlowMonitor)
     {
@@ -657,7 +798,9 @@ main(int argc, char* argv[])
                   << " --packets " << packetFile
                   << " --output " << outputPrefix << "-visualization.html" << std::endl;
     }
+    timer.Log("result post-processing");
 
     Simulator::Destroy();
+    timer.Log("Simulator::Destroy");
     return 0;
 }
