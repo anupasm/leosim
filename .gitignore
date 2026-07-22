@@ -19,3 +19,4 @@ CMakeFiles/*
 data-*/
 
 data/prepro/*
+logs/*
