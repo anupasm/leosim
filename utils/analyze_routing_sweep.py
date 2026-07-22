@@ -27,8 +27,23 @@ def number(value, default=0.0):
 
 def resolve_output(base: Path, value: str, suffix: str = "") -> Path:
     path = Path(value + suffix)
+    # If the given path is absolute but doesn't exist on this host (for
+    # example the manifest recorded container paths like `/results/...`),
+    # attempt to map it into the provided `base` results tree by trying a
+    # few reasonable candidates.
     if path.is_absolute():
-        return path
+        if path.exists():
+            return path
+        # Drop the leading root and try to resolve relative to cwd and the
+        # provided base paths. If the absolute path begins with a
+        # container-mounted prefix like 'results', strip that component so
+        # that '/results/metric-...' maps to '<results_dir>/metric-...'.
+        rel = Path(*path.parts[1:]) if len(path.parts) > 1 else Path()
+        if rel.parts and rel.parts[0] == "results":
+            rel = Path(*rel.parts[1:]) if len(rel.parts) > 1 else Path()
+        candidates = (Path.cwd() / rel, base / rel, base.parent / rel)
+        return next((candidate for candidate in candidates if candidate.exists()), candidates[1])
+
     candidates = (Path.cwd() / path, base.parent / path, base / path)
     return next((candidate for candidate in candidates if candidate.exists()), candidates[1])
 
@@ -61,8 +76,14 @@ def read_route_metrics(filename: Path, satellites: int) -> dict:
 def load_runs(results_dir: Path) -> list[dict]:
     manifest = results_dir / "manifest.csv"
     runs = []
-    with manifest.open(newline="") as stream:
-        items = list(csv.DictReader(stream))
+    if manifest.exists():
+        with manifest.open(newline="") as stream:
+            items = list(csv.DictReader(stream))
+    else:
+        # Fall back to discovering completed run directories when a manifest
+        # is missing (for example runs produced directly on the host or by
+        # other tooling). This keeps analysis robust to missing manifests.
+        items = []
 
     # Also discover completed run directories. This makes analysis resilient to
     # an interrupted/truncated manifest when all per-run outputs were completed.
@@ -96,8 +117,32 @@ def load_runs(results_dir: Path) -> list[dict]:
         statistics_file = Path(str(prefix) + "-statistics.json")
         route_file = ((Path(item["_run_dir"]) / "result-routes.csv") if "_run_dir" in item
                       else resolve_output(results_dir, item["route_log_file"]))
-        with statistics_file.open() as stats_stream:
-            stats = json.load(stats_stream)
+        if statistics_file.exists():
+            with statistics_file.open() as stats_stream:
+                stats = json.load(stats_stream)
+        else:
+            # Fallback: some runs only provide a CSV statistics file. Read the
+            # final row and synthesise the `network` summary expected by the
+            # rest of the script.
+            csv_stats = Path(str(prefix) + "-statistics.csv")
+            if csv_stats.exists():
+                with csv_stats.open(newline="") as csv_stream:
+                    reader = list(csv.DictReader(csv_stream))
+                last = reader[-1] if reader else {}
+                stats = {
+                    "network": {
+                        "pdr": number(last.get("pdr", 0)),
+                        "throughput_mbps": number(last.get("throughput_mbps", 0)),
+                        "delay_ms": number(last.get("delay_ms", 0)),
+                        "jitter_ms": number(last.get("jitter_ms", 0)),
+                        "mean_hop_count": number(last.get("hop_count", 0)),
+                        "tx_packets": int(float(last.get("tx_packets", 0))) if last.get("tx_packets") is not None else 0,
+                        "rx_packets": int(float(last.get("rx_packets", 0))) if last.get("rx_packets") is not None else 0,
+                        "lost_packets": int(float(last.get("lost_packets", 0))) if last.get("lost_packets") is not None else 0,
+                    }
+                }
+            else:
+                raise FileNotFoundError(f"Missing statistics file for run: {prefix}")
 
         network = stats["network"]
         satellites = int(item["satellites"])
