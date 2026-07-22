@@ -467,6 +467,7 @@ main(int argc, char* argv[])
                          : islChannelHelper.CreateIslNearestNeighborMesh(satelliteNodes,
                                                                          maxIslNeighbors);
         islChannel->SetOperatorModel(operatorModel);
+        std::cout << "MAIN: islChannel created and operator model set" << std::endl;
     }
 
     if (enableVisualization)
@@ -478,6 +479,7 @@ main(int argc, char* argv[])
                                                     ueNodes,
                                                     visualizationInterval,
                                                     simTime);
+        std::cout << "MAIN: scheduled visualization logging" << std::endl;
     }
 
     LeoSimDeviceInstaller accessInstaller;
@@ -488,6 +490,7 @@ main(int argc, char* argv[])
     accessInstaller.SetDeviceMtu(1500);
     accessInstaller.SetVerbose(verbose);
     NetDeviceContainer accessDevices = accessInstaller.Install(satelliteNodes, allGroundNodes);
+    std::cout << "MAIN: access devices installed: " << accessDevices.GetN() << std::endl;
     accessInstaller.ApplySharingRates(accessDevices);
     accessInstaller.EnableLinkStateCallbacks(accessChannel);
 
@@ -502,6 +505,7 @@ main(int argc, char* argv[])
         islInstaller.SetDeviceMtu(1500);
         islInstaller.SetVerbose(verbose);
         islDevices = islInstaller.Install(satelliteNodes, NodeContainer());
+        std::cout << "MAIN: isl devices installed: " << islDevices.GetN() << std::endl;
         islInstaller.ApplySharingRates(islDevices);
         islInstaller.EnableLinkStateCallbacks(islChannel);
     }
@@ -514,12 +518,14 @@ main(int argc, char* argv[])
     Ipv4AddressHelper accessIpv4;
     accessIpv4.SetBase(Ipv4Address("10.0.0.0"), Ipv4Mask("255.255.255.252"));
     AssignPerLinkSubnets(accessDevices, accessIpv4);
+    std::cout << "MAIN: assigned access subnets" << std::endl;
 
     if (enableIsl && islDevices.GetN() > 0)
     {
         Ipv4AddressHelper islIpv4;
         islIpv4.SetBase(Ipv4Address("10.128.0.0"), Ipv4Mask("255.255.255.252"));
         AssignPerLinkSubnets(islDevices, islIpv4);
+        std::cout << "MAIN: assigned ISL subnets" << std::endl;
     }
 
     Ipv4GlobalRoutingHelper::PopulateRoutingTables();
@@ -542,6 +548,7 @@ main(int argc, char* argv[])
     Ptr<LeoSimRoutingCalculator> routingCalculator =
         routingHelper.CreateUnifiedRoutingCalculator(accessChannel, islChannel, verbose);
     routingCalculator->SetOperatorModel(operatorModel);
+    std::cout << "MAIN: created routing calculator" << std::endl;
     if (enableDynamicRouting)
     {
         routingHelper.EnableDynamicRouting(routingCalculator,
@@ -551,6 +558,7 @@ main(int argc, char* argv[])
                                            simTime,
                                            verbose,
                                            routingMetric);
+        std::cout << "MAIN: enabled dynamic routing" << std::endl;
     }
     else
     {
@@ -559,6 +567,7 @@ main(int argc, char* argv[])
                                       routingDestinations,
                                       verbose,
                                       routingMetric);
+        std::cout << "MAIN: set static routes" << std::endl;
     }
 
     ApplicationContainer trafficApps;
@@ -571,6 +580,7 @@ main(int argc, char* argv[])
                                          appStop,
                                          tcpRate,
                                          tcpPacketSize);
+        std::cout << "MAIN: installed all-to-all TCP flows" << std::endl;
     }
     else
     {
@@ -583,6 +593,7 @@ main(int argc, char* argv[])
                                            appStop,
                                            tcpRate,
                                            tcpPacketSize);
+        std::cout << "MAIN: installed single TCP flow" << std::endl;
     }
     (void)trafficApps;
 
@@ -616,6 +627,7 @@ main(int argc, char* argv[])
     }
 
     Simulator::Stop(Seconds(simTime));
+    std::cout << "MAIN: starting Simulator::Run()" << std::endl;
     Simulator::Run();
 
     PrintFlowMonitorSummary(flowMonitor, classifier);

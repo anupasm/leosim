@@ -27,6 +27,7 @@
 #include <iomanip>
 #include <iostream>
 #include <map>
+#include <queue>
 #include <set>
 #include <tuple>
 #include <vector>
@@ -512,7 +513,6 @@ LeoSimChannelHelper::CreateIslMesh(NodeContainer satellites)
 
     Ptr<LeoSimChannelModel> channelModel = CreateObject<LeoSimChannelModel>();
     ConfigureChannelModel(channelModel);
-
     // Create ISL mesh
     uint32_t linkCount = channelModel->CreateIslMesh(satellites);
 
@@ -538,7 +538,7 @@ LeoSimChannelHelper::CreateIslNearestNeighborMesh(NodeContainer satellites, uint
     if (m_verbose)
     {
         NS_LOG_DEBUG("Created bounded ISL mesh with " << linkCount << " links between "
-                                                      << satellites.GetN() << " satellites");
+                     << satellites.GetN() << " satellites");
     }
 
     channelModel->StartUpdates();
@@ -604,69 +604,80 @@ LeoSimChannelHelper::AddNearestNeighborIslLinks(Ptr<LeoSimChannelModel> channelM
 
     const uint32_t numSatellites = satellites.GetN();
     const uint32_t candidateLimit = std::max<uint32_t>(16, maxNeighbors * 4);
+    const double maxDistanceSquared = m_islMaxDistance * m_islMaxDistance;
     std::map<std::pair<uint32_t, uint32_t>, double> uniqueCandidates;
+
+    (void)candidateLimit;
+    (void)maxDistanceSquared;
+
+    // GetObject() is comparatively expensive and this loop examines O(N^2)
+    // pairs. Cache mobility positions once rather than doing two object lookups
+    // for every pair.
+    std::vector<Vector> positions(numSatellites);
+    std::vector<bool> hasMobility(numSatellites, false);
+    for (uint32_t i = 0; i < numSatellites; ++i)
+    {
+        Ptr<MobilityModel> mobility = satellites.Get(i)->GetObject<MobilityModel>();
+        if (mobility)
+        {
+            positions[i] = mobility->GetPosition();
+            hasMobility[i] = true;
+        }
+    }
 
     // Keep only a small nearest-neighbor candidate set per satellite. This uses
     // O(N*k) storage rather than materializing the O(N^2) full mesh.
     for (uint32_t i = 0; i < numSatellites; ++i)
     {
-        Ptr<Node> sat = satellites.Get(i);
-        Ptr<MobilityModel> satMobility = sat->GetObject<MobilityModel>();
-        if (!satMobility)
+        if (!hasMobility[i])
         {
             continue;
         }
 
-        const Vector satPos = satMobility->GetPosition();
-        std::vector<std::pair<double, uint32_t>> neighbors;
-        neighbors.reserve(numSatellites - 1);
+        const Vector& satPos = positions[i];
+        // The largest retained candidate is at the top, so a closer candidate
+        // can replace it in O(log k) without allocating an N-element vector.
+        std::priority_queue<std::pair<double, uint32_t>> nearest;
 
         for (uint32_t j = 0; j < numSatellites; ++j)
         {
-            if (i == j)
+            if (i == j || !hasMobility[j])
             {
                 continue;
             }
 
-            Ptr<Node> peer = satellites.Get(j);
-            Ptr<MobilityModel> peerMobility = peer->GetObject<MobilityModel>();
-            if (!peerMobility)
-            {
-                continue;
-            }
-
-            const Vector peerPos = peerMobility->GetPosition();
+            const Vector& peerPos = positions[j];
             const double dx = peerPos.x - satPos.x;
             const double dy = peerPos.y - satPos.y;
             const double dz = peerPos.z - satPos.z;
-            const double distance = std::sqrt(dx * dx + dy * dy + dz * dz);
-            if (distance <= m_islMaxDistance)
+            const double distanceSquared = dx * dx + dy * dy + dz * dz;
+            if (distanceSquared <= maxDistanceSquared)
             {
-                neighbors.emplace_back(distance, j);
+                const auto candidate = std::make_pair(distanceSquared, j);
+                if (nearest.size() < candidateLimit)
+                {
+                    nearest.push(candidate);
+                }
+                else if (candidate < nearest.top())
+                {
+                    nearest.pop();
+                    nearest.push(candidate);
+                }
             }
         }
 
-        const uint32_t count = std::min<uint32_t>(candidateLimit, neighbors.size());
-        if (neighbors.size() > count)
-        {
-            std::nth_element(neighbors.begin(),
-                             neighbors.begin() + count,
-                             neighbors.end(),
-                             [](const auto& a, const auto& b) { return a.first < b.first; });
-            neighbors.resize(count);
-        }
-        std::sort(neighbors.begin(), neighbors.end(), [](const auto& a, const auto& b) {
-            return a.first < b.first;
-        });
+        (void)nearest;
 
-        for (uint32_t n = 0; n < count; ++n)
+        while (!nearest.empty())
         {
-            const uint32_t j = neighbors[n].second;
+            const double distance = std::sqrt(nearest.top().first);
+            const uint32_t j = nearest.top().second;
+            nearest.pop();
             const auto pair = std::make_pair(std::min(i, j), std::max(i, j));
-            auto [it, inserted] = uniqueCandidates.emplace(pair, neighbors[n].first);
+            auto [it, inserted] = uniqueCandidates.emplace(pair, distance);
             if (!inserted)
             {
-                it->second = std::min(it->second, neighbors[n].first);
+                it->second = std::min(it->second, distance);
             }
         }
     }
@@ -684,6 +695,7 @@ LeoSimChannelHelper::AddNearestNeighborIslLinks(Ptr<LeoSimChannelModel> channelM
         }
         return std::tie(a.first, a.second) < std::tie(b.first, b.second);
     });
+    (void)candidates;
 
     std::vector<uint32_t> parent(numSatellites);
     std::vector<uint32_t> rank(numSatellites, 0);
@@ -749,6 +761,7 @@ LeoSimChannelHelper::AddNearestNeighborIslLinks(Ptr<LeoSimChannelModel> channelM
             select(edge);
         }
     }
+
     // Capacity pass: fill unused terminals with the shortest remaining edges.
     for (const Candidate& edge : candidates)
     {
