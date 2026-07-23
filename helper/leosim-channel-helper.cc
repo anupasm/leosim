@@ -17,6 +17,7 @@
 
 #include "leosim-channel-helper.h"
 
+#include "ns3/leosim-mobility-model.h"
 #include "ns3/log.h"
 #include "ns3/mobility-model.h"
 #include "ns3/node-container.h"
@@ -167,10 +168,8 @@ LeoSimChannelHelper::AddGroundAccessLinks(Ptr<LeoSimChannelModel> channelModel,
         }
 
         const Vector groundPos = groundMobility->GetPosition();
-        std::vector<std::pair<double, uint32_t>> feasibleSatellites;
-        std::vector<std::pair<double, uint32_t>> fallbackSatellites;
-        feasibleSatellites.reserve(satellites.GetN());
-        fallbackSatellites.reserve(satellites.GetN());
+        std::vector<std::vector<Vector>> satellitePositions(satellites.GetN());
+        std::size_t epochs = 1;
 
         for (uint32_t s = 0; s < satellites.GetN(); ++s)
         {
@@ -181,38 +180,78 @@ LeoSimChannelHelper::AddGroundAccessLinks(Ptr<LeoSimChannelModel> channelModel,
                 continue;
             }
 
-            const Vector satPos = satMobility->GetPosition();
-            const double dx = satPos.x - groundPos.x;
-            const double dy = satPos.y - groundPos.y;
-            const double dz = satPos.z - groundPos.z;
-            const double distance = std::sqrt(dx * dx + dy * dy + dz * dz);
-            fallbackSatellites.emplace_back(distance, s);
-
-            if (distance <= m_maxLinkDistance &&
-                CalculateElevationAngle(groundPos, satPos) >= m_minElevationAngle)
+            Ptr<LeoSimMobilityModel> leoMobility =
+                satellite->GetObject<LeoSimMobilityModel>();
+            if (leoMobility)
             {
-                feasibleSatellites.emplace_back(distance, s);
+                const auto waypoints = leoMobility->GetWaypoints();
+                satellitePositions[s].reserve(waypoints.size());
+                for (const auto& waypoint : waypoints)
+                {
+                    satellitePositions[s].push_back(waypoint.position);
+                }
+            }
+            if (satellitePositions[s].empty())
+            {
+                satellitePositions[s].push_back(satMobility->GetPosition());
+            }
+            epochs = std::max(epochs, satellitePositions[s].size());
+        }
+
+        // Provision the union of the nearest visible satellites at every loaded
+        // trajectory epoch. Net devices and addresses must exist before the
+        // simulation starts; the channel model subsequently controls which of
+        // these candidate links is active at each instant.
+        std::set<uint32_t> selectedSatelliteIndices;
+        std::vector<std::pair<double, uint32_t>> initialFallback;
+        for (std::size_t epoch = 0; epoch < epochs; ++epoch)
+        {
+            std::vector<std::pair<double, uint32_t>> feasible;
+            for (uint32_t s = 0; s < satellites.GetN(); ++s)
+            {
+                if (satellitePositions[s].empty())
+                {
+                    continue;
+                }
+                const Vector& satPos = satellitePositions[s][
+                    std::min(epoch, satellitePositions[s].size() - 1)];
+                const double dx = satPos.x - groundPos.x;
+                const double dy = satPos.y - groundPos.y;
+                const double dz = satPos.z - groundPos.z;
+                const double distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+                if (epoch == 0)
+                {
+                    initialFallback.emplace_back(distance, s);
+                }
+                if (distance <= m_maxLinkDistance &&
+                    CalculateElevationAngle(groundPos, satPos) >= m_minElevationAngle)
+                {
+                    feasible.emplace_back(distance, s);
+                }
+            }
+            std::sort(feasible.begin(), feasible.end());
+            const uint32_t count = std::min<uint32_t>(maxLinks, feasible.size());
+            for (uint32_t n = 0; n < count; ++n)
+            {
+                selectedSatelliteIndices.insert(feasible[n].second);
             }
         }
 
-        std::sort(feasibleSatellites.begin(),
-                  feasibleSatellites.end(),
-                  [](const auto& a, const auto& b) {
-                      return a.first < b.first;
-                  });
-        std::sort(fallbackSatellites.begin(),
-                  fallbackSatellites.end(),
-                  [](const auto& a, const auto& b) {
-                      return a.first < b.first;
-                  });
-
-        const std::vector<std::pair<double, uint32_t>>& selectedSatellites =
-            feasibleSatellites.empty() ? fallbackSatellites : feasibleSatellites;
-
-        const uint32_t count = std::min<uint32_t>(maxLinks, selectedSatellites.size());
-        for (uint32_t n = 0; n < count; ++n)
+        // Retain the previous nearest-satellite fallback for datasets with no
+        // geometrically feasible access link at any sampled epoch.
+        if (selectedSatelliteIndices.empty() && !initialFallback.empty())
         {
-            channelModel->AddLink(satellites.Get(selectedSatellites[n].second), ground);
+            std::sort(initialFallback.begin(), initialFallback.end());
+            const uint32_t count = std::min<uint32_t>(maxLinks, initialFallback.size());
+            for (uint32_t n = 0; n < count; ++n)
+            {
+                selectedSatelliteIndices.insert(initialFallback[n].second);
+            }
+        }
+
+        for (uint32_t satelliteIndex : selectedSatelliteIndices)
+        {
+            channelModel->AddLink(satellites.Get(satelliteIndex), ground);
             linkCount++;
         }
     }

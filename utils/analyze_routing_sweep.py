@@ -48,13 +48,16 @@ def resolve_output(base: Path, value: str, suffix: str = "") -> Path:
     return next((candidate for candidate in candidates if candidate.exists()), candidates[1])
 
 
-def read_route_metrics(filename: Path, satellites: int) -> dict:
-    source = satellites + 1  # UE
-    destination = satellites  # server
+def read_route_metrics(filename: Path, satellites: int, servers: int, ues: int) -> dict:
+    # leosim-param-scenario creates all server nodes first, followed by UE nodes.
+    # Aggregate every UE -> server pair instead of assuming one server and one UE.
+    server_nodes = set(range(satellites, satellites + servers))
+    ue_nodes = set(range(satellites + servers, satellites + servers + ues))
     rows = []
     with filename.open(newline="") as stream:
         for row in csv.DictReader(stream):
-            if int(row["source_node"]) == source and int(row["destination_node"]) == destination:
+            if (int(row["source_node"]) in ue_nodes and
+                    int(row["destination_node"]) in server_nodes):
                 rows.append(row)
 
     valid = [row for row in rows if row["valid"] == "1"]
@@ -164,7 +167,18 @@ def load_runs(results_dir: Path) -> list[dict]:
             "rx_packets": int(network["rx_packets"]),
             "lost_packets": int(network["lost_packets"]),
         }
-        run.update(read_route_metrics(route_file, satellites))
+        # Forward application flows use an ephemeral source port and a lower
+        # server listening port. Their unique endpoint addresses reveal the
+        # resolved counts when command-line zero means "all loaded endpoints".
+        forward_flows = [flow for flow in stats.get("flows", [])
+                         if int(flow.get("source_port", 0)) >
+                         int(flow.get("destination_port", 0))]
+        server_count = len({flow.get("destination") for flow in forward_flows})
+        ue_count = len({flow.get("source") for flow in forward_flows})
+        run.update(read_route_metrics(route_file,
+                                      satellites,
+                                      server_count or 1,
+                                      ue_count or 1))
         runs.append(run)
     return runs
 

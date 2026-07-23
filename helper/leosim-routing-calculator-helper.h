@@ -156,6 +156,7 @@ class LeoSimRoutingCalculatorHelper
      * \param islChannelModel ISL channel model (may be null if ISL disabled)
      * \param debounceInterval Minimum time between triggered updates (default 200ms)
      * \param verbose Enable verbose output
+     * \param metric Routing metric to preserve during reactive updates
      *
      * Connects to the link-state-change trace on both channel models.  Whenever
      * any link transitions to LEOSIM_LINK_DOWN the routing tables are recomputed
@@ -169,7 +170,9 @@ class LeoSimRoutingCalculatorHelper
                                             Ptr<LeoSimChannelModel> groundChannelModel,
                                             Ptr<LeoSimChannelModel> islChannelModel = nullptr,
                                             Time debounceInterval = MilliSeconds(200),
-                                            bool verbose = false);
+                                            bool verbose = false,
+                                            LeoSimRoutingCalculator::RoutingMetric metric =
+                                                LeoSimRoutingCalculator::LEOSIM_METRIC_HOP_COUNT);
 
     /**
      * \brief Request a debounced route refresh using the reactive-routing context.
@@ -218,6 +221,8 @@ class LeoSimRoutingCalculatorHelper
     NodeContainer m_reactiveDestinations;
     Time m_reactiveDebounceInterval;
     bool m_reactiveVerbose = false;
+    LeoSimRoutingCalculator::RoutingMetric m_reactiveMetric =
+        LeoSimRoutingCalculator::LEOSIM_METRIC_HOP_COUNT;
     EventId m_dynamicRoutingUpdate;       //!< Pending periodic dynamic routing event
     EventId m_pendingReactiveUpdate; //!< Pending debounced reactive update event
     std::ofstream m_routeLog;

@@ -175,8 +175,9 @@ class LeoSimChannelHelper
                   NodeContainer groundNodes);
 
     /**
-     * \brief Set maximum satellite access-link candidates per ground node
-     * \param maxLinks Maximum links to create per ground node, minimum 1
+     * \brief Set maximum satellite access-link candidates per ground node and trajectory epoch
+     * \param maxLinks Maximum nearest visible candidates selected at each epoch, minimum 1.
+     * The provisioned candidate set is their union across the loaded trajectory.
      */
     void SetMaxGroundLinksPerNode(uint32_t maxLinks);
 

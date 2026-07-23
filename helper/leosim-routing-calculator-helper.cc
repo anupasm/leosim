@@ -576,7 +576,8 @@ LeoSimRoutingCalculatorHelper::EnableReactiveLinkTriggeredRouting(
     Ptr<LeoSimChannelModel> groundChannelModel,
     Ptr<LeoSimChannelModel> islChannelModel,
     Time debounceInterval,
-    bool verbose)
+    bool verbose,
+    LeoSimRoutingCalculator::RoutingMetric metric)
 {
     if (!calculator || !groundChannelModel)
     {
@@ -595,6 +596,7 @@ LeoSimRoutingCalculatorHelper::EnableReactiveLinkTriggeredRouting(
     m_reactiveDestinations = destinations;
     m_reactiveDebounceInterval = debounceInterval;
     m_reactiveVerbose = verbose;
+    m_reactiveMetric = metric;
 
     auto cb = MakeCallback(&LeoSimRoutingCalculatorHelper::OnLinkStateChanged, this);
 
@@ -682,7 +684,8 @@ LeoSimRoutingCalculatorHelper::DoReactiveUpdate()
     SetStaticRoutes(m_reactiveCalculator,
                     m_reactiveSources,
                     m_reactiveDestinations,
-                    m_reactiveVerbose);
+                    m_reactiveVerbose,
+                    m_reactiveMetric);
 }
 
 } // namespace ns3

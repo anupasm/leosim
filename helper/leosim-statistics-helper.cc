@@ -132,8 +132,13 @@ LeoSimStatisticsHelper::GetFlowStatistics() const
         out.lostPackets = s.lostPackets;
         out.txBytes = s.txBytes; out.rxBytes = s.rxBytes;
         out.packetDeliveryRatio = s.txPackets ? static_cast<double>(s.rxPackets) / s.txPackets : 0.0;
-        out.meanDelayMs = s.rxPackets ? s.delaySum.GetMilliSeconds() / s.rxPackets : 0.0;
-        out.meanJitterMs = s.rxPackets > 1 ? s.jitterSum.GetMilliSeconds() / (s.rxPackets - 1) : 0.0;
+        out.meanDelayMs =
+            s.rxPackets ? s.delaySum.GetSeconds() * 1000.0 / static_cast<double>(s.rxPackets)
+                        : 0.0;
+        out.meanJitterMs = s.rxPackets > 1
+                               ? s.jitterSum.GetSeconds() * 1000.0 /
+                                     static_cast<double>(s.rxPackets - 1)
+                               : 0.0;
         out.meanHopCount = s.rxPackets ? 1.0 + static_cast<double>(s.timesForwarded) / s.rxPackets : 0.0;
         const double active = (s.timeLastRxPacket - s.timeFirstTxPacket).GetSeconds();
         out.throughputMbps = active > 0 ? (8.0 * s.rxBytes / active / 1e6) : 0.0;
@@ -156,7 +161,6 @@ LeoSimStatisticsHelper::GetSnapshot(bool checkLostPackets) const
     {
         out.txPackets += f.txPackets; out.rxPackets += f.rxPackets;
         out.txBytes += f.txBytes; out.rxBytes += f.rxBytes; out.lostPackets += f.lostPackets;
-        out.throughputMbps += f.throughputMbps;
         weightedDelay += f.meanDelayMs * f.rxPackets;
         const uint64_t flowJitterSamples = f.rxPackets > 1 ? f.rxPackets - 1 : 0;
         weightedJitter += f.meanJitterMs * flowJitterSamples;
@@ -168,7 +172,11 @@ LeoSimStatisticsHelper::GetSnapshot(bool checkLostPackets) const
     out.meanJitterMs = jitterSamples ? weightedJitter / jitterSamples : 0.0;
     out.meanHopCount = out.rxPackets ? weightedHops / out.rxPackets : 0.0;
     const double elapsed = Simulator::Now().GetSeconds();
-    if (elapsed > 0) out.offeredLoadMbps = 8.0 * out.txBytes / elapsed / 1e6;
+    if (elapsed > 0)
+    {
+        out.throughputMbps = 8.0 * out.rxBytes / elapsed / 1e6;
+        out.offeredLoadMbps = 8.0 * out.txBytes / elapsed / 1e6;
+    }
     if (m_beamManager)
     {
         auto events = m_beamManager->GetHandoverHistory();

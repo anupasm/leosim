@@ -11,12 +11,14 @@
 #include "ns3/flow-monitor-module.h"
 #include "ns3/internet-module.h"
 #include "ns3/leosim-beam-manager-helper.h"
+#include "ns3/leosim-beam-layout-engine.h"
 #include "ns3/leosim-channel-helper.h"
 #include "ns3/leosim-channel-model.h"
 #include "ns3/leosim-device-installer.h"
 #include "ns3/leosim-loader-helper.h"
 #include "ns3/leosim-loader.h"
 #include "ns3/leosim-mobility-helper.h"
+#include "ns3/leosim-multi-beam-model.h"
 #include "ns3/leosim-operator-helper.h"
 #include "ns3/leosim-routing-calculator-helper.h"
 #include "ns3/leosim-routing-calculator.h"
@@ -292,6 +294,7 @@ main(int argc, char* argv[])
     double accessMaxDistance = 2500000.0;
     std::string accessDataRate = "100Mbps";
     std::string accessDelay = "1ms";
+    uint32_t maxAccessSatellites = 8;
 
     bool enableIsl = true;
     bool islFullMesh = false;
@@ -306,6 +309,9 @@ main(int argc, char* argv[])
     bool enableDynamicRouting = true;
     double routingUpdateInterval = 10.0;
     std::string routingMetricName = "hop";
+    uint32_t beamNumRings = 2;
+    double beamRadiusKm = 250.0;
+    uint32_t beamReuseColors = 3;
     uint32_t serverId = 0;
     uint32_t ueId = 0;
     uint16_t port = 9000;
@@ -336,6 +342,9 @@ main(int argc, char* argv[])
     cmd.AddValue("accessMaxDistance", "Maximum satellite-ground link distance in meters", accessMaxDistance);
     cmd.AddValue("accessDataRate", "Satellite-ground point-to-point data rate", accessDataRate);
     cmd.AddValue("accessDelay", "Satellite-ground propagation delay, e.g. 1ms", accessDelay);
+    cmd.AddValue("maxAccessSatellites",
+                 "Maximum candidate satellite access links created per ground node",
+                 maxAccessSatellites);
     cmd.AddValue("enableIsl", "Enable inter-satellite links", enableIsl);
     cmd.AddValue("islFullMesh", "Build all-pairs ISL mesh instead of bounded nearest-neighbor mesh", islFullMesh);
     cmd.AddValue("maxIslNeighbors", "Maximum nearest-neighbor ISL degree per satellite", maxIslNeighbors);
@@ -350,6 +359,9 @@ main(int argc, char* argv[])
     cmd.AddValue("routingMetric",
                  "Dijkstra metric: hop, distance, path-loss, snr, or signal-strength",
                  routingMetricName);
+    cmd.AddValue("beamNumRings", "Number of spot-beam rings per satellite", beamNumRings);
+    cmd.AddValue("beamRadiusKm", "Spot-beam footprint radius in kilometres", beamRadiusKm);
+    cmd.AddValue("beamReuseColors", "Number of spot-beam frequency reuse colours", beamReuseColors);
     cmd.AddValue("serverId", "Server/GSS index used by this single scenario", serverId);
     cmd.AddValue("ueId", "UE index used by this single scenario", ueId);
     cmd.AddValue("port", "TCP destination port", port);
@@ -518,6 +530,7 @@ main(int argc, char* argv[])
     timer.Begin("access channel creation");
     accessChannelHelper.SetMinElevationAngle(minElevation);
     accessChannelHelper.SetMaxLinkDistance(accessMaxDistance);
+    accessChannelHelper.SetMaxGroundLinksPerNode(maxAccessSatellites);
     accessChannelHelper.SetUpdateInterval(Seconds(1.0));
     accessChannelHelper.SetVerbose(verbose);
     Ptr<LeoSimChannelModel> accessChannel =
@@ -656,6 +669,31 @@ main(int argc, char* argv[])
     beamHelper.EnableLoadBalancing(true);
     beamHelper.EnableHandoverBuffering(true);
 
+    // The beam manager's visibility scan requires a populated multi-beam model.
+    // Without it no serving access link can be selected, so the routing calculator
+    // removes every ground edge and all metric runs silently fall back to global routing.
+    Ptr<LeoSimMultiBeamModel> multiBeamModel = CreateObject<LeoSimMultiBeamModel>();
+    for (uint32_t i = 0; i < satelliteNodes.GetN(); ++i)
+    {
+        Ptr<Node> satellite = satelliteNodes.Get(i);
+        Ptr<MobilityModel> mobility = satellite->GetObject<MobilityModel>();
+        if (!mobility)
+        {
+            continue;
+        }
+        const uint32_t satelliteId = satellite->GetId();
+        multiBeamModel->SetBeamsForSatellite(
+            satelliteId,
+            LeoSimBeamLayoutEngine::GenerateHexLayout(satelliteId,
+                                                       mobility->GetPosition(),
+                                                       std::max<uint32_t>(1, beamNumRings),
+                                                       beamRadiusKm,
+                                                       std::max<uint32_t>(1, beamReuseColors),
+                                                       satelliteId * 1000));
+    }
+    multiBeamModel->UpdateGeometry(satelliteNodes, Simulator::Now());
+    beamHelper.SetMultiBeamModel(multiBeamModel);
+
     timer.Begin("beam manager installation");
     Ptr<LeoSimBeamManager> beamManager =
         beamHelper.Install(allGroundNodes, satelliteNodes, Seconds(simTime));
@@ -691,7 +729,8 @@ main(int argc, char* argv[])
         accessChannel,
         enableIsl ? islChannel : nullptr,
         MilliSeconds(200),
-        verbose);
+        verbose,
+        routingMetric);
     beamManager->SetAccessStateChangeCallback(
         MakeCallback(&LeoSimRoutingCalculatorHelper::RequestRouteRefresh,
                      &routingHelper));
@@ -738,6 +777,7 @@ main(int argc, char* argv[])
     {
         statistics = CreateObject<LeoSimStatisticsHelper>();
         statistics->SetFlowMonitor(flowMonitor, classifier);
+        statistics->SetBeamManager(beamManager);
         if (!statistics->AttachChannelModel(accessChannel))
         {
             std::cerr << "Warning: failed to attach statistics to access channel traces"

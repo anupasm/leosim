@@ -106,6 +106,55 @@ class LeoSimTestSpatialIslDegreeAndConnectivity : public TestCase
     }
 };
 
+class LeoSimTestTrajectoryAwareAccessCandidates : public TestCase
+{
+  public:
+    LeoSimTestTrajectoryAwareAccessCandidates()
+        : TestCase("access candidates include satellites visible later in the trajectory")
+    {
+    }
+
+  private:
+    void DoRun() override
+    {
+        constexpr double earthRadius = 6371000.0;
+        const Vector visible(earthRadius + 550000.0, 0.0, 0.0);
+        const Vector hidden(-(earthRadius + 550000.0), 0.0, 0.0);
+
+        NodeContainer satellites;
+        satellites.Create(2);
+        for (uint32_t i = 0; i < satellites.GetN(); ++i)
+        {
+            Ptr<LeoSimMobilityModel> mobility = CreateObject<LeoSimMobilityModel>();
+            mobility->SetNodeType(LEOSIM_SATELLITE);
+            mobility->SetNodeId(i);
+            mobility->SetWaypoints({{Seconds(0), i == 0 ? visible : hidden, Vector()},
+                                    {Seconds(10), i == 0 ? hidden : visible, Vector()}});
+            satellites.Get(i)->AggregateObject(mobility);
+            mobility->Start();
+        }
+
+        NodeContainer groundNodes;
+        groundNodes.Create(1);
+        Ptr<LeoSimMobilityModel> groundMobility = CreateObject<LeoSimMobilityModel>();
+        groundMobility->SetNodeType(LEOSIM_GATEWAY);
+        groundMobility->SetNodeId(0);
+        groundMobility->SetWaypoints({{Seconds(0), Vector(earthRadius, 0.0, 0.0), Vector()}});
+        groundNodes.Get(0)->AggregateObject(groundMobility);
+        groundMobility->Start();
+
+        LeoSimChannelHelper helper;
+        helper.SetMaxGroundLinksPerNode(1);
+        Ptr<LeoSimChannelModel> model = helper.CreateChannels(satellites, groundNodes);
+        const auto candidates =
+            model->GetLinksByType(LEOSIM_LINK_SATELLITE_TO_GROUND, true);
+        NS_TEST_ASSERT_MSG_EQ(candidates.size(),
+                              2,
+                              "Candidate union must include the satellite visible at each epoch");
+        Simulator::Destroy();
+    }
+};
+
 Vector
 TestGeodeticPosition(double latDeg, double lonDeg, double altitudeM)
 {
@@ -2712,6 +2761,7 @@ LeoSimTestSuite::LeoSimTestSuite()
 {
     AddTestCase(new LeoSimTestCase1, TestCase::Duration::QUICK);
     AddTestCase(new LeoSimTestSpatialIslDegreeAndConnectivity, TestCase::Duration::QUICK);
+    AddTestCase(new LeoSimTestTrajectoryAwareAccessCandidates, TestCase::Duration::QUICK);
     AddTestCase(new LeoSimTestHexBeamLayout19, TestCase::Duration::QUICK);
     AddTestCase(new LeoSimTestHexBeamLayout61, TestCase::Duration::QUICK);
     AddTestCase(new LeoSimTestSinrWithICI, TestCase::Duration::QUICK);
