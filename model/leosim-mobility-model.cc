@@ -191,6 +191,22 @@ LeoSimMobilityModel::SetVelocityCalculation(bool enable)
     m_calculateVelocity = enable;
 }
 
+Ptr<MobilityModel>
+LeoSimMobilityModel::Copy() const
+{
+    Ptr<LeoSimMobilityModel> copy = CreateObject<LeoSimMobilityModel>();
+    copy->m_nodeType = m_nodeType;
+    copy->m_nodeId = m_nodeId;
+    copy->m_nodeName = m_nodeName;
+    copy->m_position = DoGetPosition();
+    copy->m_velocity = m_velocity;
+    copy->m_waypoints = m_waypoints;
+    copy->m_currentWaypoint = m_currentWaypoint;
+    copy->m_active = false;
+    copy->m_calculateVelocity = m_calculateVelocity;
+    return copy;
+}
+
 void
 LeoSimMobilityModel::UpdatePosition()
 {

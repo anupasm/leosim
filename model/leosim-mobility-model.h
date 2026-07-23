@@ -153,6 +153,17 @@ class LeoSimMobilityModel : public MobilityModel
      */
     void SetVelocityCalculation(bool enable);
 
+    /**
+     * \brief Create an independent copy of this mobility model.
+     *
+     * This method intentionally omits the override specifier so the module
+     * remains compatible with ns-3 releases both with and without
+     * MobilityModel::Copy().
+     *
+     * \return A copy of this mobility model
+     */
+    Ptr<MobilityModel> Copy() const;
+
   protected:
     Vector DoGetPosition() const override;
     void DoSetPosition(const Vector& position) override;
