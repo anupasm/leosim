@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 #include "leosim-statistics-helper.h"
+#include "ns3/leosim-task-profiler.h"
 
 #include "ns3/leosim-beam-manager.h"
 #include "ns3/leosim-channel-model.h"
@@ -219,6 +220,7 @@ LeoSimStatisticsHelper::WriteCsvHeader()
 void
 LeoSimStatisticsHelper::Sample()
 {
+    LeoSimTaskProfiler::ScopedEvent profile("run_simulation.statistics_sampling");
     if (!m_sampling) return;
     const auto s = GetSnapshot(false);
     std::ofstream out(m_csvFilename, std::ios::app);

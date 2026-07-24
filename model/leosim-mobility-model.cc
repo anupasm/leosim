@@ -16,6 +16,7 @@
  */
 
 #include "leosim-mobility-model.h"
+#include "leosim-task-profiler.h"
 
 #include "ns3/boolean.h"
 #include "ns3/log.h"
@@ -210,6 +211,7 @@ LeoSimMobilityModel::Copy() const
 void
 LeoSimMobilityModel::UpdatePosition()
 {
+    LeoSimTaskProfiler::ScopedEvent profile("run_simulation.mobility_update");
     NS_LOG_FUNCTION(this);
 
     if (!m_active || m_currentWaypoint >= m_waypoints.size())

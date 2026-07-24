@@ -12,9 +12,13 @@
 #include "ns3/simulator.h"
 
 #include <chrono>
+#include <algorithm>
 #include <iomanip>
+#include <iostream>
+#include <map>
 #include <ostream>
 #include <string>
+#include <vector>
 
 namespace ns3
 {
@@ -27,7 +31,7 @@ class LeoSimTaskProfiler
       public:
         explicit ScopedEvent(const std::string& taskName)
             : m_output(LeoSimTaskProfiler::GetOutputStream()),
-              m_active(m_output != nullptr),
+              m_active(m_output != nullptr || LeoSimTaskProfiler::IsAggregationEnabled()),
               m_taskName(taskName),
               m_startWallTime(std::chrono::steady_clock::now()),
               m_startSimTimeSeconds(Simulator::Now().GetSeconds())
@@ -36,7 +40,7 @@ class LeoSimTaskProfiler
 
         ~ScopedEvent()
         {
-            if (!m_active || m_output == nullptr)
+            if (!m_active)
             {
                 return;
             }
@@ -45,9 +49,13 @@ class LeoSimTaskProfiler
             const double elapsedMs =
                 std::chrono::duration<double, std::milli>(endWallTime - m_startWallTime).count();
 
-            (*m_output) << m_taskName << "," << std::fixed << std::setprecision(6)
-                        << m_startSimTimeSeconds << "," << Simulator::Now().GetSeconds() << ","
-                        << elapsedMs << std::endl;
+            LeoSimTaskProfiler::Record(m_taskName, elapsedMs);
+            if (m_output)
+            {
+                (*m_output) << m_taskName << "," << std::fixed << std::setprecision(6)
+                            << m_startSimTimeSeconds << "," << Simulator::Now().GetSeconds() << ","
+                            << elapsedMs << std::endl;
+            }
         }
 
       private:
@@ -68,7 +76,94 @@ class LeoSimTaskProfiler
         return GetOutputStreamStorage();
     }
 
+    static void EnableAggregation(bool enabled = true)
+    {
+        IsAggregationEnabledStorage() = enabled;
+    }
+
+    static bool IsAggregationEnabled()
+    {
+        return IsAggregationEnabledStorage();
+    }
+
+    static void Reset()
+    {
+        GetMeasurements().clear();
+    }
+
+    static void PrintSummary(double simulatorWallSeconds, std::ostream& output = std::cout)
+    {
+        struct RankedMeasurement
+        {
+            std::string name;
+            double milliseconds;
+            uint64_t calls;
+        };
+
+        std::vector<RankedMeasurement> ranked;
+        double measuredMs = 0.0;
+        for (const auto& [name, measurement] : GetMeasurements())
+        {
+            ranked.push_back({name, measurement.first, measurement.second});
+            measuredMs += measurement.first;
+        }
+        std::sort(ranked.begin(),
+                  ranked.end(),
+                  [](const auto& lhs, const auto& rhs) {
+                      return lhs.milliseconds > rhs.milliseconds;
+                  });
+
+        output << "\n[timing] Simulator::Run breakdown (wall-clock, slowest first)" << std::endl;
+        for (const auto& measurement : ranked)
+        {
+            const double percent =
+                simulatorWallSeconds > 0.0
+                    ? measurement.milliseconds / (simulatorWallSeconds * 10.0)
+                    : 0.0;
+            output << "[timing]   " << measurement.name << ": " << std::fixed
+                   << std::setprecision(3) << measurement.milliseconds / 1000.0 << "s ("
+                   << percent << "%), calls=" << measurement.calls << std::endl;
+        }
+
+        const double unclassifiedMs =
+            std::max(0.0, simulatorWallSeconds * 1000.0 - measuredMs);
+        output << "[timing]   other ns-3 events/overhead: " << std::fixed
+               << std::setprecision(3) << unclassifiedMs / 1000.0 << "s ("
+               << (simulatorWallSeconds > 0.0
+                       ? unclassifiedMs / (simulatorWallSeconds * 10.0)
+                       : 0.0)
+               << "%)" << std::endl;
+        if (!ranked.empty())
+        {
+            output << "[timing] SLOWEST SIMULATOR PROCESS: " << ranked.front().name
+                   << " consumed " << ranked.front().milliseconds / 1000.0 << "s" << std::endl;
+        }
+    }
+
   private:
+    static void Record(const std::string& taskName, double elapsedMs)
+    {
+        if (!IsAggregationEnabled())
+        {
+            return;
+        }
+        auto& measurement = GetMeasurements()[taskName];
+        measurement.first += elapsedMs;
+        ++measurement.second;
+    }
+
+    static std::map<std::string, std::pair<double, uint64_t>>& GetMeasurements()
+    {
+        static std::map<std::string, std::pair<double, uint64_t>> measurements;
+        return measurements;
+    }
+
+    static bool& IsAggregationEnabledStorage()
+    {
+        static bool enabled = false;
+        return enabled;
+    }
+
     static std::ostream*& GetOutputStreamStorage()
     {
         static std::ostream* output = nullptr;

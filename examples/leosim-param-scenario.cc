@@ -23,15 +23,18 @@
 #include "ns3/leosim-routing-calculator-helper.h"
 #include "ns3/leosim-routing-calculator.h"
 #include "ns3/leosim-statistics-helper.h"
+#include "ns3/leosim-task-profiler.h"
 #include "ns3/leosim-visualization-helper.h"
 #include "ns3/mobility-module.h"
 #include "ns3/network-module.h"
 #include "ns3/point-to-point-module.h"
 
+#include <algorithm>
 #include <chrono>
 #include <iomanip>
 #include <iostream>
 #include <string>
+#include <vector>
 
 using namespace ns3;
 
@@ -50,31 +53,72 @@ class DebugTimer
     void Log(const std::string& operation)
     {
         const auto now = std::chrono::steady_clock::now();
-        const double stepSeconds = std::chrono::duration<double>(now - m_last).count();
+        const auto operationStart = m_operationActive ? m_operationStart : m_last;
+        const double stepSeconds =
+            std::chrono::duration<double>(now - operationStart).count();
         const double totalSeconds = std::chrono::duration<double>(now - m_start).count();
         std::cout << "[timing] " << operation << " completed; step=" << std::fixed
                   << std::setprecision(3) << stepSeconds << "s, total=" << totalSeconds
                   << "s, sim=" << Simulator::Now().GetSeconds() << "s" << std::endl;
+        m_measurements.push_back({operation, stepSeconds});
         m_last = now;
+        m_operationActive = false;
     }
 
-    void Begin(const std::string& operation) const
+    void Begin(const std::string& operation)
     {
-        const double totalSeconds =
-            std::chrono::duration<double>(std::chrono::steady_clock::now() - m_start).count();
+        m_operationStart = std::chrono::steady_clock::now();
+        m_operationActive = true;
+        const double totalSeconds = std::chrono::duration<double>(m_operationStart - m_start).count();
         std::cout << "[timing] BEGIN " << operation << "; total=" << std::fixed
                   << std::setprecision(3) << totalSeconds << "s, sim="
                   << Simulator::Now().GetSeconds() << "s" << std::endl;
     }
 
+    void PrintSummary() const
+    {
+        if (m_measurements.empty())
+        {
+            return;
+        }
+
+        std::vector<Measurement> ranked = m_measurements;
+        std::sort(ranked.begin(),
+                  ranked.end(),
+                  [](const Measurement& lhs, const Measurement& rhs) {
+                      return lhs.seconds > rhs.seconds;
+                  });
+
+        std::cout << "\n[timing] Process ranking (wall-clock, slowest first)" << std::endl;
+        for (std::size_t rank = 0; rank < ranked.size(); ++rank)
+        {
+            std::cout << "[timing]   " << rank + 1 << ". " << ranked[rank].operation << ": "
+                      << std::fixed << std::setprecision(3) << ranked[rank].seconds << "s"
+                      << std::endl;
+        }
+        std::cout << "[timing] SLOWEST PROCESS: " << ranked.front().operation << " consumed "
+                  << std::fixed << std::setprecision(3) << ranked.front().seconds << "s"
+                  << std::endl;
+    }
+
   private:
+    struct Measurement
+    {
+        std::string operation;
+        double seconds;
+    };
+
     std::chrono::steady_clock::time_point m_start;
     std::chrono::steady_clock::time_point m_last;
+    std::chrono::steady_clock::time_point m_operationStart;
+    bool m_operationActive{false};
+    std::vector<Measurement> m_measurements;
 };
 
 struct SimulationProgress
 {
     std::chrono::steady_clock::time_point wallStart;
+    bool taskProfilerEnabled{false};
 };
 
 void
@@ -86,6 +130,11 @@ LogSimulationProgress(Time interval, Time stopTime, SimulationProgress* progress
     std::cout << "[timing] simulation progress; sim=" << std::fixed << std::setprecision(3)
               << Simulator::Now().GetSeconds() << "/" << stopTime.GetSeconds()
               << "s, run-wall=" << wallSeconds << "s" << std::endl;
+    if (progress->taskProfilerEnabled)
+    {
+        LeoSimTaskProfiler::PrintSummary(wallSeconds);
+    }
+    std::cout << std::flush;
     if (Simulator::Now() + interval <= stopTime)
     {
         Simulator::Schedule(interval, &LogSimulationProgress, interval, stopTime, progress);
@@ -324,6 +373,7 @@ main(int argc, char* argv[])
     bool enableVisualization = false;
     double visualizationInterval = 1.0;
     bool enableStatistics = true;
+    bool enableTaskProfiler = true;
     double statisticsInterval = 1.0;
     bool enableRouteLogging = true;
     double progressLogInterval = 5.0;
@@ -381,6 +431,9 @@ main(int argc, char* argv[])
                  "Visualization logging interval in seconds",
                  visualizationInterval);
     cmd.AddValue("enableStatistics", "Write periodic CSV and summary JSON statistics", enableStatistics);
+    cmd.AddValue("enableTaskProfiler",
+                 "Enable wall-clock task profiling and timing summaries",
+                 enableTaskProfiler);
     cmd.AddValue("statisticsInterval", "Statistics sampling interval in seconds", statisticsInterval);
     cmd.AddValue("enableRouteLogging",
                  "Write selected paths and path-specific routing metrics",
@@ -796,7 +849,8 @@ main(int argc, char* argv[])
         visualizationHelper.InstallPacketLogging(satelliteNodes, serverNodes, ueNodes);
     }
 
-    SimulationProgress simulationProgress{std::chrono::steady_clock::now()};
+    SimulationProgress simulationProgress{std::chrono::steady_clock::now(),
+                                          enableTaskProfiler};
     if (progressLogInterval > 0.0 && progressLogInterval <= simTime)
     {
         Simulator::Schedule(Seconds(progressLogInterval),
@@ -806,9 +860,26 @@ main(int argc, char* argv[])
                             &simulationProgress);
     }
     timer.Begin("Simulator::Run");
+    if (enableTaskProfiler)
+    {
+        LeoSimTaskProfiler::Reset();
+        LeoSimTaskProfiler::EnableAggregation();
+    }
+    const auto simulatorWallStart = std::chrono::steady_clock::now();
     Simulator::Stop(Seconds(simTime));
     Simulator::Run();
+    const double simulatorWallSeconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - simulatorWallStart)
+            .count();
+    if (enableTaskProfiler)
+    {
+        LeoSimTaskProfiler::EnableAggregation(false);
+    }
     timer.Log("Simulator::Run");
+    if (enableTaskProfiler)
+    {
+        LeoSimTaskProfiler::PrintSummary(simulatorWallSeconds);
+    }
 
     timer.Begin("result post-processing");
     PrintFlowMonitorSummary(flowMonitor, classifier);
@@ -842,5 +913,6 @@ main(int argc, char* argv[])
 
     Simulator::Destroy();
     timer.Log("Simulator::Destroy");
+    timer.PrintSummary();
     return 0;
 }
