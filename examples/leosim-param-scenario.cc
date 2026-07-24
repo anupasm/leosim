@@ -704,12 +704,16 @@ main(int argc, char* argv[])
 
     NodeContainer routingDestinations;
     NodeContainer routingSources;
+    NodeContainer statisticsRouteSources;
+    NodeContainer statisticsRouteDestinations;
     if (allToAllTraffic)
     {
         routingDestinations.Add(serverNodes);
         routingDestinations.Add(ueNodes);
         routingSources.Add(serverNodes);
         routingSources.Add(ueNodes);
+        statisticsRouteSources.Add(ueNodes);
+        statisticsRouteDestinations.Add(serverNodes);
     }
     else
     {
@@ -719,6 +723,8 @@ main(int argc, char* argv[])
         routingDestinations.Add(ueNodes.Get(ueId));
         routingSources.Add(serverNodes.Get(serverId));
         routingSources.Add(ueNodes.Get(ueId));
+        statisticsRouteSources.Add(ueNodes.Get(ueId));
+        statisticsRouteDestinations.Add(serverNodes.Get(serverId));
     }
 
     LeoSimRoutingCalculatorHelper routingHelper;
@@ -829,6 +835,8 @@ main(int argc, char* argv[])
         routeTreeHelper.SetMetric(treeMetric);
         routeTreeHelper.SetMaxRouteRequests(routeTreeMaxEntries);
         routeTreeHelper.SetDestinationTreeAllNodes(true);
+        routeTreeHelper.SetStatisticsEndpoints(statisticsRouteSources,
+                                               statisticsRouteDestinations);
 
         if (enableDynamicRouting)
         {
@@ -996,6 +1004,10 @@ main(int argc, char* argv[])
     if (enableStatistics)
     {
         statistics->StopPeriodicSampling();
+        if (useTrees)
+        {
+            statistics->SetRouteStatistics(routeTreeHelper.GetRouteStatistics());
+        }
         statistics->WriteSummary(statisticsJsonFile);
         std::cout << "Statistics data: " << statisticsCsvFile << ", " << statisticsJsonFile
                   << std::endl;

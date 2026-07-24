@@ -60,6 +60,21 @@ struct LeoSimFlowStatistics
     double meanHopCount{0.0};
 };
 
+/** Compact routing aggregates retained without verbose per-route CSV logging. */
+struct LeoSimRouteStatistics
+{
+    uint64_t samples{0};
+    uint64_t validSamples{0};
+    uint64_t changes{0};
+    uint64_t uniquePaths{0};
+    double meanHops{0.0};
+    double meanDistanceKm{0.0};
+    double meanMinSnrDb{0.0};
+    double minimumSnrDb{0.0};
+    double meanPathLossDb{0.0};
+    double meanMinSignalDbm{0.0};
+};
+
 /** Complete network and satellite-link KPI snapshot. Ratios are in [0, 1]. */
 struct LeoSimStatisticsSnapshot
 {
@@ -107,6 +122,7 @@ class LeoSimStatisticsHelper : public Object
     bool AttachChannel(Ptr<LeoSimChannel> channel);
     bool AttachChannelModel(Ptr<LeoSimChannelModel> channelModel);
     void SetBeamManager(Ptr<LeoSimBeamManager> beamManager);
+    void SetRouteStatistics(const LeoSimRouteStatistics& statistics);
 
     void StartPeriodicSampling(Time interval, const std::string& csvFilename);
     void StopPeriodicSampling();
@@ -135,6 +151,7 @@ class LeoSimStatisticsHelper : public Object
     Ptr<FlowMonitor> m_monitor;
     Ptr<Ipv4FlowClassifier> m_classifier;
     Ptr<LeoSimBeamManager> m_beamManager;
+    LeoSimRouteStatistics m_routeStatistics;
     LeoSimRunningStatistics m_snr;
     LeoSimRunningStatistics m_doppler;
     LeoSimRunningStatistics m_pathLoss;

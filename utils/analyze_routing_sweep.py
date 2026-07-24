@@ -48,7 +48,29 @@ def resolve_output(base: Path, value: str, suffix: str = "") -> Path:
     return next((candidate for candidate in candidates if candidate.exists()), candidates[1])
 
 
-def read_route_metrics(filename: Path, satellites: int, servers: int, ues: int) -> dict:
+def read_route_metrics(filename: Path | None,
+                       satellites: int,
+                       servers: int,
+                       ues: int) -> dict:
+    empty = {
+        "route_data_available": False,
+        "route_samples": 0,
+        "route_valid_ratio": 0.0,
+        "route_changes": 0,
+        "unique_paths": 0,
+        "mean_route_hops": 0.0,
+        "mean_route_distance_km": 0.0,
+        "mean_route_min_snr_db": 0.0,
+        "minimum_route_snr_db": 0.0,
+        "mean_route_path_loss_db": 0.0,
+        "mean_route_min_signal_dbm": 0.0,
+    }
+    # External destination-tree runs deliberately disable the verbose route
+    # CSV. Network and per-flow statistics are still complete, so do not drop
+    # an otherwise successful run merely because result-routes.csv is absent.
+    if filename is None or not filename.is_file():
+        return empty
+
     # leosim-param-scenario creates all server nodes first, followed by UE nodes.
     # Aggregate every UE -> server pair instead of assuming one server and one UE.
     server_nodes = set(range(satellites, satellites + servers))
@@ -63,6 +85,9 @@ def read_route_metrics(filename: Path, satellites: int, servers: int, ues: int) 
     valid = [row for row in rows if row["valid"] == "1"]
     values = lambda field: [number(row[field]) for row in valid]
     return {
+        # A disabled logger can leave a stale header-only CSV from an earlier
+        # run. Treat it as unavailable so the compact JSON routing summary wins.
+        "route_data_available": bool(rows),
         "route_samples": len(rows),
         "route_valid_ratio": len(valid) / len(rows) if rows else 0.0,
         "route_changes": sum(int(row["route_changed"]) for row in rows),
@@ -98,8 +123,10 @@ def load_runs(results_dir: Path) -> list[dict]:
         if not match or run_dir.name in known:
             continue
         metric, satellites, mode, duration, interval = match.groups()
-        if not (run_dir / "result-statistics.json").exists() or not (run_dir / "result-routes.csv").exists():
+        if not (run_dir / "result-statistics.json").exists():
             continue
+        status_file = run_dir / "status.txt"
+        status = status_file.read_text().strip() if status_file.exists() else "UNKNOWN"
         items.append({
             "run_id": run_dir.name,
             "metric": metric,
@@ -107,7 +134,7 @@ def load_runs(results_dir: Path) -> list[dict]:
             "mode": mode,
             "update_interval_s": interval or "0",
             "sim_time_s": duration,
-            "status": "PASS",
+            "status": status,
             "wall_time_s": "0",
             "output_prefix": str(run_dir / "result"),
             "route_log_file": str(run_dir / "result-routes.csv"),
@@ -118,8 +145,13 @@ def load_runs(results_dir: Path) -> list[dict]:
         prefix = ((Path(item["_run_dir"]) / "result") if "_run_dir" in item
                   else resolve_output(results_dir, item["output_prefix"]))
         statistics_file = Path(str(prefix) + "-statistics.json")
-        route_file = ((Path(item["_run_dir"]) / "result-routes.csv") if "_run_dir" in item
-                      else resolve_output(results_dir, item["route_log_file"]))
+        if "_run_dir" in item:
+            candidate_route_file = Path(item["_run_dir"]) / "result-routes.csv"
+        elif item.get("route_log_file"):
+            candidate_route_file = resolve_output(results_dir, item["route_log_file"])
+        else:
+            candidate_route_file = Path(str(prefix) + "-routes.csv")
+        route_file = candidate_route_file if candidate_route_file.is_file() else None
         if statistics_file.exists():
             with statistics_file.open() as stats_stream:
                 stats = json.load(stats_stream)
@@ -175,10 +207,26 @@ def load_runs(results_dir: Path) -> list[dict]:
                          int(flow.get("destination_port", 0))]
         server_count = len({flow.get("destination") for flow in forward_flows})
         ue_count = len({flow.get("source") for flow in forward_flows})
-        run.update(read_route_metrics(route_file,
-                                      satellites,
-                                      server_count or 1,
-                                      ue_count or 1))
+        route_metrics = read_route_metrics(route_file,
+                                           satellites,
+                                           server_count or 1,
+                                           ue_count or 1)
+        routing = stats.get("routing", {})
+        if not route_metrics["route_data_available"] and number(routing.get("samples")) > 0:
+            route_metrics = {
+                "route_data_available": True,
+                "route_samples": int(number(routing.get("samples"))),
+                "route_valid_ratio": number(routing.get("valid_ratio")),
+                "route_changes": int(number(routing.get("changes"))),
+                "unique_paths": int(number(routing.get("unique_paths"))),
+                "mean_route_hops": number(routing.get("mean_hops")),
+                "mean_route_distance_km": number(routing.get("mean_distance_km")),
+                "mean_route_min_snr_db": number(routing.get("mean_min_snr_db")),
+                "minimum_route_snr_db": number(routing.get("minimum_snr_db")),
+                "mean_route_path_loss_db": number(routing.get("mean_path_loss_db")),
+                "mean_route_min_signal_dbm": number(routing.get("mean_min_signal_dbm")),
+            }
+        run.update(route_metrics)
         runs.append(run)
     return runs
 
@@ -220,7 +268,11 @@ def write_markdown(filename: Path, runs: list[dict]) -> None:
 
     with filename.open("w") as stream:
         stream.write("# LeoSim routing metric comparison\n\n")
-        stream.write(f"Runs analysed: {len(runs)}. Route statistics use UE → server paths.\n\n")
+        route_run_count = sum(bool(run["route_data_available"]) for run in runs)
+        stream.write(
+            f"Runs analysed: {len(runs)}. Route CSV data available for "
+            f"{route_run_count} run(s); unavailable route fields are shown as —.\n\n"
+        )
         for key in sorted(groups):
             satellites, duration, interval = key
             group = sorted(groups[key], key=lambda run: METRIC_ORDER.get(run["metric"], 99))
@@ -229,22 +281,33 @@ def write_markdown(filename: Path, runs: list[dict]) -> None:
                          "Unique paths | Route km | Min SNR dB | Path loss dB |\n")
             stream.write("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
             for run in group:
+                route_changes = str(run["route_changes"]) if run["route_data_available"] else "—"
+                unique_paths = str(run["unique_paths"]) if run["route_data_available"] else "—"
+                route_km = (fmt(run["mean_route_distance_km"])
+                            if run["route_data_available"] else "—")
+                route_snr = (fmt(run["minimum_route_snr_db"])
+                             if run["route_data_available"] else "—")
+                route_loss = (fmt(run["mean_route_path_loss_db"])
+                              if run["route_data_available"] else "—")
                 stream.write(
                     f"| {run['metric']} | {fmt(run['pdr'], 4)} | {fmt(run['throughput_mbps'], 6)} | "
                     f"{fmt(run['delay_ms'])} | {fmt(run['flow_mean_hop_count'])} | "
-                    f"{run['route_changes']} | {run['unique_paths']} | "
-                    f"{fmt(run['mean_route_distance_km'])} | {fmt(run['minimum_route_snr_db'])} | "
-                    f"{fmt(run['mean_route_path_loss_db'])} |\n"
+                    f"{route_changes} | {unique_paths} | {route_km} | {route_snr} | "
+                    f"{route_loss} |\n"
                 )
 
             best_pdr = max(group, key=lambda run: (run["pdr"], run["throughput_mbps"]))
             best_delay = min((run for run in group if run["rx_packets"] > 0),
                              key=lambda run: run["delay_ms"], default=None)
-            best_snr = max(group, key=lambda run: run["minimum_route_snr_db"])
+            route_group = [run for run in group if run["route_data_available"]]
+            best_snr = (max(route_group, key=lambda run: run["minimum_route_snr_db"])
+                        if route_group else None)
             stream.write(f"\nBest delivery: **{best_pdr['metric']}**")
             if best_delay:
                 stream.write(f"; lowest delay: **{best_delay['metric']}**")
-            stream.write(f"; strongest worst-link SNR: **{best_snr['metric']}**.\n\n")
+            if best_snr:
+                stream.write(f"; strongest worst-link SNR: **{best_snr['metric']}**")
+            stream.write(".\n\n")
 
 
 def main() -> int:

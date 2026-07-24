@@ -13,9 +13,11 @@
 #include "ns3/node-container.h"
 #include "ns3/nstime.h"
 #include "ns3/ptr.h"
+#include "ns3/leosim-statistics-helper.h"
 
 #include <cstdint>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -68,6 +70,10 @@ class LeoSimExternalRoutingHelper
      * legacy source-container restriction.
      */
     void SetDestinationTreeAllNodes(bool enable);
+    /** Restrict compact route statistics to these application path pairs. */
+    void SetStatisticsEndpoints(const NodeContainer& sources,
+                                const NodeContainer& destinations);
+    LeoSimRouteStatistics GetRouteStatistics() const;
 
     /**
      * \brief Export current topology, invoke the external routing engine, and
@@ -141,6 +147,9 @@ class LeoSimExternalRoutingHelper
     bool ApplyResults(const GraphExport& exportInfo,
                       const std::vector<RouteResultRecord>& results,
                       bool verbose);
+    void UpdateRouteStatistics(Ptr<LeoSimRoutingCalculator> calculator,
+                               const GraphExport& exportInfo,
+                               const std::vector<RouteResultRecord>& results);
 
     void UpdateRoutesAndReschedule(Ptr<LeoSimRoutingCalculator> calculator,
                                    const NodeContainer& sources,
@@ -170,6 +179,19 @@ class LeoSimExternalRoutingHelper
     ExternalRoutingMetric m_metric;
     uint64_t m_maxRouteRequests;
     bool m_destinationTreeAllNodes;
+    NodeContainer m_statisticsSources;
+    NodeContainer m_statisticsDestinations;
+    uint64_t m_routeSamples{0};
+    uint64_t m_routeValidSamples{0};
+    uint64_t m_routeChanges{0};
+    double m_routeHopSum{0.0};
+    double m_routeDistanceKmSum{0.0};
+    double m_routeMinSnrSum{0.0};
+    double m_routePathLossSum{0.0};
+    double m_routeMinSignalSum{0.0};
+    double m_routeMinimumSnr{0.0};
+    std::map<std::pair<uint32_t, uint32_t>, std::vector<uint32_t>> m_previousPaths;
+    std::set<std::vector<uint32_t>> m_uniquePaths;
     uint64_t m_nextSnapshotId;
     EventId m_dynamicRoutingUpdate;
     EventId m_pendingReactiveUpdate;

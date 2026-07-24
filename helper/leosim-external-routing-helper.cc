@@ -147,6 +147,35 @@ LeoSimExternalRoutingHelper::SetDestinationTreeAllNodes(bool enable)
     m_destinationTreeAllNodes = enable;
 }
 
+void
+LeoSimExternalRoutingHelper::SetStatisticsEndpoints(const NodeContainer& sources,
+                                                    const NodeContainer& destinations)
+{
+    m_statisticsSources = sources;
+    m_statisticsDestinations = destinations;
+}
+
+LeoSimRouteStatistics
+LeoSimExternalRoutingHelper::GetRouteStatistics() const
+{
+    LeoSimRouteStatistics statistics;
+    statistics.samples = m_routeSamples;
+    statistics.validSamples = m_routeValidSamples;
+    statistics.changes = m_routeChanges;
+    statistics.uniquePaths = m_uniquePaths.size();
+    if (m_routeValidSamples)
+    {
+        const double count = static_cast<double>(m_routeValidSamples);
+        statistics.meanHops = m_routeHopSum / count;
+        statistics.meanDistanceKm = m_routeDistanceKmSum / count;
+        statistics.meanMinSnrDb = m_routeMinSnrSum / count;
+        statistics.minimumSnrDb = m_routeMinimumSnr;
+        statistics.meanPathLossDb = m_routePathLossSum / count;
+        statistics.meanMinSignalDbm = m_routeMinSignalSum / count;
+    }
+    return statistics;
+}
+
 bool
 LeoSimExternalRoutingHelper::SetStaticRoutes(Ptr<LeoSimRoutingCalculator> calculator,
                                              const NodeContainer& sources,
@@ -176,7 +205,122 @@ LeoSimExternalRoutingHelper::SetStaticRoutes(Ptr<LeoSimRoutingCalculator> calcul
     {
         return false;
     }
+    UpdateRouteStatistics(calculator, exportInfo, results);
     return ApplyResults(exportInfo, results, verbose);
+}
+
+void
+LeoSimExternalRoutingHelper::UpdateRouteStatistics(
+    Ptr<LeoSimRoutingCalculator> calculator,
+    const GraphExport& exportInfo,
+    const std::vector<RouteResultRecord>& results)
+{
+    if (!calculator || m_statisticsSources.GetN() == 0 ||
+        m_statisticsDestinations.GetN() == 0)
+    {
+        return;
+    }
+
+    std::map<std::pair<uint32_t, uint32_t>, const RouteResultRecord*> nextHops;
+    for (const auto& result : results)
+    {
+        nextHops[{result.src, result.dst}] = &result;
+    }
+
+    for (uint32_t i = 0; i < m_statisticsSources.GetN(); ++i)
+    {
+        Ptr<Node> source = m_statisticsSources.Get(i);
+        const auto sourceIt = exportInfo.nodeIdToRoutingId.find(source->GetId());
+        if (sourceIt == exportInfo.nodeIdToRoutingId.end())
+        {
+            continue;
+        }
+        for (uint32_t j = 0; j < m_statisticsDestinations.GetN(); ++j)
+        {
+            Ptr<Node> destination = m_statisticsDestinations.Get(j);
+            if (source == destination)
+            {
+                continue;
+            }
+            ++m_routeSamples;
+            const auto destinationIt =
+                exportInfo.nodeIdToRoutingId.find(destination->GetId());
+            if (destinationIt == exportInfo.nodeIdToRoutingId.end())
+            {
+                continue;
+            }
+
+            const uint32_t destinationId = destinationIt->second;
+            uint32_t current = sourceIt->second;
+            std::vector<uint32_t> path{source->GetId()};
+            std::set<uint32_t> visited{current};
+            double distanceKm = 0.0;
+            double pathLoss = 0.0;
+            double minSnr = std::numeric_limits<double>::max();
+            double minSignal = std::numeric_limits<double>::max();
+            bool valid = true;
+
+            while (current != destinationId)
+            {
+                const auto hopIt = nextHops.find({current, destinationId});
+                if (hopIt == nextHops.end() || !hopIt->second->valid ||
+                    hopIt->second->nextHop >= exportInfo.routingIdToNode.size())
+                {
+                    valid = false;
+                    break;
+                }
+                const uint32_t next = hopIt->second->nextHop;
+                if (!visited.insert(next).second)
+                {
+                    valid = false;
+                    break;
+                }
+                Ptr<Node> currentNode = exportInfo.routingIdToNode[current];
+                Ptr<Node> nextNode = exportInfo.routingIdToNode[next];
+                if (!currentNode || !nextNode)
+                {
+                    valid = false;
+                    break;
+                }
+                const LeoSimChannelQuality quality =
+                    calculator->GetLinkQuality(currentNode, nextNode);
+                distanceKm += quality.distance / 1000.0;
+                pathLoss += quality.pathLoss;
+                minSnr = std::min(minSnr, quality.snr);
+                minSignal = std::min(minSignal, quality.signalStrength);
+                path.push_back(nextNode->GetId());
+                current = next;
+                if (path.size() > exportInfo.routingIdToNode.size())
+                {
+                    valid = false;
+                    break;
+                }
+            }
+
+            if (!valid || path.size() < 2)
+            {
+                continue;
+            }
+            ++m_routeValidSamples;
+            m_routeHopSum += path.size() - 1;
+            m_routeDistanceKmSum += distanceKm;
+            m_routeMinSnrSum += minSnr;
+            m_routePathLossSum += pathLoss;
+            m_routeMinSignalSum += minSignal;
+            if (m_routeValidSamples == 1 || minSnr < m_routeMinimumSnr)
+            {
+                m_routeMinimumSnr = minSnr;
+            }
+            const auto pair = std::make_pair(source->GetId(), destination->GetId());
+            const auto previous = m_previousPaths.find(pair);
+            if (previous != m_previousPaths.end() && previous->second != path)
+            {
+                ++m_routeChanges;
+            }
+            m_previousPaths[pair] = path;
+            m_uniquePaths.insert(path);
+        }
+    }
 }
 
 void

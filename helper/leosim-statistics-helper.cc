@@ -210,6 +210,12 @@ LeoSimStatisticsHelper::StopPeriodicSampling()
 }
 
 void
+LeoSimStatisticsHelper::SetRouteStatistics(const LeoSimRouteStatistics& statistics)
+{
+    m_routeStatistics = statistics;
+}
+
+void
 LeoSimStatisticsHelper::WriteCsvHeader()
 {
     std::ofstream out(m_csvFilename, std::ios::trunc);
@@ -247,7 +253,22 @@ LeoSimStatisticsHelper::WriteSummary(const std::string& filename, bool includeFl
         << "  \"satellite_link\": {\"snr_db\": {\"samples\": " << s.snrDb.count << ", \"mean\": " << s.snrDb.mean << ", \"min\": " << s.snrDb.min << ", \"max\": " << s.snrDb.max << ", \"stddev\": " << s.snrDb.GetStandardDeviation()
         << "}, \"doppler_hz\": {\"samples\": " << s.dopplerHz.count << ", \"mean\": " << s.dopplerHz.mean << "}, \"path_loss_db\": {\"samples\": " << s.pathLossDb.count << ", \"mean\": " << s.pathLossDb.mean
         << "}, \"link_up_events\": " << s.linkUpEvents << ", \"link_down_events\": " << s.linkDownEvents << ", \"link_degraded_events\": " << s.linkDegradedEvents << "},\n"
-        << "  \"handover\": {\"total\": " << s.handovers << ", \"successful\": " << s.successfulHandovers << ", \"success_ratio\": " << s.handoverSuccessRatio << ", \"latency_mean_ms\": " << s.meanHandoverLatencyMs << ", \"latency_p95_ms\": " << s.p95HandoverLatencyMs << ", \"ping_pongs\": " << s.pingPongs << "}";
+        << "  \"handover\": {\"total\": " << s.handovers << ", \"successful\": " << s.successfulHandovers << ", \"success_ratio\": " << s.handoverSuccessRatio << ", \"latency_mean_ms\": " << s.meanHandoverLatencyMs << ", \"latency_p95_ms\": " << s.p95HandoverLatencyMs << ", \"ping_pongs\": " << s.pingPongs << "},\n"
+        << "  \"routing\": {\"samples\": " << m_routeStatistics.samples
+        << ", \"valid_samples\": " << m_routeStatistics.validSamples
+        << ", \"valid_ratio\": "
+        << (m_routeStatistics.samples
+                ? static_cast<double>(m_routeStatistics.validSamples) /
+                      m_routeStatistics.samples
+                : 0.0)
+        << ", \"changes\": " << m_routeStatistics.changes
+        << ", \"unique_paths\": " << m_routeStatistics.uniquePaths
+        << ", \"mean_hops\": " << m_routeStatistics.meanHops
+        << ", \"mean_distance_km\": " << m_routeStatistics.meanDistanceKm
+        << ", \"mean_min_snr_db\": " << m_routeStatistics.meanMinSnrDb
+        << ", \"minimum_snr_db\": " << m_routeStatistics.minimumSnrDb
+        << ", \"mean_path_loss_db\": " << m_routeStatistics.meanPathLossDb
+        << ", \"mean_min_signal_dbm\": " << m_routeStatistics.meanMinSignalDbm << "}";
     if (includeFlows)
     {
         out << ",\n  \"flows\": [";
