@@ -43,16 +43,20 @@ From: ubuntu:24.04
     cd /opt/leosim/ns3
     if [ -x ./ns3 ]; then
         ./ns3 configure --enable-examples --disable-tests --build-profile=optimized
-        ./ns3 build leosim-param-scenario || true
-        ./ns3 run "leosim-param-scenario --PrintHelp" --no-build || true
+        ./ns3 build leosim-param-scenario
     elif [ -x ./waf ]; then
         ./waf configure --enable-examples --disable-tests --build-profile=optimized
-        ./waf build || true
-        ./waf --run "leosim-param-scenario --PrintHelp" || true
+        ./waf build
     else
         echo "No ns-3 build wrapper found (./ns3 or ./waf)." >&2
         exit 1
     fi
+
+    # The parameterized scenario's route-tree cache invokes this standalone
+    # process at runtime. Build it inside the image so its ABI matches the
+    # container rather than relying on a host-compiled binary copied by %files.
+    make -C /opt/leosim/ns3/contrib/leosim/utils/rengine clean all
+    make -C /opt/leosim/ns3/contrib/leosim/utils/rengine self-test
 
 %environment
     export PATH="/opt/venv/bin:$PATH"
@@ -73,4 +77,9 @@ From: ubuntu:24.04
     else
         cd /opt/leosim/ns3
     fi
-    ./ns3 run "leosim-param-scenario --PrintHelp" --no-build || true
+    test -x contrib/leosim/utils/rengine/leosim-rengine
+    contrib/leosim/utils/rengine/leosim-rengine --self-test
+    ./ns3 run "leosim-param-scenario --PrintHelp" --no-build |
+        grep -q -- "--useRouteTreeCache"
+    ./ns3 run "leosim-param-scenario --PrintHelp" --no-build |
+        grep -q -- "--routeTreeWorkers"

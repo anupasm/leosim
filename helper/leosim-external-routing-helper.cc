@@ -312,11 +312,37 @@ LeoSimExternalRoutingHelper::GetExportedWeight(Ptr<LeoSimRoutingCalculator> calc
     }
 
     LeoSimChannelQuality quality = calculator->GetLinkQuality(source, destination);
-    if (quality.distance > 0.0 && std::isfinite(quality.distance))
+    double weight = 1.0;
+    switch (m_metric)
     {
-        return static_cast<float>(quality.distance);
+    case LEOSIM_EXTERNAL_WEIGHT_DISTANCE:
+        weight = quality.distance;
+        break;
+    case LEOSIM_EXTERNAL_WEIGHT_PATH_LOSS:
+        weight = quality.pathLoss;
+        break;
+    case LEOSIM_EXTERNAL_WEIGHT_SNR:
+        // Match LeoSimRoutingCalculator::GetLinkMetricValue: reciprocal SNR
+        // gives Dijkstra a non-negative cost while preferring stronger links.
+        weight = 1.0 / std::max(quality.snr, 1e-9);
+        break;
+    case LEOSIM_EXTERNAL_WEIGHT_SIGNAL_STRENGTH:
+        // Signal strength is normally negative dBm, so negating it turns
+        // stronger (less-negative) signals into smaller positive costs.
+        weight = -quality.signalStrength;
+        break;
+    case LEOSIM_EXTERNAL_HOP_COUNT:
+        weight = 1.0;
+        break;
     }
-    return 1.0f;
+
+    // Invalid channel samples must never poison the external Dijkstra queue.
+    // Use the same neutral fallback historically used for missing distance.
+    if (!std::isfinite(weight) || weight < 0.0)
+    {
+        return 1.0f;
+    }
+    return static_cast<float>(weight);
 }
 
 bool

@@ -46,7 +46,10 @@ class LeoSimExternalRoutingHelper
     enum ExternalRoutingMetric
     {
         LEOSIM_EXTERNAL_WEIGHT_DISTANCE = 1,
-        LEOSIM_EXTERNAL_HOP_COUNT = 2
+        LEOSIM_EXTERNAL_HOP_COUNT = 2,
+        LEOSIM_EXTERNAL_WEIGHT_PATH_LOSS = 3,
+        LEOSIM_EXTERNAL_WEIGHT_SNR = 4,
+        LEOSIM_EXTERNAL_WEIGHT_SIGNAL_STRENGTH = 5
     };
 
     LeoSimExternalRoutingHelper();

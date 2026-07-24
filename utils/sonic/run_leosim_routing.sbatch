@@ -2,7 +2,7 @@
 #SBATCH --job-name=leosim-routing
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=1
+#SBATCH --cpus-per-task=6
 #SBATCH --time=24:00:00
 #SBATCH --array=0-4%10
 #SBATCH --output=logs/%x-%A_%a.out
@@ -69,6 +69,9 @@ statistics_interval="${STATISTICS_INTERVAL:-1}"
 max_isl_neighbors="${MAX_ISL_NEIGHBORS:-4}"
 tle_timestep="${TLE_TIMESTEP:-5}"
 tle_workers="${TLE_WORKERS:-${SLURM_CPUS_PER_TASK:-1}}"
+use_route_tree_cache="${USE_ROUTE_TREE_CACHE:-1}"
+route_tree_workers="${ROUTE_TREE_WORKERS:-${SLURM_CPUS_PER_TASK:-1}}"
+route_tree_max_entries="${ROUTE_TREE_MAX_ENTRIES:-10000000}"
 
 prepro_dir="${RESULTS_ROOT}/_preprocessed"
 satellite_positions="${prepro_dir}/alpha-beta-gamma_duration-${sim_time}s_step-${tle_timestep}s.csv"
@@ -78,6 +81,7 @@ prepro_lock="${satellite_positions}.lock"
 run_id="metric-${metric}_sats-${satellites}_dynamic_duration-${sim_time}s-interval-${interval}s"
 run_dir="${RESULTS_ROOT}/${run_id}"
 container_prefix="${CONTAINER_RESULTS_ROOT}/${run_id}/result"
+container_route_tree_dir="${CONTAINER_RESULTS_ROOT}/${run_id}/route-trees"
 mkdir -p "${REPO_ROOT}/logs" "$run_dir"
 
 if ! command -v apptainer >/dev/null 2>&1; then
@@ -123,6 +127,10 @@ scenario+=" --numServers=${num_servers}"
 scenario+=" --numUes=${num_ues}"
 scenario+=" --allToAllTraffic=${all_to_all}"
 scenario+=" --routingMetric=${metric}"
+scenario+=" --useRouteTreeCache=${use_route_tree_cache}"
+scenario+=" --routeTreeWorkers=${route_tree_workers}"
+scenario+=" --routeTreeWorkDir=${container_route_tree_dir}"
+scenario+=" --routeTreeMaxEntries=${route_tree_max_entries}"
 scenario+=" --enableDynamicRouting=1"
 scenario+=" --routingUpdateInterval=${interval}"
 scenario+=" --maxIslNeighbors=${max_isl_neighbors}"
@@ -150,6 +158,10 @@ command=(apptainer exec --cleanenv
   echo "satellites=${satellites}"
   echo "sim_time_s=${sim_time}"
   echo "routing_mode=dynamic"
+  echo "external_route_tree_cache=${use_route_tree_cache}"
+  echo "route_tree_workers=${route_tree_workers}"
+  echo "route_tree_max_entries=${route_tree_max_entries}"
+  echo "route_tree_work_dir=${run_dir}/route-trees"
   echo "routing_update_interval_s=${interval}"
   echo "num_ues=${num_ues}"
   echo "num_servers=${num_servers}"

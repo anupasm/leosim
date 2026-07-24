@@ -15,6 +15,7 @@
 #include "ns3/leosim-channel-helper.h"
 #include "ns3/leosim-channel-model.h"
 #include "ns3/leosim-device-installer.h"
+#include "ns3/leosim-external-routing-helper.h"
 #include "ns3/leosim-loader-helper.h"
 #include "ns3/leosim-loader.h"
 #include "ns3/leosim-mobility-helper.h"
@@ -358,6 +359,11 @@ main(int argc, char* argv[])
     bool enableDynamicRouting = true;
     double routingUpdateInterval = 10.0;
     std::string routingMetricName = "hop";
+    bool useRouteTreeCache = true;
+    std::string routeTreeEngine = "contrib/leosim/utils/rengine/leosim-rengine";
+    std::string routeTreeWorkDir = "/tmp/leosim-param-route-trees";
+    uint32_t routeTreeWorkers = 8;
+    uint64_t routeTreeMaxEntries = 10000000ULL;
     uint32_t beamNumRings = 2;
     double beamRadiusKm = 250.0;
     uint32_t beamReuseColors = 3;
@@ -409,6 +415,22 @@ main(int argc, char* argv[])
     cmd.AddValue("routingMetric",
                  "Dijkstra metric: hop, distance, path-loss, snr, or signal-strength",
                  routingMetricName);
+    cmd.AddValue("useRouteTreeCache",
+                 "Use one cached reverse shortest-path tree per traffic destination "
+                 "for all supported routing metrics",
+                 useRouteTreeCache);
+    cmd.AddValue("routeTreeEngine",
+                 "Path to the LeoSim destination-tree routing engine",
+                 routeTreeEngine);
+    cmd.AddValue("routeTreeWorkDir",
+                 "Directory for cached routing-tree snapshots",
+                 routeTreeWorkDir);
+    cmd.AddValue("routeTreeWorkers",
+                 "Worker processes used to calculate destination trees",
+                 routeTreeWorkers);
+    cmd.AddValue("routeTreeMaxEntries",
+                 "Maximum next-hop entries materialized in one routing snapshot",
+                 routeTreeMaxEntries);
     cmd.AddValue("beamNumRings", "Number of spot-beam rings per satellite", beamNumRings);
     cmd.AddValue("beamRadiusKm", "Spot-beam footprint radius in kilometres", beamRadiusKm);
     cmd.AddValue("beamReuseColors", "Number of spot-beam frequency reuse colours", beamReuseColors);
@@ -681,8 +703,23 @@ main(int argc, char* argv[])
     allNodes.Add(ueNodes);
 
     NodeContainer routingDestinations;
-    routingDestinations.Add(serverNodes);
-    routingDestinations.Add(ueNodes);
+    NodeContainer routingSources;
+    if (allToAllTraffic)
+    {
+        routingDestinations.Add(serverNodes);
+        routingDestinations.Add(ueNodes);
+        routingSources.Add(serverNodes);
+        routingSources.Add(ueNodes);
+    }
+    else
+    {
+        // TCP data and acknowledgements require both selected endpoints, but
+        // unrelated ground nodes do not need trees or host routes.
+        routingDestinations.Add(serverNodes.Get(serverId));
+        routingDestinations.Add(ueNodes.Get(ueId));
+        routingSources.Add(serverNodes.Get(serverId));
+        routingSources.Add(ueNodes.Get(ueId));
+    }
 
     LeoSimRoutingCalculatorHelper routingHelper;
     const std::string routeLogFile = outputPrefix + "-routes.csv";
@@ -755,7 +792,73 @@ main(int argc, char* argv[])
     timer.Log("beam manager installation");
 
     timer.Begin("routing setup");
-    if (enableDynamicRouting)
+    // With few application endpoints and thousands of satellite transit nodes,
+    // a reverse tree per destination avoids running Dijkstra independently for
+    // every (satellite, destination) pair. The external engine returns the
+    // cached next hop for every graph node, so forwarding tables remain complete.
+    const bool useTrees = useRouteTreeCache;
+    LeoSimExternalRoutingHelper routeTreeHelper;
+
+    if (useTrees)
+    {
+        routeTreeHelper.SetEnginePath(routeTreeEngine);
+        routeTreeHelper.SetWorkingDirectory(routeTreeWorkDir);
+        routeTreeHelper.SetWorkerCount(std::max<uint32_t>(1, routeTreeWorkers));
+        routeTreeHelper.SetMode(
+            LeoSimExternalRoutingHelper::LEOSIM_EXTERNAL_DESTINATION_TREE);
+        LeoSimExternalRoutingHelper::ExternalRoutingMetric treeMetric =
+            LeoSimExternalRoutingHelper::LEOSIM_EXTERNAL_HOP_COUNT;
+        switch (routingMetric)
+        {
+        case LeoSimRoutingCalculator::LEOSIM_METRIC_DISTANCE:
+            treeMetric = LeoSimExternalRoutingHelper::LEOSIM_EXTERNAL_WEIGHT_DISTANCE;
+            break;
+        case LeoSimRoutingCalculator::LEOSIM_METRIC_PATH_LOSS:
+            treeMetric = LeoSimExternalRoutingHelper::LEOSIM_EXTERNAL_WEIGHT_PATH_LOSS;
+            break;
+        case LeoSimRoutingCalculator::LEOSIM_METRIC_SNR:
+            treeMetric = LeoSimExternalRoutingHelper::LEOSIM_EXTERNAL_WEIGHT_SNR;
+            break;
+        case LeoSimRoutingCalculator::LEOSIM_METRIC_SIGNAL_STRENGTH:
+            treeMetric =
+                LeoSimExternalRoutingHelper::LEOSIM_EXTERNAL_WEIGHT_SIGNAL_STRENGTH;
+            break;
+        case LeoSimRoutingCalculator::LEOSIM_METRIC_HOP_COUNT:
+            break;
+        }
+        routeTreeHelper.SetMetric(treeMetric);
+        routeTreeHelper.SetMaxRouteRequests(routeTreeMaxEntries);
+        routeTreeHelper.SetDestinationTreeAllNodes(true);
+
+        if (enableDynamicRouting)
+        {
+            routeTreeHelper.EnableDynamicRouting(routingCalculator,
+                                                 routingSources,
+                                                 routingDestinations,
+                                                 Seconds(routingUpdateInterval),
+                                                 simTime,
+                                                 verbose);
+        }
+        else
+        {
+            routeTreeHelper.SetStaticRoutes(routingCalculator,
+                                            routingSources,
+                                            routingDestinations,
+                                            verbose);
+        }
+        routeTreeHelper.EnableReactiveRouteRefresh(routingCalculator,
+                                                   routingSources,
+                                                   routingDestinations,
+                                                   MilliSeconds(200),
+                                                   verbose);
+        beamManager->SetAccessStateChangeCallback(
+            MakeCallback(&LeoSimExternalRoutingHelper::RequestRouteRefresh,
+                         &routeTreeHelper));
+        std::cout << "[routing] Destination-tree cache enabled: "
+                  << routingDestinations.GetN() << " trees for "
+                  << allNodes.GetN() << " graph nodes" << std::endl;
+    }
+    else if (enableDynamicRouting)
     {
         routingHelper.EnableDynamicRouting(routingCalculator,
                                            allNodes,
@@ -774,19 +877,22 @@ main(int argc, char* argv[])
                                       routingMetric);
     }
 
-    // Reactive routing: update routes when links change or handover occurs
-    routingHelper.EnableReactiveLinkTriggeredRouting(
-        routingCalculator,
-        allNodes,
-        routingDestinations,
-        accessChannel,
-        enableIsl ? islChannel : nullptr,
-        MilliSeconds(200),
-        verbose,
-        routingMetric);
-    beamManager->SetAccessStateChangeCallback(
-        MakeCallback(&LeoSimRoutingCalculatorHelper::RequestRouteRefresh,
-                     &routingHelper));
+    if (!useTrees)
+    {
+        // Reactive routing: update routes when links change or handover occurs
+        routingHelper.EnableReactiveLinkTriggeredRouting(
+            routingCalculator,
+            allNodes,
+            routingDestinations,
+            accessChannel,
+            enableIsl ? islChannel : nullptr,
+            MilliSeconds(200),
+            verbose,
+            routingMetric);
+        beamManager->SetAccessStateChangeCallback(
+            MakeCallback(&LeoSimRoutingCalculatorHelper::RequestRouteRefresh,
+                         &routingHelper));
+    }
     timer.Log("routing setup");
 
     timer.Begin("traffic application installation");
