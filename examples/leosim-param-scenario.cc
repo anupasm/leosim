@@ -426,7 +426,7 @@ main(int argc, char* argv[])
                  "Directory for cached routing-tree snapshots",
                  routeTreeWorkDir);
     cmd.AddValue("routeTreeWorkers",
-                 "Worker processes used to calculate destination trees",
+                 "Worker threads used to calculate destination trees",
                  routeTreeWorkers);
     cmd.AddValue("routeTreeMaxEntries",
                  "Maximum next-hop entries materialized in one routing snapshot",
@@ -693,9 +693,24 @@ main(int argc, char* argv[])
     }
     timer.Log("IPv4 address assignment");
 
-    timer.Begin("global routing table population");
-    Ipv4GlobalRoutingHelper::PopulateRoutingTables();
-    timer.Log("global routing table population");
+    // Destination-tree routing installs its initial static host routes
+    // synchronously during routing setup below. Populating ns-3 global routes
+    // here performs an expensive all-pairs calculation that is immediately
+    // superseded by those routes, which is especially costly for 11k nodes.
+    // Retain global routing only as the fallback for the legacy non-tree path.
+    const bool useTrees = useRouteTreeCache;
+    if (!useTrees)
+    {
+        timer.Begin("global routing table population");
+        Ipv4GlobalRoutingHelper::PopulateRoutingTables();
+        timer.Log("global routing table population");
+    }
+    else
+    {
+        std::cout << "[routing] Skipping redundant ns-3 global route population; "
+                     "destination trees will install initial routes"
+                  << std::endl;
+    }
 
     NodeContainer allNodes;
     allNodes.Add(satelliteNodes);
@@ -802,7 +817,6 @@ main(int argc, char* argv[])
     // a reverse tree per destination avoids running Dijkstra independently for
     // every (satellite, destination) pair. The external engine returns the
     // cached next hop for every graph node, so forwarding tables remain complete.
-    const bool useTrees = useRouteTreeCache;
     LeoSimExternalRoutingHelper routeTreeHelper;
 
     if (useTrees)
