@@ -1,6 +1,6 @@
 # LeoSim Routing Engine
 
-Standalone process-parallel routing engine for LeoSim. It performs graph
+Standalone thread-parallel routing engine for LeoSim. It performs graph
 routing over binary CSR sparse weighted matrices and has no ns-3 dependency.
 
 ## Build
@@ -18,11 +18,14 @@ The ns-3 process should:
 1. Export a graph snapshot to `*.graph`.
 2. Export route requests to `*.requests`.
 3. Run this engine as a supervisor.
-4. Import the merged `*.results` file on the simulator thread.
+4. Import the `*.results` file on the simulator thread.
 5. Install only changed `Ipv4StaticRouting` entries.
 
-Workers are OS processes launched by the supervisor. They never touch ns-3
-objects.
+The supervisor reads each snapshot once, constructs one shared reverse graph,
+and uses a dynamically scheduled thread pool. Workers operate only on immutable
+graph data and private shortest-path scratch arrays; they never touch ns-3
+objects. The `--worker` command remains available for compatibility, but normal
+`--workers N` operation does not fork child processes.
 
 ```sh
 ./leosim-rengine \
@@ -36,17 +39,18 @@ objects.
 ## Files
 
 - `rengine-format.h`: fixed binary ABI shared with the future ns-3 exporter.
-- `leosim-rengine.cc`: supervisor, worker, CSR loader, Dijkstra routing.
+- `leosim-rengine.cc`: supervisor, thread pool, CSR loader, BFS/Dijkstra routing.
 - `Makefile`: standalone build.
 
 ## Routing Modes
 
 The request file selects the mode:
 
-- `PAIR`: each request is routed independently from `src` to `dst`.
+- `PAIR`: each request is routed independently from `src` to `dst` and is
+  dynamically scheduled across the worker threads.
 - `DESTINATION_TREE`: requests are grouped by destination. Each worker runs
-  reverse Dijkstra for assigned destinations and emits next-hop results for all
-  requested sources.
+  reverse Dijkstra for dynamically assigned destinations and emits next-hop
+  results for all requested sources. Hop-count trees use reverse BFS instead.
 
 `DESTINATION_TREE` is the default architecture for many sources routing to a
 smaller set of gateways or servers.
@@ -306,7 +310,7 @@ if A != B:
 
 ### Operational Defaults
 
-For a 40-core machine:
+For a 40-core machine with at least 40 unique destinations:
 
 ```text
 workers = 40

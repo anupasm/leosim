@@ -5,6 +5,7 @@ REPO_ROOT="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 SIF="${2:-${REPO_ROOT}/leosim.sif}"
 DEFINITION="${REPO_ROOT}/utils/sonic/leosim.def"
 RENGINE_SOURCE="${REPO_ROOT}/utils/rengine/leosim-rengine.cc"
+RENGINE_MAKEFILE="${REPO_ROOT}/utils/rengine/Makefile"
 
 if command -v module >/dev/null 2>&1; then
   module purge
@@ -15,9 +16,9 @@ if ! command -v apptainer >/dev/null 2>&1; then
   echo "Apptainer is unavailable; load the site module or set APPTAINER_MODULE." >&2
   exit 2
 fi
-if [[ ! -f "$DEFINITION" || ! -f "$RENGINE_SOURCE" ]]; then
+if [[ ! -f "$DEFINITION" || ! -f "$RENGINE_SOURCE" || ! -f "$RENGINE_MAKEFILE" ]]; then
   echo "Invalid LeoSim build context: ${REPO_ROOT}" >&2
-  echo "Expected ${DEFINITION} and ${RENGINE_SOURCE}." >&2
+  echo "Expected ${DEFINITION}, ${RENGINE_SOURCE}, and ${RENGINE_MAKEFILE}." >&2
   exit 2
 fi
 
@@ -34,6 +35,7 @@ apptainer exec --cleanenv --pwd /opt/leosim/ns3 "$SIF" \
 scenario_help="$(apptainer exec --cleanenv --pwd /opt/leosim/ns3 "$SIF" \
   ./ns3 run "leosim-param-scenario --PrintHelp" --no-build)"
 grep -q -- "--useRouteTreeCache" <<<"$scenario_help"
+grep -q -- "--routeTreeEngine" <<<"$scenario_help"
 grep -q -- "--routeTreeWorkers" <<<"$scenario_help"
 grep -q -- "--routeTreeWorkDir" <<<"$scenario_help"
 grep -q -- "--routeTreeMaxEntries" <<<"$scenario_help"

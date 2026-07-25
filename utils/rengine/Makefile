@@ -1,5 +1,5 @@
 CXX ?= g++
-CXXFLAGS ?= -O3 -std=c++17 -Wall -Wextra -Wpedantic
+CXXFLAGS ?= -O3 -std=c++17 -Wall -Wextra -Wpedantic -pthread
 
 TARGET := leosim-rengine
 SOURCES := leosim-rengine.cc

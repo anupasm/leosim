@@ -82,4 +82,6 @@ From: ubuntu:24.04
     ./ns3 run "leosim-param-scenario --PrintHelp" --no-build |
         grep -q -- "--useRouteTreeCache"
     ./ns3 run "leosim-param-scenario --PrintHelp" --no-build |
+        grep -q -- "--routeTreeEngine"
+    ./ns3 run "leosim-param-scenario --PrintHelp" --no-build |
         grep -q -- "--routeTreeWorkers"

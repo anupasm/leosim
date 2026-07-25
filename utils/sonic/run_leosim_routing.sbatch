@@ -25,7 +25,7 @@ if command -v module >/dev/null 2>&1; then
   module load "${APPTAINER_MODULE:-apptainer/1.3.4-gcc-11.5.0-ojp6nts}"
 fi
 
-# Matrix: 5 metrics x 1 constellation size x 1 duration x 3 update intervals.
+# Matrix: 5 metrics x 1 constellation size x 1 duration x 1 update interval.
 METRICS=(hop distance path-loss snr signal-strength)
 SATELLITE_COUNTS=(1000)
 SIM_TIMES=(1200)
@@ -68,10 +68,30 @@ verbose="${VERBOSE:-1}"
 statistics_interval="${STATISTICS_INTERVAL:-1}"
 max_isl_neighbors="${MAX_ISL_NEIGHBORS:-4}"
 tle_timestep="${TLE_TIMESTEP:-5}"
-tle_workers="${TLE_WORKERS:-${SLURM_CPUS_PER_TASK:-1}}"
+allocated_cpus="${SLURM_CPUS_PER_TASK:-1}"
+tle_workers="${TLE_WORKERS:-${allocated_cpus}}"
 use_route_tree_cache="${USE_ROUTE_TREE_CACHE:-1}"
-route_tree_workers="${ROUTE_TREE_WORKERS:-${SLURM_CPUS_PER_TASK:-1}}"
+route_tree_workers="${ROUTE_TREE_WORKERS:-${allocated_cpus}}"
 route_tree_max_entries="${ROUTE_TREE_MAX_ENTRIES:-10000000}"
+container_route_tree_engine="${CONTAINER_NS3_ROOT}/contrib/leosim/utils/rengine/leosim-rengine"
+
+for worker_setting in allocated_cpus tle_workers route_tree_workers; do
+  worker_value="${!worker_setting}"
+  if [[ ! "$worker_value" =~ ^[1-9][0-9]*$ ]]; then
+    echo "${worker_setting} must be a positive integer, got '${worker_value}'." >&2
+    exit 2
+  fi
+done
+if (( route_tree_workers > allocated_cpus )); then
+  echo "ROUTE_TREE_WORKERS=${route_tree_workers} exceeds the ${allocated_cpus} CPUs allocated by Slurm." >&2
+  echo "Request more CPUs with sbatch --cpus-per-task or lower ROUTE_TREE_WORKERS." >&2
+  exit 2
+fi
+if (( tle_workers > allocated_cpus )); then
+  echo "TLE_WORKERS=${tle_workers} exceeds the ${allocated_cpus} CPUs allocated by Slurm." >&2
+  echo "Request more CPUs with sbatch --cpus-per-task or lower TLE_WORKERS." >&2
+  exit 2
+fi
 
 prepro_dir="${RESULTS_ROOT}/_preprocessed"
 satellite_positions="${prepro_dir}/alpha-beta-gamma_duration-${sim_time}s_step-${tle_timestep}s.csv"
@@ -97,8 +117,12 @@ if ! apptainer exec --cleanenv "$SIF" /opt/venv/bin/python -c 'import numpy, sky
   echo "The container does not provide the required LeoSim Python environment: ${SIF}" >&2
   exit 2
 fi
+if ! apptainer exec --cleanenv "$SIF" "$container_route_tree_engine" --self-test; then
+  echo "The container routing engine is missing or failed its threaded self-test: ${SIF}" >&2
+  exit 2
+fi
 
-# All array elements share one generated position file. The lock prevents 15
+# All array elements share one generated position file. The lock prevents
 # simultaneous conversions; the first task generates it and the rest reuse it.
 mkdir -p "$prepro_dir"
 exec 9>"$prepro_lock"
@@ -106,7 +130,8 @@ flock -w 21600 9
 if [[ ! -s "$satellite_positions" ]]; then
   temporary_positions="${satellite_positions}.tmp-${SLURM_ARRAY_JOB_ID}-${task_id}-$$"
   container_temporary_positions="${CONTAINER_RESULTS_ROOT}/_preprocessed/$(basename "$temporary_positions")"
-  apptainer exec --cleanenv \
+  srun --ntasks=1 --cpus-per-task="${allocated_cpus}" --cpu-bind=cores \
+    apptainer exec --cleanenv \
     --bind "${RESULTS_ROOT}:${CONTAINER_RESULTS_ROOT}" \
     "$SIF" \
     /opt/venv/bin/python "${CONTAINER_NS3_ROOT}/contrib/leosim/utils/tle_to_positions.py" \
@@ -128,6 +153,7 @@ scenario+=" --numUes=${num_ues}"
 scenario+=" --allToAllTraffic=${all_to_all}"
 scenario+=" --routingMetric=${metric}"
 scenario+=" --useRouteTreeCache=${use_route_tree_cache}"
+scenario+=" --routeTreeEngine=${container_route_tree_engine}"
 scenario+=" --routeTreeWorkers=${route_tree_workers}"
 scenario+=" --routeTreeWorkDir=${container_route_tree_dir}"
 scenario+=" --routeTreeMaxEntries=${route_tree_max_entries}"
@@ -145,7 +171,11 @@ scenario+=" --verbose=${verbose}"
 scenario+=" --enableVisualization=0"
 scenario+=" --writeFlowMonitor=1"
 scenario+=" --outputPrefix=${container_prefix}"
-command=(apptainer exec --cleanenv
+command=(srun
+  --ntasks=1
+  --cpus-per-task="${allocated_cpus}"
+  --cpu-bind=cores
+  apptainer exec --cleanenv
   --bind "${RESULTS_ROOT}:${CONTAINER_RESULTS_ROOT}"
   --pwd "$CONTAINER_NS3_ROOT"
   "$SIF"
@@ -158,7 +188,10 @@ command=(apptainer exec --cleanenv
   echo "satellites=${satellites}"
   echo "sim_time_s=${sim_time}"
   echo "routing_mode=dynamic"
+  echo "slurm_cpus_per_task=${allocated_cpus}"
+  echo "slurm_cpu_bind=cores"
   echo "external_route_tree_cache=${use_route_tree_cache}"
+  echo "route_tree_engine=${container_route_tree_engine}"
   echo "route_tree_workers=${route_tree_workers}"
   echo "route_tree_max_entries=${route_tree_max_entries}"
   echo "route_tree_work_dir=${run_dir}/route-trees"

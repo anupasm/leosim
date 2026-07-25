@@ -9,6 +9,7 @@
 #include "rengine-format.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <cfloat>
 #include <cmath>
@@ -23,6 +24,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -64,6 +66,28 @@ struct Requests
     RoutingMode mode = RoutingMode::DESTINATION_TREE;
     RoutingMetric metric = RoutingMetric::WEIGHT;
     std::vector<RouteRequest> requests;
+};
+
+struct DestinationWork
+{
+    uint32_t dst = INVALID_NODE;
+    std::vector<size_t> requestIndices;
+};
+
+struct TreeScratch
+{
+    explicit TreeScratch(uint32_t nodeCount)
+        : dist(nodeCount),
+          nextHop(nodeCount),
+          hops(nodeCount),
+          bfsQueue(nodeCount)
+    {
+    }
+
+    std::vector<float> dist;
+    std::vector<uint32_t> nextHop;
+    std::vector<uint16_t> hops;
+    std::vector<uint32_t> bfsQueue;
 };
 
 [[noreturn]] void
@@ -428,6 +452,206 @@ ComputeDestinationTree(const SparseGraph& reverseGraph,
     return results;
 }
 
+RouteResult
+InvalidResult(const RouteRequest& request)
+{
+    RouteResult result{};
+    result.src = request.src;
+    result.dst = request.dst;
+    result.nextHop = INVALID_NODE;
+    result.cost = std::numeric_limits<float>::infinity();
+    result.hopCount = 0;
+    result.valid = 0;
+    return result;
+}
+
+void
+ComputeDestinationWork(const SparseGraph& reverseGraph,
+                       const Requests& requests,
+                       const DestinationWork& work,
+                       TreeScratch& scratch,
+                       std::vector<RouteResult>& results)
+{
+    if (work.dst >= reverseGraph.nodeCount)
+    {
+        return;
+    }
+
+    const float infinity = std::numeric_limits<float>::infinity();
+    std::fill(scratch.dist.begin(), scratch.dist.end(), infinity);
+    std::fill(scratch.nextHop.begin(), scratch.nextHop.end(), INVALID_NODE);
+    std::fill(scratch.hops.begin(), scratch.hops.end(), 0);
+
+    scratch.dist[work.dst] = 0.0f;
+    scratch.nextHop[work.dst] = work.dst;
+
+    if (requests.metric == RoutingMetric::HOP_COUNT)
+    {
+        size_t head = 0;
+        size_t tail = 0;
+        scratch.bfsQueue[tail++] = work.dst;
+        while (head < tail)
+        {
+            const uint32_t node = scratch.bfsQueue[head++];
+            for (uint64_t edge = reverseGraph.rowOffsets[node];
+                 edge < reverseGraph.rowOffsets[node + 1];
+                 ++edge)
+            {
+                const uint32_t predecessor = reverseGraph.colIndices[edge];
+                if (std::isfinite(scratch.dist[predecessor]))
+                {
+                    continue;
+                }
+                scratch.dist[predecessor] = scratch.dist[node] + 1.0f;
+                scratch.nextHop[predecessor] = node;
+                scratch.hops[predecessor] = static_cast<uint16_t>(
+                    std::min<uint32_t>(static_cast<uint32_t>(scratch.hops[node]) + 1,
+                                       std::numeric_limits<uint16_t>::max()));
+                scratch.bfsQueue[tail++] = predecessor;
+            }
+        }
+    }
+    else
+    {
+        using QueueEntry = std::pair<float, uint32_t>;
+        std::priority_queue<QueueEntry, std::vector<QueueEntry>, std::greater<QueueEntry>> queue;
+        queue.push({0.0f, work.dst});
+        while (!queue.empty())
+        {
+            auto [cost, node] = queue.top();
+            queue.pop();
+            if (cost > scratch.dist[node])
+            {
+                continue;
+            }
+            for (uint64_t edge = reverseGraph.rowOffsets[node];
+                 edge < reverseGraph.rowOffsets[node + 1];
+                 ++edge)
+            {
+                const uint32_t predecessor = reverseGraph.colIndices[edge];
+                const float nextCost = cost + reverseGraph.weights[edge];
+                if (nextCost < scratch.dist[predecessor])
+                {
+                    scratch.dist[predecessor] = nextCost;
+                    scratch.nextHop[predecessor] = node;
+                    scratch.hops[predecessor] = static_cast<uint16_t>(
+                        std::min<uint32_t>(static_cast<uint32_t>(scratch.hops[node]) + 1,
+                                           std::numeric_limits<uint16_t>::max()));
+                    queue.push({nextCost, predecessor});
+                }
+            }
+        }
+    }
+
+    for (size_t requestIndex : work.requestIndices)
+    {
+        const RouteRequest& request = requests.requests[requestIndex];
+        RouteResult& result = results[requestIndex];
+        if (request.src < reverseGraph.nodeCount &&
+            request.src != request.dst &&
+            std::isfinite(scratch.dist[request.src]))
+        {
+            result.nextHop = scratch.nextHop[request.src];
+            result.cost = scratch.dist[request.src];
+            result.hopCount = scratch.hops[request.src];
+            result.valid = result.nextHop == INVALID_NODE ? 0 : 1;
+        }
+    }
+}
+
+std::vector<RouteResult>
+ComputeParallelResults(const SparseGraph& graph,
+                       const Requests& requests,
+                       uint32_t requestedWorkers)
+{
+    std::vector<RouteResult> results;
+    results.reserve(requests.requests.size());
+    for (const RouteRequest& request : requests.requests)
+    {
+        results.push_back(InvalidResult(request));
+    }
+    if (requests.requests.empty())
+    {
+        return results;
+    }
+
+    if (requests.mode == RoutingMode::PAIR)
+    {
+        const uint32_t workerCount =
+            std::min<uint32_t>(std::max<uint32_t>(1, requestedWorkers), requests.requests.size());
+        std::atomic<size_t> nextRequest{0};
+        std::vector<std::thread> threads;
+        threads.reserve(workerCount);
+        for (uint32_t worker = 0; worker < workerCount; ++worker)
+        {
+            threads.emplace_back([&]() {
+                while (true)
+                {
+                    const size_t index = nextRequest.fetch_add(1, std::memory_order_relaxed);
+                    if (index >= requests.requests.size())
+                    {
+                        break;
+                    }
+                    const RouteRequest& request = requests.requests[index];
+                    results[index] =
+                        ComputePairRoute(graph, request.src, request.dst, requests.metric);
+                }
+            });
+        }
+        for (std::thread& thread : threads)
+        {
+            thread.join();
+        }
+        return results;
+    }
+
+    const SparseGraph reverseGraph = BuildReverseGraph(graph);
+    std::map<uint32_t, size_t> destinationToWork;
+    std::vector<DestinationWork> workItems;
+    for (size_t index = 0; index < requests.requests.size(); ++index)
+    {
+        const uint32_t dst = requests.requests[index].dst;
+        auto inserted = destinationToWork.emplace(dst, workItems.size());
+        if (inserted.second)
+        {
+            DestinationWork work;
+            work.dst = dst;
+            workItems.push_back(std::move(work));
+        }
+        workItems[inserted.first->second].requestIndices.push_back(index);
+    }
+
+    const uint32_t workerCount =
+        std::min<uint32_t>(std::max<uint32_t>(1, requestedWorkers), workItems.size());
+    std::atomic<size_t> nextWork{0};
+    std::vector<std::thread> threads;
+    threads.reserve(workerCount);
+    for (uint32_t worker = 0; worker < workerCount; ++worker)
+    {
+        threads.emplace_back([&]() {
+            TreeScratch scratch(reverseGraph.nodeCount);
+            while (true)
+            {
+                const size_t index = nextWork.fetch_add(1, std::memory_order_relaxed);
+                if (index >= workItems.size())
+                {
+                    break;
+                }
+                ComputeDestinationWork(reverseGraph,
+                                       requests,
+                                       workItems[index],
+                                       scratch,
+                                       results);
+            }
+        });
+    }
+    for (std::thread& thread : threads)
+    {
+        thread.join();
+    }
+    return results;
+}
+
 std::vector<RouteRequest>
 PartitionRequests(const std::vector<RouteRequest>& requests,
                   RoutingMode mode,
@@ -592,14 +816,6 @@ ParseArgs(int argc, char** argv)
     return options;
 }
 
-std::string
-WorkerResultPath(const std::string& prefix, uint32_t workerId)
-{
-    std::ostringstream path;
-    path << prefix << ".worker-" << workerId << ".results";
-    return path.str();
-}
-
 int
 RunWorker(const Options& options)
 {
@@ -635,93 +851,40 @@ RunSupervisor(const Options& options)
         Fail("--workers must be greater than zero");
     }
 
+    SparseGraph graph = ReadGraph(options.graphPath);
     Requests requests = ReadRequests(options.requestPath);
-    std::vector<pid_t> children;
-    children.reserve(options.workers);
-
-    for (uint32_t workerId = 0; workerId < options.workers; ++workerId)
+    if (graph.snapshotId != requests.snapshotId)
     {
-        std::string workerResult = WorkerResultPath(options.resultPrefix, workerId);
-        pid_t pid = fork();
-        if (pid < 0)
-        {
-            Fail(std::string("fork failed: ") + std::strerror(errno));
-        }
-        if (pid == 0)
-        {
-            std::vector<std::string> args = {
-                options.executablePath,
-                "--worker",
-                "--graph", options.graphPath,
-                "--requests", options.requestPath,
-                "--results", workerResult,
-                "--worker-id", std::to_string(workerId),
-                "--worker-count", std::to_string(options.workers),
-            };
-            std::vector<char*> cargs;
-            for (auto& item : args)
-            {
-                cargs.push_back(item.data());
-            }
-            cargs.push_back(nullptr);
-            execv(cargs[0], cargs.data());
-            std::cerr << "execv failed: " << std::strerror(errno) << std::endl;
-            _exit(127);
-        }
-        children.push_back(pid);
+        Fail("graph and request snapshot IDs differ");
     }
-
-    bool ok = true;
-    for (pid_t child : children)
-    {
-        int status = 0;
-        if (waitpid(child, &status, 0) < 0)
-        {
-            ok = false;
-            std::cerr << "waitpid failed: " << std::strerror(errno) << std::endl;
-            continue;
-        }
-        if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
-        {
-            ok = false;
-            std::cerr << "worker " << child << " failed with status " << status << std::endl;
-        }
-    }
-    if (!ok)
-    {
-        return 2;
-    }
-
-    std::vector<RouteResult> merged;
-    for (uint32_t workerId = 0; workerId < options.workers; ++workerId)
-    {
-        std::vector<RouteResult> workerResults =
-            ReadResults(WorkerResultPath(options.resultPrefix, workerId), requests.snapshotId);
-        merged.insert(merged.end(), workerResults.begin(), workerResults.end());
-    }
+    std::vector<RouteResult> results =
+        ComputeParallelResults(graph, requests, options.workers);
 
     WriteResults(options.resultPath,
                  requests.snapshotId,
                  requests.mode,
                  requests.metric,
                  std::numeric_limits<uint32_t>::max(),
-                 merged);
+                 results);
     return 0;
 }
 
 void
-WriteSelfTestGraph(const std::string& graphPath, const std::string& requestPath)
+WriteSelfTestGraph(const std::string& graphPath,
+                   const std::string& requestPath,
+                   RoutingMetric metric)
 {
     // Directed graph:
     // 0 -> 1 -> 3 costs 2
     // 0 -> 2 -> 3 costs 6
+    // 0 -> 3 costs 10 (preferred only by hop-count routing)
     // 1 -> 2 cost 1
     SparseGraph graph;
     graph.snapshotId = 7;
     graph.nodeCount = 4;
-    graph.rowOffsets = {0, 2, 4, 5, 5};
-    graph.colIndices = {1, 2, 2, 3, 3};
-    graph.weights = {1.0f, 5.0f, 1.0f, 1.0f, 1.0f};
+    graph.rowOffsets = {0, 3, 5, 6, 6};
+    graph.colIndices = {1, 2, 3, 2, 3, 3};
+    graph.weights = {1.0f, 5.0f, 10.0f, 1.0f, 1.0f, 1.0f};
 
     std::ofstream graphOut(graphPath, std::ios::binary | std::ios::trunc);
     GraphHeader graphHeader{};
@@ -746,7 +909,7 @@ WriteSelfTestGraph(const std::string& graphPath, const std::string& requestPath)
     reqHeader.snapshotId = graph.snapshotId;
     reqHeader.requestCount = static_cast<uint32_t>(requests.size());
     reqHeader.mode = static_cast<uint32_t>(RoutingMode::DESTINATION_TREE);
-    reqHeader.metric = static_cast<uint32_t>(RoutingMetric::WEIGHT);
+    reqHeader.metric = static_cast<uint32_t>(metric);
     WriteExact(reqOut, &reqHeader, 1);
     WriteExact(reqOut, requests.data(), requests.size());
 }
@@ -757,23 +920,35 @@ RunSelfTest(const Options& options)
     const std::string prefix = "/tmp/leosim-rengine-selftest";
     const std::string graphPath = prefix + ".graph";
     const std::string requestPath = prefix + ".requests";
-    const std::string resultPath = prefix + ".results";
-    WriteSelfTestGraph(graphPath, requestPath);
+    auto run = [&](RoutingMetric metric, uint32_t workers, const std::string& suffix) {
+        WriteSelfTestGraph(graphPath, requestPath, metric);
+        Options supervisor;
+        supervisor.executablePath = options.executablePath;
+        supervisor.graphPath = graphPath;
+        supervisor.requestPath = requestPath;
+        supervisor.resultPath = prefix + suffix + ".results";
+        supervisor.resultPrefix = prefix + suffix;
+        supervisor.workers = workers;
+        if (RunSupervisor(supervisor) != 0)
+        {
+            Fail("self-test supervisor failed");
+        }
+        return ReadResults(supervisor.resultPath, 7);
+    };
 
-    Options supervisor;
-    supervisor.executablePath = options.executablePath;
-    supervisor.graphPath = graphPath;
-    supervisor.requestPath = requestPath;
-    supervisor.resultPath = resultPath;
-    supervisor.resultPrefix = prefix;
-    supervisor.workers = 2;
-    int rc = RunSupervisor(supervisor);
-    if (rc != 0)
+    std::vector<RouteResult> results = run(RoutingMetric::WEIGHT, 3, "-weighted");
+    std::vector<RouteResult> serial = run(RoutingMetric::WEIGHT, 1, "-serial");
+    if (results.size() != serial.size() ||
+        !std::equal(results.begin(),
+                    results.end(),
+                    serial.begin(),
+                    [](const RouteResult& lhs, const RouteResult& rhs) {
+                        return std::memcmp(&lhs, &rhs, sizeof(RouteResult)) == 0;
+                    }))
     {
-        return rc;
+        Fail("self-test parallel weighted results differ from serial results");
     }
 
-    std::vector<RouteResult> results = ReadResults(resultPath, 7);
     std::map<std::pair<uint32_t, uint32_t>, RouteResult> byPair;
     for (const auto& result : results)
     {
@@ -799,7 +974,19 @@ RunSelfTest(const Options& options)
     require(2, 3, 3, true);
     require(3, 0, INVALID_NODE, false);
 
-    std::cout << "self-test passed: " << results.size() << " routes" << std::endl;
+    results = run(RoutingMetric::HOP_COUNT, 3, "-hop");
+    byPair.clear();
+    for (const auto& result : results)
+    {
+        byPair[{result.src, result.dst}] = result;
+    }
+    require(0, 3, 3, true);
+    require(1, 3, 3, true);
+    require(2, 3, 3, true);
+    require(3, 0, INVALID_NODE, false);
+
+    std::cout << "self-test passed: weighted and hop-count, serial and parallel"
+              << std::endl;
     return 0;
 }
 
