@@ -557,12 +557,6 @@ LeoSimDeviceInstaller::OnLinkStateChange(Ptr<Node> node1, Ptr<Node> node2, LeoSi
     
     NS_LOG_FUNCTION(this << node1->GetId() << node2->GetId() << newState);
     
-    if (m_verbose)
-    {
-        std::cout << "[POOL] Link " << node1->GetId() << "<->" << node2->GetId() 
-                  << " state: " << (newState == LEOSIM_LINK_UP ? "UP" : "DOWN") << std::endl;
-    }
-    
     auto errorModels = m_linkErrorModels.find(GetNodePairKey(node1, node2));
     if (errorModels == m_linkErrorModels.end())
     {

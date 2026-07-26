@@ -29,7 +29,9 @@
 #include "ns3/event-id.h"
 
 #include <algorithm>
+#include <chrono>
 #include <iomanip>
+#include <iostream>
 #include <sstream>
 #include <vector>
 
@@ -526,8 +528,15 @@ LeoSimRoutingCalculatorHelper::UpdateRoutesAndReschedule(Ptr<LeoSimRoutingCalcul
         NS_LOG_DEBUG("Active links in network: " << activeLinksBeforeUpdate);
     }
 
-    // Reinstall routes with fresh calculations
+    // Reinstall routes with fresh calculations and report this update separately.
+    const auto wallStart = std::chrono::steady_clock::now();
     SetStaticRoutes(calculator, sources, destinations, verbose, metric);
+    const double wallSeconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - wallStart).count();
+    std::cout << "[timing] dynamic routing update completed; sim=" << std::fixed
+              << std::setprecision(3) << currentTime << "s, interval="
+              << updateInterval.GetSeconds() << "s, wall=" << wallSeconds << "s"
+              << std::endl;
 
     // Get active link count after update
     if (verbose && calculator)

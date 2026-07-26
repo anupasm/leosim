@@ -2,7 +2,7 @@
 #SBATCH --job-name=leosim-routing
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=6
+#SBATCH --cpus-per-task=9
 #SBATCH --time=24:00:00
 #SBATCH --array=0-4%10
 #SBATCH --output=logs/%x-%A_%a.out
@@ -29,7 +29,7 @@ fi
 METRICS=(hop distance path-loss snr signal-strength)
 SATELLITE_COUNTS=(1000)
 SIM_TIMES=(1200)
-UPDATE_INTERVALS=(5)
+UPDATE_INTERVALS=(30)
 
 REPO_ROOT="${REPO_ROOT:-${SLURM_SUBMIT_DIR}}"
 SIF="${SIF:-${REPO_ROOT}/leosim.sif}"

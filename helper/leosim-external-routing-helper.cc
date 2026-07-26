@@ -21,9 +21,12 @@
 #include "../utils/rengine/rengine-format.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
+#include <iomanip>
+#include <iostream>
 #include <limits>
 #include <set>
 #include <sstream>
@@ -392,7 +395,14 @@ LeoSimExternalRoutingHelper::UpdateRoutesAndReschedule(Ptr<LeoSimRoutingCalculat
                                                        bool verbose)
 {
     const double now = Simulator::Now().GetSeconds();
-    SetStaticRoutes(calculator, sources, destinations, verbose);
+    const auto wallStart = std::chrono::steady_clock::now();
+    const bool succeeded = SetStaticRoutes(calculator, sources, destinations, verbose);
+    const double wallSeconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - wallStart).count();
+    std::cout << "[timing] dynamic routing update completed; sim=" << std::fixed
+              << std::setprecision(3) << now << "s, interval="
+              << updateInterval.GetSeconds() << "s, wall=" << wallSeconds
+              << "s, success=" << (succeeded ? "true" : "false") << std::endl;
 
     if (stopTime > 0.0 && now + updateInterval.GetSeconds() >= stopTime)
     {
