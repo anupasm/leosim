@@ -39,6 +39,7 @@ namespace ns3
 class LeoSimBeamManager;
 class LeoSimDijkstraRoutingModel;
 class LeoSimRouteProvider;
+struct LeoSimTopsisCandidate;
 struct LeoSimRoutingContext;
 struct LeoSimRoutingRequest;
 
@@ -504,6 +505,16 @@ class LeoSimRoutingCalculator : public Object
      * \return True if the access link may be used for routing.
      */
     bool IsAccessLinkAllowed(Ptr<Node> source, Ptr<Node> destination);
+
+    LeoSimAccessLinkState GetAccessLinkState(
+        Ptr<Node> source,
+        Ptr<Node> destination,
+        std::map<uint32_t, std::vector<LeoSimTopsisCandidate>>* rankedCandidatesCache);
+
+    bool IsAccessLinkAllowed(
+        Ptr<Node> source,
+        Ptr<Node> destination,
+        std::map<uint32_t, std::vector<LeoSimTopsisCandidate>>* rankedCandidatesCache);
 
     /**
      * \brief Check if link meets SNR constraint

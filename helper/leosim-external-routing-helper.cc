@@ -935,64 +935,79 @@ LeoSimExternalRoutingHelper::ApplyResults(const GraphExport& exportInfo,
     uint32_t installed = 0;
     uint32_t skipped = 0;
 
-    for (Ptr<Node> node : exportInfo.routingIdToNode)
     {
-        if (node && cleanedSourceNodeIds.insert(node->GetId()).second)
+        LeoSimTaskProfiler::ScopedEvent phase(
+            "run_simulation.external_routing.apply_results.remove_old_routes");
+        for (Ptr<Node> node : exportInfo.routingIdToNode)
         {
-            RemoveComputedHostRoutes(node, verbose);
+            if (node && cleanedSourceNodeIds.insert(node->GetId()).second)
+            {
+                RemoveComputedHostRoutes(node, verbose);
+            }
         }
     }
 
-    for (const auto& result : results)
     {
-        if (!result.valid ||
-            result.src >= exportInfo.routingIdToNode.size() ||
-            result.dst >= exportInfo.routingIdToNode.size() ||
-            result.nextHop >= exportInfo.routingIdToNode.size())
+        LeoSimTaskProfiler::ScopedEvent phase(
+            "run_simulation.external_routing.apply_results.validate_and_install_routes");
+        for (const auto& result : results)
         {
-            ++skipped;
-            continue;
-        }
+            if (!result.valid ||
+                result.src >= exportInfo.routingIdToNode.size() ||
+                result.dst >= exportInfo.routingIdToNode.size() ||
+                result.nextHop >= exportInfo.routingIdToNode.size())
+            {
+                ++skipped;
+                continue;
+            }
 
-        Ptr<Node> srcNode = exportInfo.routingIdToNode[result.src];
-        Ptr<Node> dstNode = exportInfo.routingIdToNode[result.dst];
-        Ptr<Node> nextHopNode = exportInfo.routingIdToNode[result.nextHop];
-        if (!srcNode || !dstNode || !nextHopNode)
-        {
-            ++skipped;
-            continue;
-        }
+            Ptr<Node> srcNode = exportInfo.routingIdToNode[result.src];
+            Ptr<Node> dstNode = exportInfo.routingIdToNode[result.dst];
+            Ptr<Node> nextHopNode = exportInfo.routingIdToNode[result.nextHop];
+            if (!srcNode || !dstNode || !nextHopNode)
+            {
+                ++skipped;
+                continue;
+            }
 
-        Ptr<Ipv4> srcIpv4 = srcNode->GetObject<Ipv4>();
-        if (!srcIpv4)
-        {
-            ++skipped;
-            continue;
-        }
+            Ptr<Ipv4> srcIpv4 = srcNode->GetObject<Ipv4>();
+            if (!srcIpv4)
+            {
+                ++skipped;
+                continue;
+            }
 
-        Ptr<Ipv4StaticRouting> staticRouting =
-            Ipv4RoutingHelper::GetRouting<Ipv4StaticRouting>(srcIpv4->GetRoutingProtocol());
-        if (!staticRouting)
-        {
-            ++skipped;
-            continue;
-        }
+            Ptr<Ipv4StaticRouting> staticRouting =
+                Ipv4RoutingHelper::GetRouting<Ipv4StaticRouting>(srcIpv4->GetRoutingProtocol());
+            if (!staticRouting)
+            {
+                ++skipped;
+                continue;
+            }
 
-        uint32_t sourceInterface = 0;
-        std::string nextHopAddressString;
-        if (!FindNextHopAddress(srcNode, nextHopNode, sourceInterface, nextHopAddressString))
-        {
-            ++skipped;
-            continue;
-        }
+            uint32_t sourceInterface = 0;
+            std::string nextHopAddressString;
+            if (!FindNextHopAddress(srcNode,
+                                    nextHopNode,
+                                    sourceInterface,
+                                    nextHopAddressString))
+            {
+                ++skipped;
+                continue;
+            }
 
-        Ipv4Address nextHopAddress(nextHopAddressString.c_str());
-        Ipv4Mask hostMask("255.255.255.255");
-        for (const auto& dstAddressString : GetDestinationAddresses(dstNode))
-        {
-            Ipv4Address dstAddress(dstAddressString.c_str());
-            staticRouting->AddNetworkRouteTo(dstAddress, hostMask, nextHopAddress, sourceInterface, 100);
-            ++installed;
+            Ipv4Address nextHopAddress(nextHopAddressString.c_str());
+            Ipv4Mask hostMask("255.255.255.255");
+            for (const auto& dstAddressString : GetDestinationAddresses(dstNode))
+            {
+                Ipv4Address dstAddress(dstAddressString.c_str());
+                staticRouting->AddNetworkRouteTo(dstAddress,
+                                                 hostMask,
+                                                 nextHopAddress,
+                                                 sourceInterface,
+                                                 100);
+                ++installed;
+            }
         }
     }
 

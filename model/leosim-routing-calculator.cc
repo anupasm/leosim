@@ -18,6 +18,7 @@
 #include "leosim-routing-calculator.h"
 #include "leosim-beam-manager.h"
 #include "leosim-mobility-model.h"
+#include "leosim-task-profiler.h"
 
 #include "ns3/log.h"
 #include "ns3/simulator.h"
@@ -700,12 +701,22 @@ LeoSimRoutingCalculator::IsLinkAvailable(Ptr<Node> source, Ptr<Node> destination
 bool
 LeoSimRoutingCalculator::IsAccessLinkAllowed(Ptr<Node> source, Ptr<Node> destination)
 {
+    return IsAccessLinkAllowed(source, destination, nullptr);
+}
+
+bool
+LeoSimRoutingCalculator::IsAccessLinkAllowed(
+    Ptr<Node> source,
+    Ptr<Node> destination,
+    std::map<uint32_t, std::vector<LeoSimTopsisCandidate>>* rankedCandidatesCache)
+{
     if (!m_accessAuthorityEnabled)
     {
         return true;
     }
 
-    LeoSimAccessLinkState state = GetAccessLinkState(source, destination);
+    LeoSimAccessLinkState state =
+        GetAccessLinkState(source, destination, rankedCandidatesCache);
     return state == LEOSIM_ACCESS_NOT_APPLICABLE ||
            state == LEOSIM_ACCESS_SERVING ||
            (m_accessLinkPolicy == LEOSIM_ACCESS_SERVING_AND_CHO &&
@@ -716,6 +727,15 @@ LeoSimRoutingCalculator::IsAccessLinkAllowed(Ptr<Node> source, Ptr<Node> destina
 
 LeoSimRoutingCalculator::LeoSimAccessLinkState
 LeoSimRoutingCalculator::GetAccessLinkState(Ptr<Node> source, Ptr<Node> destination)
+{
+    return GetAccessLinkState(source, destination, nullptr);
+}
+
+LeoSimRoutingCalculator::LeoSimAccessLinkState
+LeoSimRoutingCalculator::GetAccessLinkState(
+    Ptr<Node> source,
+    Ptr<Node> destination,
+    std::map<uint32_t, std::vector<LeoSimTopsisCandidate>>* rankedCandidatesCache)
 {
     if (!source || !destination)
     {
@@ -777,10 +797,25 @@ LeoSimRoutingCalculator::GetAccessLinkState(Ptr<Node> source, Ptr<Node> destinat
         return preparedIt->beamActive ? LEOSIM_ACCESS_PREPARED : LEOSIM_ACCESS_BEAM_DARK;
     }
 
-    const auto ranked = m_beamManager->GetRankedCandidates(groundId);
+    std::vector<LeoSimTopsisCandidate> uncachedRanked;
+    const std::vector<LeoSimTopsisCandidate>* ranked = nullptr;
+    if (rankedCandidatesCache)
+    {
+        auto [it, inserted] = rankedCandidatesCache->try_emplace(groundId);
+        if (inserted)
+        {
+            it->second = m_beamManager->GetRankedCandidates(groundId);
+        }
+        ranked = &it->second;
+    }
+    else
+    {
+        uncachedRanked = m_beamManager->GetRankedCandidates(groundId);
+        ranked = &uncachedRanked;
+    }
     uint32_t accepted = 0;
     bool hasEligibleBeam = false;
-    for (const auto& candidate : ranked)
+    for (const auto& candidate : *ranked)
     {
         const LeoSimBeamRecord& rec = candidate.beamRecord;
         if (!rec.beamActive)
@@ -888,22 +923,72 @@ LeoSimRoutingCalculator::GetActiveLinks()
         }
     };
 
-    for (const auto& link : m_channelModel->GetActiveLinks())
+    std::vector<std::pair<Ptr<Node>, Ptr<Node>>> channelLinks;
     {
-        LeoSimChannelQuality quality = GetLinkQuality(link.first, link.second);
-        if (quality.linkType == LEOSIM_LINK_SATELLITE_TO_GROUND &&
-            !IsAccessLinkAllowed(link.first, link.second))
+        LeoSimTaskProfiler::ScopedEvent phase(
+            "run_simulation.routing_calculator.get_active_links.fetch_ground_channel");
+        channelLinks = m_channelModel->GetActiveLinks();
+    }
+
+    struct ClassifiedLink
+    {
+        std::pair<Ptr<Node>, Ptr<Node>> nodes;
+        bool requiresAccessCheck{false};
+        bool allowed{true};
+    };
+    std::vector<ClassifiedLink> classifiedLinks;
+    classifiedLinks.reserve(channelLinks.size());
+    {
+        LeoSimTaskProfiler::ScopedEvent phase(
+            "run_simulation.routing_calculator.get_active_links.classify_ground_channel");
+        for (const auto& link : channelLinks)
         {
-            continue;
+            const LeoSimChannelQuality quality = GetLinkQuality(link.first, link.second);
+            classifiedLinks.push_back(
+                {link, quality.linkType == LEOSIM_LINK_SATELLITE_TO_GROUND, true});
         }
-        appendIfNew(link.first, link.second);
+    }
+    {
+        LeoSimTaskProfiler::ScopedEvent phase(
+            "run_simulation.routing_calculator.get_active_links.check_access_authority");
+        std::map<uint32_t, std::vector<LeoSimTopsisCandidate>> rankedCandidatesCache;
+        for (auto& link : classifiedLinks)
+        {
+            if (link.requiresAccessCheck)
+            {
+                link.allowed = IsAccessLinkAllowed(link.nodes.first,
+                                                   link.nodes.second,
+                                                   &rankedCandidatesCache);
+            }
+        }
+    }
+    {
+        LeoSimTaskProfiler::ScopedEvent phase(
+            "run_simulation.routing_calculator.get_active_links.deduplicate_ground_channel");
+        for (const auto& link : classifiedLinks)
+        {
+            if (link.allowed)
+            {
+                appendIfNew(link.nodes.first, link.nodes.second);
+            }
+        }
     }
 
     if (m_islChannelModel)
     {
-        for (const auto& link : m_islChannelModel->GetActiveLinks())
+        std::vector<std::pair<Ptr<Node>, Ptr<Node>>> islLinks;
         {
-            appendIfNew(link.first, link.second);
+            LeoSimTaskProfiler::ScopedEvent phase(
+                "run_simulation.routing_calculator.get_active_links.fetch_isl_channel");
+            islLinks = m_islChannelModel->GetActiveLinks();
+        }
+        {
+            LeoSimTaskProfiler::ScopedEvent phase(
+                "run_simulation.routing_calculator.get_active_links.deduplicate_isl_channel");
+            for (const auto& link : islLinks)
+            {
+                appendIfNew(link.first, link.second);
+            }
         }
     }
 

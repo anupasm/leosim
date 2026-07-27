@@ -3274,6 +3274,8 @@ std::vector<LeoSimBeamRecord>
 LeoSimBeamManager::GetPreparedCandidateBeams(uint32_t groundNodeId) const
 {
     NS_LOG_FUNCTION(this << groundNodeId);
+    LeoSimTaskProfiler::ScopedEvent profile(
+        "run_simulation.routing_calculator.get_active_links.access.get_prepared_candidates");
 
     std::vector<LeoSimBeamRecord> prepared;
 
@@ -3371,8 +3373,20 @@ std::vector<LeoSimTopsisCandidate>
 LeoSimBeamManager::GetRankedCandidates(uint32_t ueNodeId)
 {
     NS_LOG_FUNCTION(this << ueNodeId);
-    std::vector<LeoSimBeamRecord> visible = ScanVisibleSatellites(ueNodeId);
-    return RankByTopsis(visible, ueNodeId);
+    LeoSimTaskProfiler::ScopedEvent profile(
+        "run_simulation.routing_calculator.get_active_links.access.get_ranked_candidates");
+
+    std::vector<LeoSimBeamRecord> visible;
+    {
+        LeoSimTaskProfiler::ScopedEvent phase(
+            "run_simulation.routing_calculator.get_active_links.access.scan_visible_satellites");
+        visible = ScanVisibleSatellites(ueNodeId);
+    }
+    {
+        LeoSimTaskProfiler::ScopedEvent phase(
+            "run_simulation.routing_calculator.get_active_links.access.rank_by_topsis");
+        return RankByTopsis(visible, ueNodeId);
+    }
 }
 
 double
