@@ -596,8 +596,18 @@ LeoSimBeamManager::RunTttEvaluation(uint32_t ueNodeId)
     const LeoSimBeamRecord& servingBeam = beamIt->second;
 
     // Get visible satellites and rank them by TOPSIS
-    std::vector<LeoSimBeamRecord> visibleBeams = ScanVisibleSatellites(ueNodeId);
-    std::vector<LeoSimTopsisCandidate> rankedCandidates = RankByTopsis(visibleBeams, ueNodeId);
+    std::vector<LeoSimBeamRecord> visibleBeams;
+    {
+        LeoSimTaskProfiler::ScopedEvent phase(
+            "run_simulation.beam_update_cycle.run_ttt_evaluation.scan_visible_satellites");
+        visibleBeams = ScanVisibleSatellites(ueNodeId);
+    }
+    std::vector<LeoSimTopsisCandidate> rankedCandidates;
+    {
+        LeoSimTaskProfiler::ScopedEvent phase(
+            "run_simulation.beam_update_cycle.run_ttt_evaluation.rank_by_topsis");
+        rankedCandidates = RankByTopsis(visibleBeams, ueNodeId);
+    }
 
     // Return early if no candidates are available
     if (rankedCandidates.empty())
@@ -762,6 +772,8 @@ double
 LeoSimBeamManager::ComputeTte(uint32_t ueNodeId, uint32_t satNodeId) const
 {
     NS_LOG_FUNCTION(this << ueNodeId << satNodeId);
+    LeoSimTaskProfiler::ScopedEvent profile(
+        "run_simulation.beam_manager.scan_visible_satellites.compute_tte");
 
     // Check for necessary dependencies
     if (!m_loader)
@@ -891,6 +903,8 @@ std::vector<LeoSimBeamRecord>
 LeoSimBeamManager::ScanVisibleSatellites(uint32_t ueNodeId)
 {
     NS_LOG_FUNCTION(this << ueNodeId);
+    LeoSimTaskProfiler::ScopedEvent profile(
+        "run_simulation.beam_manager.scan_visible_satellites");
 
     if (m_visibleScanCacheEnabled)
     {
@@ -2540,6 +2554,7 @@ LeoSimBeamManager::UpdateCycle()
     }
 
     m_visibleScanCache.clear();
+    m_gatewayRouteCache.clear();
     m_visibleScanCacheEnabled = true;
 
     // Drive the beam manager state machine for each managed ground node.
@@ -2557,6 +2572,8 @@ LeoSimBeamManager::UpdateCycle()
         auto beamIt = m_currentBeams.find(ueNodeId);
         if (beamIt == m_currentBeams.end())
         {
+            LeoSimTaskProfiler::ScopedEvent phase(
+                "run_simulation.beam_update_cycle.initial_association");
             std::vector<LeoSimBeamRecord> visible = ScanVisibleSatellites(ueNodeId);
             std::vector<LeoSimTopsisCandidate> ranked = RankByTopsis(visible, ueNodeId);
             if (ranked.empty())
@@ -2629,41 +2646,55 @@ LeoSimBeamManager::UpdateCycle()
         uint32_t currentSatId = currentBeam.satelliteNodeId;
 
         // Refresh current-beam metrics for logging and decision-making.
-        if (m_channelModel)
         {
-            LeoSimChannelQuality servingQual =
-                m_channelModel->GetLinkQuality(ueNodeId, currentSatId);
-            currentBeam.rsrp = servingQual.signalStrength;
-            currentBeam.snr = servingQual.snr;
-            currentBeam.pathLoss = servingQual.pathLoss;
-            currentBeam.elevationAngle = servingQual.elevationAngle;
-            currentBeam.remainingServiceTime = ComputeTte(ueNodeId, currentSatId);
-            currentBeam.endToEndLatency = ComputeEndToEndLatency(ueNodeId, currentSatId);
+            LeoSimTaskProfiler::ScopedEvent phase(
+                "run_simulation.beam_update_cycle.refresh_serving_metrics");
+            if (m_channelModel)
+            {
+                LeoSimChannelQuality servingQual =
+                    m_channelModel->GetLinkQuality(ueNodeId, currentSatId);
+                currentBeam.rsrp = servingQual.signalStrength;
+                currentBeam.snr = servingQual.snr;
+                currentBeam.pathLoss = servingQual.pathLoss;
+                currentBeam.elevationAngle = servingQual.elevationAngle;
+                currentBeam.remainingServiceTime = ComputeTte(ueNodeId, currentSatId);
+                currentBeam.endToEndLatency = ComputeEndToEndLatency(ueNodeId, currentSatId);
+            }
         }
 
         // Refresh serving SINR before intra-beam trigger checks.
-        if (m_loader && m_sinrEngine && m_multiBeamModel)
         {
-            double ueLat = 0.0;
-            double ueLon = 0.0;
-            if (!TryGetGroundNodeLatLon(ueNodeId, m_loader, ueLat, ueLon))
+            LeoSimTaskProfiler::ScopedEvent phase(
+                "run_simulation.beam_update_cycle.refresh_serving_sinr");
+            if (m_loader && m_sinrEngine && m_multiBeamModel)
             {
-                continue;
+                double ueLat = 0.0;
+                double ueLon = 0.0;
+                if (!TryGetGroundNodeLatLon(ueNodeId, m_loader, ueLat, ueLon))
+                {
+                    continue;
+                }
+                const auto& allBeams = m_multiBeamModel->GetAllBeams();
+                LeoSimSinrResult servingSinr = m_sinrEngine->ComputeSinr(ueNodeId,
+                                                                         currentSatId,
+                                                                         currentBeam.beamId,
+                                                                         allBeams,
+                                                                         ueLat,
+                                                                         ueLon);
+                currentBeam.sinr = servingSinr.sinr_dB;
+                currentBeam.intraBeamInterference_dBm =
+                    servingSinr.intraBeamInterference_dBm;
+                currentBeam.interSatInterference_dBm =
+                    servingSinr.interSatInterference_dBm;
             }
-            const auto& allBeams = m_multiBeamModel->GetAllBeams();
-            LeoSimSinrResult servingSinr = m_sinrEngine->ComputeSinr(ueNodeId,
-                                                                     currentSatId,
-                                                                     currentBeam.beamId,
-                                                                     allBeams,
-                                                                     ueLat,
-                                                                     ueLon);
-            currentBeam.sinr = servingSinr.sinr_dB;
-            currentBeam.intraBeamInterference_dBm = servingSinr.intraBeamInterference_dBm;
-            currentBeam.interSatInterference_dBm = servingSinr.interSatInterference_dBm;
         }
 
         // Run intra-beam checks using refreshed serving metrics.
-        EvaluateIntraBeamNeed(ueNodeId);
+        {
+            LeoSimTaskProfiler::ScopedEvent phase(
+                "run_simulation.beam_update_cycle.evaluate_intra_beam");
+            EvaluateIntraBeamNeed(ueNodeId);
+        }
 
         // Intra-beam logic may have transitioned state and/or serving beam.
         auto refreshed = m_currentBeams.find(ueNodeId);
@@ -2680,14 +2711,20 @@ LeoSimBeamManager::UpdateCycle()
         LeoSimBeamRecord& currentBeamPostIntra = refreshed->second;
         currentSatId = currentBeamPostIntra.satelliteNodeId;
 
-        if (!m_beamStateCallback.IsNull())
         {
-            m_beamStateCallback(ueNodeId, currentBeamPostIntra, 0.0);
+            LeoSimTaskProfiler::ScopedEvent phase(
+                "run_simulation.beam_update_cycle.beam_state_callback");
+            if (!m_beamStateCallback.IsNull())
+            {
+                m_beamStateCallback(ueNodeId, currentBeamPostIntra, 0.0);
+            }
         }
 
         // Earth-fixed beam mode: beam steering based on cell footprints.
         if (m_earthFixedBeam)
         {
+            LeoSimTaskProfiler::ScopedEvent phase(
+                "run_simulation.beam_update_cycle.earth_fixed_beam_selection");
             NS_LOG_DEBUG("Processing UE " << ueNodeId << " in earth-fixed beam mode");
 
             Ptr<Node> bestServing = FindServingBeamForFootprint(ueNodeId);
@@ -2714,17 +2751,25 @@ LeoSimBeamManager::UpdateCycle()
         // CHO condition evaluation should be revisited periodically.
         if (currentBeam.state == LEOSIM_BEAM_EVALUATING)
         {
+            LeoSimTaskProfiler::ScopedEvent phase(
+                "run_simulation.beam_update_cycle.evaluate_cho_conditions");
             EvaluateChoConditions(ueNodeId);
         }
 
         // When connected, run TTT/A3/A4 evaluation to trigger CHO preparation.
         if (currentBeam.state == LEOSIM_BEAM_CONNECTED)
         {
+            LeoSimTaskProfiler::ScopedEvent phase(
+                "run_simulation.beam_update_cycle.run_ttt_evaluation");
             RunTttEvaluation(ueNodeId);
         }
 
         // Always run RLF detection.
-        RunT310Evaluation(ueNodeId);
+        {
+            LeoSimTaskProfiler::ScopedEvent phase(
+                "run_simulation.beam_update_cycle.run_t310_evaluation");
+            RunT310Evaluation(ueNodeId);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -2734,11 +2779,14 @@ LeoSimBeamManager::UpdateCycle()
     // -----------------------------------------------------------------------
     if (m_multiBeamModel)
     {
+        LeoSimTaskProfiler::ScopedEvent phase(
+            "run_simulation.beam_update_cycle.steer_phased_array_beams");
         SteerPhasedArrayBeams();
     }
 
     m_visibleScanCacheEnabled = false;
     m_visibleScanCache.clear();
+    m_gatewayRouteCache.clear();
 
     // Reschedule the next update cycle
     m_updateEventId = Simulator::Schedule(m_updateInterval, &LeoSimBeamManager::UpdateCycle, this);
@@ -2778,6 +2826,8 @@ double
 LeoSimBeamManager::ComputeEndToEndLatency(uint32_t ueNodeId, uint32_t satNodeId) const
 {
     NS_LOG_FUNCTION(this << ueNodeId << satNodeId);
+    LeoSimTaskProfiler::ScopedEvent profile(
+        "run_simulation.beam_manager.scan_visible_satellites.compute_end_to_end_latency");
 
     if (!m_loader && !m_channelModel)
     {
@@ -2832,8 +2882,27 @@ LeoSimBeamManager::ComputeEndToEndLatency(uint32_t ueNodeId, uint32_t satNodeId)
     double bestRouteDistance = std::numeric_limits<double>::max();
     uint32_t bestServerId = std::numeric_limits<uint32_t>::max();
 
-    if (m_routingCalculator)
+    uint32_t excludedGatewayId = std::numeric_limits<uint32_t>::max();
+    Ptr<LeoSimMobilityModel> sourceMobility = ueNode->GetObject<LeoSimMobilityModel>();
+    if (sourceMobility && sourceMobility->GetNodeType() == LEOSIM_GATEWAY)
     {
+        excludedGatewayId = ueNodeId;
+    }
+    const auto gatewayRouteCacheKey = std::make_pair(satNodeId, excludedGatewayId);
+    const auto cachedRoute = m_visibleScanCacheEnabled
+                                 ? m_gatewayRouteCache.find(gatewayRouteCacheKey)
+                                 : m_gatewayRouteCache.end();
+    if (cachedRoute != m_gatewayRouteCache.end())
+    {
+        bestRouteLatencyMs = cachedRoute->second.latencyMs;
+        bestRouteDistance = cachedRoute->second.distance;
+        bestServerId = cachedRoute->second.gatewayNodeId;
+    }
+    else if (m_routingCalculator)
+    {
+        LeoSimTaskProfiler::ScopedEvent phase(
+            "run_simulation.beam_manager.scan_visible_satellites.compute_end_to_end_latency."
+            "find_gateway_route");
         const bool previousAccessAuthority = m_routingCalculator->IsAccessAuthorityEnabled();
         m_routingCalculator->SetAccessAuthorityEnabled(false);
         for (uint32_t i = 0; i < m_groundNodes.GetN(); ++i)
@@ -2876,6 +2945,14 @@ LeoSimBeamManager::ComputeEndToEndLatency(uint32_t ueNodeId, uint32_t satNodeId)
             }
         }
         m_routingCalculator->SetAccessAuthorityEnabled(previousAccessAuthority);
+
+        if (m_visibleScanCacheEnabled)
+        {
+            m_gatewayRouteCache[gatewayRouteCacheKey] = {
+                bestRouteLatencyMs,
+                bestRouteDistance,
+                bestServerId};
+        }
     }
 
     const double routedDistance =

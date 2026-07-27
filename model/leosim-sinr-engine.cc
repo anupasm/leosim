@@ -16,6 +16,7 @@
  */
 
 #include "leosim-sinr-engine.h"
+#include "leosim-task-profiler.h"
 
 #include "ns3/log.h"
 
@@ -143,6 +144,7 @@ LeoSimSinrEngine::ComputeSinr(uint32_t ueNodeId,
                               double ueLon) const
 {
     NS_LOG_FUNCTION(this << ueNodeId << servingSatId << servingBeamId << ueLat << ueLon);
+    LeoSimTaskProfiler::ScopedEvent profile("run_simulation.sinr_engine.compute_sinr");
 
     LeoSimSinrResult result{};
     result.servingBeamId = servingBeamId;

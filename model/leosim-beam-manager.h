@@ -724,6 +724,14 @@ class LeoSimBeamManager : public Object
     std::map<uint32_t, std::vector<LeoSimTopsisCandidate>> m_candidates; //!< Ranked candidates
     std::map<uint32_t, std::vector<LeoSimBeamRecord>> m_visibleScanCache; //!< Per-update visibility results
     bool m_visibleScanCacheEnabled = false;              //!< Restrict cache lifetime to UpdateCycle
+    struct GatewayRouteMetrics
+    {
+        double latencyMs;
+        double distance;
+        uint32_t gatewayNodeId;
+    };
+    mutable std::map<std::pair<uint32_t, uint32_t>, GatewayRouteMetrics>
+        m_gatewayRouteCache; //!< Per-update route metrics keyed by satellite/excluded gateway
     std::map<uint32_t, std::vector<uint32_t>> m_bufferedPackets; //!< Buffered packets per UE
     std::map<uint32_t, Time> m_lastHandoverTime;         //!< Last HO time per UE
     std::map<uint32_t, Ptr<LeoSimBeamHoppingManager>> m_beamHopManagers; //!< Per-satellite hopping managers
