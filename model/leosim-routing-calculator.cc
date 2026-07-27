@@ -538,6 +538,8 @@ std::map<Ptr<Node>, std::set<Ptr<Node>>>
 LeoSimRoutingCalculator::GetTopology(PathType pathType)
 {
     NS_LOG_FUNCTION(this << pathType);
+    LeoSimTaskProfiler::ScopedEvent profile(
+        "run_simulation.routing_calculator.dijkstra.get_topology");
 
     std::map<Ptr<Node>, std::set<Ptr<Node>>> topology;
 
@@ -1164,8 +1166,17 @@ LeoSimRoutingCalculator::DijkstrasAlgorithm(Ptr<Node> source,
                                              double snrConstraint)
 {
     NS_LOG_FUNCTION(this << source << destination << metric << pathType << snrConstraint);
+    LeoSimTaskProfiler::ScopedEvent profile(
+        "run_simulation.routing_calculator.dijkstra");
 
-    std::map<Ptr<Node>, std::set<Ptr<Node>>> topology = GetTopology(pathType);
+    std::map<Ptr<Node>, std::set<Ptr<Node>>> topology;
+    {
+        LeoSimTaskProfiler::ScopedEvent phase(
+            "run_simulation.routing_calculator.dijkstra.copy_topology");
+        topology = GetTopology(pathType);
+    }
+    LeoSimTaskProfiler::ScopedEvent searchPhase(
+        "run_simulation.routing_calculator.dijkstra.shortest_path_and_route_build");
 
     // Dijkstra's algorithm
     std::map<Ptr<Node>, double> distances;

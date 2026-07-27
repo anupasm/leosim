@@ -44,6 +44,32 @@ namespace
 {
 constexpr double EARTH_RADIUS_KM = 6371.0;
 
+class RoutingAccessAuthorityGuard
+{
+  public:
+    explicit RoutingAccessAuthorityGuard(Ptr<LeoSimRoutingCalculator> calculator)
+        : m_calculator(calculator),
+          m_previousEnabled(calculator && calculator->IsAccessAuthorityEnabled())
+    {
+        if (m_calculator)
+        {
+            m_calculator->SetAccessAuthorityEnabled(false);
+        }
+    }
+
+    ~RoutingAccessAuthorityGuard()
+    {
+        if (m_calculator)
+        {
+            m_calculator->SetAccessAuthorityEnabled(m_previousEnabled);
+        }
+    }
+
+  private:
+    Ptr<LeoSimRoutingCalculator> m_calculator;
+    bool m_previousEnabled;
+};
+
 double
 GreatCircleDistanceKm(double lat1Deg, double lon1Deg, double lat2Deg, double lon2Deg)
 {
@@ -2903,8 +2929,7 @@ LeoSimBeamManager::ComputeEndToEndLatency(uint32_t ueNodeId, uint32_t satNodeId)
         LeoSimTaskProfiler::ScopedEvent phase(
             "run_simulation.beam_manager.scan_visible_satellites.compute_end_to_end_latency."
             "find_gateway_route");
-        const bool previousAccessAuthority = m_routingCalculator->IsAccessAuthorityEnabled();
-        m_routingCalculator->SetAccessAuthorityEnabled(false);
+        RoutingAccessAuthorityGuard routingAuthorityGuard(m_routingCalculator);
         for (uint32_t i = 0; i < m_groundNodes.GetN(); ++i)
         {
             Ptr<Node> groundNode = m_groundNodes.Get(i);
@@ -2944,8 +2969,6 @@ LeoSimBeamManager::ComputeEndToEndLatency(uint32_t ueNodeId, uint32_t satNodeId)
                 bestServerId = groundNode->GetId();
             }
         }
-        m_routingCalculator->SetAccessAuthorityEnabled(previousAccessAuthority);
-
         if (m_visibleScanCacheEnabled)
         {
             m_gatewayRouteCache[gatewayRouteCacheKey] = {
