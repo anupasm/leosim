@@ -218,6 +218,9 @@ LeoSimExternalRoutingHelper::UpdateRouteStatistics(
     const GraphExport& exportInfo,
     const std::vector<RouteResultRecord>& results)
 {
+    LeoSimTaskProfiler::ScopedEvent profile(
+        "run_simulation.external_routing.update_route_statistics");
+
     if (!calculator || m_statisticsSources.GetN() == 0 ||
         m_statisticsDestinations.GetN() == 0)
     {
@@ -520,20 +523,33 @@ LeoSimExternalRoutingHelper::ExportSnapshot(Ptr<LeoSimRoutingCalculator> calcula
     exportInfo.requestPath = exportInfo.prefix + ".requests";
     exportInfo.resultPath = exportInfo.prefix + ".results";
 
-    for (uint32_t i = 0; i < sources.GetN(); ++i)
     {
-        RegisterNode(sources.Get(i), exportInfo);
-    }
-    for (uint32_t i = 0; i < destinations.GetN(); ++i)
-    {
-        RegisterNode(destinations.Get(i), exportInfo);
+        LeoSimTaskProfiler::ScopedEvent phase(
+            "run_simulation.external_routing.export_snapshot.register_endpoints");
+        for (uint32_t i = 0; i < sources.GetN(); ++i)
+        {
+            RegisterNode(sources.Get(i), exportInfo);
+        }
+        for (uint32_t i = 0; i < destinations.GetN(); ++i)
+        {
+            RegisterNode(destinations.Get(i), exportInfo);
+        }
     }
 
-    std::vector<std::pair<Ptr<Node>, Ptr<Node>>> links = calculator->GetActiveLinks();
-    for (const auto& link : links)
+    std::vector<std::pair<Ptr<Node>, Ptr<Node>>> links;
     {
-        RegisterNode(link.first, exportInfo);
-        RegisterNode(link.second, exportInfo);
+        LeoSimTaskProfiler::ScopedEvent phase(
+            "run_simulation.external_routing.export_snapshot.get_active_links");
+        links = calculator->GetActiveLinks();
+    }
+    {
+        LeoSimTaskProfiler::ScopedEvent phase(
+            "run_simulation.external_routing.export_snapshot.register_link_nodes");
+        for (const auto& link : links)
+        {
+            RegisterNode(link.first, exportInfo);
+            RegisterNode(link.second, exportInfo);
+        }
     }
 
     const uint32_t nodeCount = exportInfo.routingIdToNode.size();
@@ -557,118 +573,143 @@ LeoSimExternalRoutingHelper::ExportSnapshot(Ptr<LeoSimRoutingCalculator> calcula
     }
 
     std::vector<std::vector<std::pair<uint32_t, float>>> adjacency(nodeCount);
-    for (const auto& link : links)
     {
-        const auto srcIt = exportInfo.nodeIdToRoutingId.find(link.first->GetId());
-        const auto dstIt = exportInfo.nodeIdToRoutingId.find(link.second->GetId());
-        if (srcIt == exportInfo.nodeIdToRoutingId.end() ||
-            dstIt == exportInfo.nodeIdToRoutingId.end())
+        LeoSimTaskProfiler::ScopedEvent phase(
+            "run_simulation.external_routing.export_snapshot.build_weighted_adjacency");
+        for (const auto& link : links)
         {
-            continue;
-        }
+            const auto srcIt = exportInfo.nodeIdToRoutingId.find(link.first->GetId());
+            const auto dstIt = exportInfo.nodeIdToRoutingId.find(link.second->GetId());
+            if (srcIt == exportInfo.nodeIdToRoutingId.end() ||
+                dstIt == exportInfo.nodeIdToRoutingId.end())
+            {
+                continue;
+            }
 
-        const uint32_t u = srcIt->second;
-        const uint32_t v = dstIt->second;
-        adjacency[u].push_back(std::make_pair(v, GetExportedWeight(calculator, link.first, link.second)));
-        adjacency[v].push_back(std::make_pair(u, GetExportedWeight(calculator, link.second, link.first)));
+            const uint32_t u = srcIt->second;
+            const uint32_t v = dstIt->second;
+            adjacency[u].push_back(
+                std::make_pair(v, GetExportedWeight(calculator, link.first, link.second)));
+            adjacency[v].push_back(
+                std::make_pair(u, GetExportedWeight(calculator, link.second, link.first)));
+        }
     }
 
     std::vector<uint64_t> rowOffsets(nodeCount + 1, 0);
     std::vector<uint32_t> colIndices;
     std::vector<float> weights;
-    for (uint32_t node = 0; node < nodeCount; ++node)
     {
-        rowOffsets[node + 1] = rowOffsets[node] + adjacency[node].size();
-        for (const auto& edge : adjacency[node])
+        LeoSimTaskProfiler::ScopedEvent phase(
+            "run_simulation.external_routing.export_snapshot.build_csr");
+        colIndices.reserve(links.size() * 2);
+        weights.reserve(links.size() * 2);
+        for (uint32_t node = 0; node < nodeCount; ++node)
         {
-            colIndices.push_back(edge.first);
-            weights.push_back(edge.second);
+            rowOffsets[node + 1] = rowOffsets[node] + adjacency[node].size();
+            for (const auto& edge : adjacency[node])
+            {
+                colIndices.push_back(edge.first);
+                weights.push_back(edge.second);
+            }
         }
     }
 
-    std::ofstream graphOut(exportInfo.graphPath, std::ios::binary | std::ios::trunc);
-    if (!graphOut)
     {
-        NS_LOG_ERROR("Unable to write external routing graph: " << exportInfo.graphPath);
-        return false;
-    }
+        LeoSimTaskProfiler::ScopedEvent phase(
+            "run_simulation.external_routing.export_snapshot.write_graph_file");
+        std::ofstream graphOut(exportInfo.graphPath, std::ios::binary | std::ios::trunc);
+        if (!graphOut)
+        {
+            NS_LOG_ERROR("Unable to write external routing graph: " << exportInfo.graphPath);
+            return false;
+        }
 
-    GraphHeader graphHeader{};
-    graphHeader.magic = GRAPH_MAGIC;
-    graphHeader.version = FORMAT_VERSION;
-    graphHeader.snapshotId = exportInfo.snapshotId;
-    graphHeader.simTimeSeconds = Simulator::Now().GetSeconds();
-    graphHeader.nodeCount = nodeCount;
-    graphHeader.edgeCount = colIndices.size();
-    graphHeader.rowOffsetCount = rowOffsets.size();
-    graphHeader.colIndexCount = colIndices.size();
-    graphHeader.weightCount = weights.size();
+        GraphHeader graphHeader{};
+        graphHeader.magic = GRAPH_MAGIC;
+        graphHeader.version = FORMAT_VERSION;
+        graphHeader.snapshotId = exportInfo.snapshotId;
+        graphHeader.simTimeSeconds = Simulator::Now().GetSeconds();
+        graphHeader.nodeCount = nodeCount;
+        graphHeader.edgeCount = colIndices.size();
+        graphHeader.rowOffsetCount = rowOffsets.size();
+        graphHeader.colIndexCount = colIndices.size();
+        graphHeader.weightCount = weights.size();
 
-    if (!WriteExact(graphOut, &graphHeader, 1) ||
-        !WriteExact(graphOut, rowOffsets.data(), rowOffsets.size()) ||
-        !WriteExact(graphOut, colIndices.data(), colIndices.size()) ||
-        !WriteExact(graphOut, weights.data(), weights.size()))
-    {
-        NS_LOG_ERROR("Failed while writing external routing graph");
-        return false;
+        if (!WriteExact(graphOut, &graphHeader, 1) ||
+            !WriteExact(graphOut, rowOffsets.data(), rowOffsets.size()) ||
+            !WriteExact(graphOut, colIndices.data(), colIndices.size()) ||
+            !WriteExact(graphOut, weights.data(), weights.size()))
+        {
+            NS_LOG_ERROR("Failed while writing external routing graph");
+            return false;
+        }
     }
 
     std::vector<RouteRequest> requests;
-    requests.reserve(static_cast<size_t>(requestedPairCount));
     const bool useAllGraphNodes =
         m_mode == LEOSIM_EXTERNAL_DESTINATION_TREE && m_destinationTreeAllNodes;
     const uint32_t sourceCount = useAllGraphNodes ? nodeCount : sources.GetN();
-    for (uint32_t i = 0; i < sourceCount; ++i)
     {
-        Ptr<Node> src = useAllGraphNodes ? exportInfo.routingIdToNode[i] : sources.Get(i);
-        auto srcIt = exportInfo.nodeIdToRoutingId.find(src->GetId());
-        if (srcIt == exportInfo.nodeIdToRoutingId.end())
+        LeoSimTaskProfiler::ScopedEvent phase(
+            "run_simulation.external_routing.export_snapshot.build_requests");
+        requests.reserve(static_cast<size_t>(requestedPairCount));
+        for (uint32_t i = 0; i < sourceCount; ++i)
         {
-            continue;
-        }
-
-        for (uint32_t j = 0; j < destinations.GetN(); ++j)
-        {
-            Ptr<Node> dst = destinations.Get(j);
-            if (src == dst)
-            {
-                continue;
-            }
-            auto dstIt = exportInfo.nodeIdToRoutingId.find(dst->GetId());
-            if (dstIt == exportInfo.nodeIdToRoutingId.end())
+            Ptr<Node> src = useAllGraphNodes ? exportInfo.routingIdToNode[i] : sources.Get(i);
+            auto srcIt = exportInfo.nodeIdToRoutingId.find(src->GetId());
+            if (srcIt == exportInfo.nodeIdToRoutingId.end())
             {
                 continue;
             }
 
-            RouteRequest request{};
-            request.src = srcIt->second;
-            request.dst = dstIt->second;
-            requests.push_back(request);
+            for (uint32_t j = 0; j < destinations.GetN(); ++j)
+            {
+                Ptr<Node> dst = destinations.Get(j);
+                if (src == dst)
+                {
+                    continue;
+                }
+                auto dstIt = exportInfo.nodeIdToRoutingId.find(dst->GetId());
+                if (dstIt == exportInfo.nodeIdToRoutingId.end())
+                {
+                    continue;
+                }
+
+                RouteRequest request{};
+                request.src = srcIt->second;
+                request.dst = dstIt->second;
+                requests.push_back(request);
+            }
         }
     }
 
-    std::ofstream requestOut(exportInfo.requestPath, std::ios::binary | std::ios::trunc);
-    if (!requestOut)
     {
-        NS_LOG_ERROR("Unable to write external routing requests: " << exportInfo.requestPath);
-        return false;
-    }
+        LeoSimTaskProfiler::ScopedEvent phase(
+            "run_simulation.external_routing.export_snapshot.write_request_file");
+        std::ofstream requestOut(exportInfo.requestPath, std::ios::binary | std::ios::trunc);
+        if (!requestOut)
+        {
+            NS_LOG_ERROR("Unable to write external routing requests: " << exportInfo.requestPath);
+            return false;
+        }
 
-    RequestHeader requestHeader{};
-    requestHeader.magic = REQUEST_MAGIC;
-    requestHeader.version = FORMAT_VERSION;
-    requestHeader.snapshotId = exportInfo.snapshotId;
-    requestHeader.requestCount = requests.size();
-    requestHeader.mode = static_cast<uint32_t>(
-        m_mode == LEOSIM_EXTERNAL_PAIR ? RoutingMode::PAIR : RoutingMode::DESTINATION_TREE);
-    requestHeader.metric = static_cast<uint32_t>(
-        m_metric == LEOSIM_EXTERNAL_HOP_COUNT ? RoutingMetric::HOP_COUNT : RoutingMetric::WEIGHT);
+        RequestHeader requestHeader{};
+        requestHeader.magic = REQUEST_MAGIC;
+        requestHeader.version = FORMAT_VERSION;
+        requestHeader.snapshotId = exportInfo.snapshotId;
+        requestHeader.requestCount = requests.size();
+        requestHeader.mode = static_cast<uint32_t>(
+            m_mode == LEOSIM_EXTERNAL_PAIR ? RoutingMode::PAIR : RoutingMode::DESTINATION_TREE);
+        requestHeader.metric = static_cast<uint32_t>(
+            m_metric == LEOSIM_EXTERNAL_HOP_COUNT ? RoutingMetric::HOP_COUNT
+                                                 : RoutingMetric::WEIGHT);
 
-    if (!WriteExact(requestOut, &requestHeader, 1) ||
-        !WriteExact(requestOut, requests.data(), requests.size()))
-    {
-        NS_LOG_ERROR("Failed while writing external routing requests");
-        return false;
+        if (!WriteExact(requestOut, &requestHeader, 1) ||
+            !WriteExact(requestOut, requests.data(), requests.size()))
+        {
+            NS_LOG_ERROR("Failed while writing external routing requests");
+            return false;
+        }
     }
 
     if (verbose)
