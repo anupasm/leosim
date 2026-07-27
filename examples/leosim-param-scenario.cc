@@ -133,7 +133,7 @@ LogSimulationProgress(Time interval, Time stopTime, SimulationProgress* progress
               << "s, run-wall=" << wallSeconds << "s" << std::endl;
     if (progress->taskProfilerEnabled)
     {
-        LeoSimTaskProfiler::PrintSummary(wallSeconds);
+        LeoSimTaskProfiler::PrintIntervalSummary(wallSeconds);
     }
     std::cout << std::flush;
     if (Simulator::Now() + interval <= stopTime)

@@ -89,9 +89,51 @@ class LeoSimTaskProfiler
     static void Reset()
     {
         GetMeasurements().clear();
+        GetIntervalBaseline().clear();
+        GetIntervalBaselineWallSeconds() = 0.0;
     }
 
     static void PrintSummary(double simulatorWallSeconds, std::ostream& output = std::cout)
+    {
+        PrintMeasurements(GetMeasurements(),
+                          simulatorWallSeconds,
+                          "Simulator::Run breakdown (wall-clock, slowest first)",
+                          output);
+    }
+
+    static void PrintIntervalSummary(double simulatorWallSeconds,
+                                     std::ostream& output = std::cout)
+    {
+        std::map<std::string, std::pair<double, uint64_t>> intervalMeasurements;
+        const auto& baseline = GetIntervalBaseline();
+        for (const auto& [name, measurement] : GetMeasurements())
+        {
+            const auto previous = baseline.find(name);
+            const double previousMs =
+                previous == baseline.end() ? 0.0 : previous->second.first;
+            const uint64_t previousCalls =
+                previous == baseline.end() ? 0 : previous->second.second;
+            intervalMeasurements[name] = {
+                std::max(0.0, measurement.first - previousMs),
+                measurement.second >= previousCalls ? measurement.second - previousCalls : 0};
+        }
+
+        const double intervalWallSeconds =
+            std::max(0.0, simulatorWallSeconds - GetIntervalBaselineWallSeconds());
+        PrintMeasurements(intervalMeasurements,
+                          intervalWallSeconds,
+                          "Simulator interval breakdown (wall-clock since previous progress log)",
+                          output);
+        GetIntervalBaseline() = GetMeasurements();
+        GetIntervalBaselineWallSeconds() = simulatorWallSeconds;
+    }
+
+  private:
+    static void PrintMeasurements(
+        const std::map<std::string, std::pair<double, uint64_t>>& measurements,
+        double simulatorWallSeconds,
+        const std::string& heading,
+        std::ostream& output)
     {
         struct RankedMeasurement
         {
@@ -102,8 +144,12 @@ class LeoSimTaskProfiler
 
         std::vector<RankedMeasurement> ranked;
         double measuredMs = 0.0;
-        for (const auto& [name, measurement] : GetMeasurements())
+        for (const auto& [name, measurement] : measurements)
         {
+            if (measurement.second == 0)
+            {
+                continue;
+            }
             ranked.push_back({name, measurement.first, measurement.second});
             measuredMs += measurement.first;
         }
@@ -113,7 +159,7 @@ class LeoSimTaskProfiler
                       return lhs.milliseconds > rhs.milliseconds;
                   });
 
-        output << "\n[timing] Simulator::Run breakdown (wall-clock, slowest first)" << std::endl;
+        output << "\n[timing] " << heading << std::endl;
         for (const auto& measurement : ranked)
         {
             const double percent =
@@ -140,7 +186,6 @@ class LeoSimTaskProfiler
         }
     }
 
-  private:
     static void Record(const std::string& taskName, double elapsedMs)
     {
         if (!IsAggregationEnabled())
@@ -156,6 +201,18 @@ class LeoSimTaskProfiler
     {
         static std::map<std::string, std::pair<double, uint64_t>> measurements;
         return measurements;
+    }
+
+    static std::map<std::string, std::pair<double, uint64_t>>& GetIntervalBaseline()
+    {
+        static std::map<std::string, std::pair<double, uint64_t>> baseline;
+        return baseline;
+    }
+
+    static double& GetIntervalBaselineWallSeconds()
+    {
+        static double wallSeconds = 0.0;
+        return wallSeconds;
     }
 
     static bool& IsAggregationEnabledStorage()
