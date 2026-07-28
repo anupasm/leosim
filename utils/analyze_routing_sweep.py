@@ -174,7 +174,16 @@ def load_runs(results_dir: Path) -> list[dict]:
                         "tx_packets": int(float(last.get("tx_packets", 0))) if last.get("tx_packets") is not None else 0,
                         "rx_packets": int(float(last.get("rx_packets", 0))) if last.get("rx_packets") is not None else 0,
                         "lost_packets": int(float(last.get("lost_packets", 0))) if last.get("lost_packets") is not None else 0,
-                    }
+                    },
+                    "handover": {
+                        "total": int(number(last.get("handovers"))),
+                        # The periodic CSV does not contain the successful
+                        # count, but it does contain the corresponding ratio.
+                        "success_ratio": number(last.get("ho_success_ratio"), 1.0),
+                        "latency_mean_ms": number(last.get("ho_latency_mean_ms")),
+                        "latency_p95_ms": number(last.get("ho_latency_p95_ms")),
+                        "ping_pongs": int(number(last.get("ping_pongs"))),
+                    },
                 }
             else:
                 raise FileNotFoundError(f"Missing statistics file for run: {prefix}")
@@ -207,6 +216,29 @@ def load_runs(results_dir: Path) -> list[dict]:
                          int(flow.get("destination_port", 0))]
         server_count = len({flow.get("destination") for flow in forward_flows})
         ue_count = len({flow.get("source") for flow in forward_flows})
+        handover = stats.get("handover")
+        handover_available = isinstance(handover, dict)
+        handover = handover or {}
+        handovers = int(number(handover.get("total")))
+        success_ratio = number(handover.get("success_ratio"), 1.0)
+        successful = int(number(
+            handover.get("successful"),
+            round(handovers * success_ratio),
+        ))
+        run.update({
+            "handover_data_available": handover_available,
+            "handovers": handovers,
+            "successful_handovers": successful,
+            "failed_handovers": max(0, handovers - successful),
+            "handover_success_ratio": success_ratio,
+            "mean_handover_latency_ms": number(handover.get("latency_mean_ms")),
+            "p95_handover_latency_ms": number(handover.get("latency_p95_ms")),
+            "ping_pongs": int(number(handover.get("ping_pongs"))),
+            "handovers_per_minute": (
+                handovers * 60.0 / run["sim_time_s"] if run["sim_time_s"] > 0 else 0.0
+            ),
+            "handovers_per_ue": handovers / ue_count if ue_count else 0.0,
+        })
         route_metrics = read_route_metrics(route_file,
                                            satellites,
                                            server_count or 1,
@@ -240,7 +272,9 @@ def add_hop_deltas(runs: list[dict]) -> None:
     delta_fields = (
         "pdr", "throughput_mbps", "delay_ms", "flow_mean_hop_count",
         "route_changes", "mean_route_distance_km", "mean_route_min_snr_db",
-        "mean_route_path_loss_db",
+        "mean_route_path_loss_db", "handovers", "handover_success_ratio",
+        "mean_handover_latency_ms", "p95_handover_latency_ms", "ping_pongs",
+        "handovers_per_minute", "handovers_per_ue",
     )
     for group in groups.values():
         baseline = next((run for run in group if run["metric"] == "hop"), None)
@@ -269,17 +303,23 @@ def write_markdown(filename: Path, runs: list[dict]) -> None:
     with filename.open("w") as stream:
         stream.write("# LeoSim routing metric comparison\n\n")
         route_run_count = sum(bool(run["route_data_available"]) for run in runs)
+        handover_run_count = sum(bool(run["handover_data_available"]) for run in runs)
         stream.write(
             f"Runs analysed: {len(runs)}. Route CSV data available for "
-            f"{route_run_count} run(s); unavailable route fields are shown as —.\n\n"
+            f"{route_run_count} run(s); handover data available for "
+            f"{handover_run_count} run(s). Unavailable fields are shown as —.\n\n"
         )
         for key in sorted(groups):
             satellites, duration, interval = key
             group = sorted(groups[key], key=lambda run: METRIC_ORDER.get(run["metric"], 99))
             stream.write(f"## {satellites} satellites, {duration:g}s, update {interval:g}s\n\n")
             stream.write("| Metric | PDR | Throughput Mbps | Delay ms | Flow hops | Route changes | "
-                         "Unique paths | Route km | Min SNR dB | Path loss dB |\n")
-            stream.write("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
+                         "Unique paths | Route km | Min SNR dB | Path loss dB | Handovers | "
+                         "HO/min | HO success | HO latency mean/P95 ms | Ping-pongs |\n")
+            stream.write(
+                "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
+                "---:|---:|---:|---:|\n"
+            )
             for run in group:
                 route_changes = str(run["route_changes"]) if run["route_data_available"] else "—"
                 unique_paths = str(run["unique_paths"]) if run["route_data_available"] else "—"
@@ -289,11 +329,24 @@ def write_markdown(filename: Path, runs: list[dict]) -> None:
                              if run["route_data_available"] else "—")
                 route_loss = (fmt(run["mean_route_path_loss_db"])
                               if run["route_data_available"] else "—")
+                if run["handover_data_available"]:
+                    handovers = str(run["handovers"])
+                    handover_rate = fmt(run["handovers_per_minute"])
+                    handover_success = fmt(run["handover_success_ratio"], 4)
+                    handover_latency = (
+                        f"{fmt(run['mean_handover_latency_ms'])}/"
+                        f"{fmt(run['p95_handover_latency_ms'])}"
+                    )
+                    ping_pongs = str(run["ping_pongs"])
+                else:
+                    handovers = handover_rate = handover_success = "—"
+                    handover_latency = ping_pongs = "—"
                 stream.write(
                     f"| {run['metric']} | {fmt(run['pdr'], 4)} | {fmt(run['throughput_mbps'], 6)} | "
                     f"{fmt(run['delay_ms'])} | {fmt(run['flow_mean_hop_count'])} | "
                     f"{route_changes} | {unique_paths} | {route_km} | {route_snr} | "
-                    f"{route_loss} |\n"
+                    f"{route_loss} | {handovers} | {handover_rate} | "
+                    f"{handover_success} | {handover_latency} | {ping_pongs} |\n"
                 )
 
             best_pdr = max(group, key=lambda run: (run["pdr"], run["throughput_mbps"]))
@@ -302,11 +355,21 @@ def write_markdown(filename: Path, runs: list[dict]) -> None:
             route_group = [run for run in group if run["route_data_available"]]
             best_snr = (max(route_group, key=lambda run: run["minimum_route_snr_db"])
                         if route_group else None)
+            handover_group = [run for run in group if run["handover_data_available"]]
+            best_handover = (
+                min(handover_group,
+                    key=lambda run: (-run["handover_success_ratio"],
+                                     run["p95_handover_latency_ms"],
+                                     run["ping_pongs"]))
+                if handover_group else None
+            )
             stream.write(f"\nBest delivery: **{best_pdr['metric']}**")
             if best_delay:
                 stream.write(f"; lowest delay: **{best_delay['metric']}**")
             if best_snr:
                 stream.write(f"; strongest worst-link SNR: **{best_snr['metric']}**")
+            if best_handover:
+                stream.write(f"; best handover outcome: **{best_handover['metric']}**")
             stream.write(".\n\n")
 
 

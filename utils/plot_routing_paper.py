@@ -1,0 +1,403 @@
+#!/usr/bin/env python3
+"""Create publication-ready figures from a LeoSim routing-metric sweep.
+
+The input is the output directory produced by ``run_routing_sweep.sh`` (or an
+equivalent collection of ``metric-*/result-statistics.csv`` directories).
+Figures are written as vector PDF and high-resolution PNG by default.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import re
+from pathlib import Path
+
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from matplotlib.ticker import PercentFormatter
+
+
+METRIC_ORDER = ("hop", "distance", "path-loss", "snr", "signal-strength")
+LABELS = {
+    "hop": "Hop count",
+    "distance": "Distance",
+    "path-loss": "Path loss",
+    "snr": "SNR",
+    "signal-strength": "Signal strength",
+}
+COLORS = {
+    "hop": "#0072B2",
+    "distance": "#D55E00",
+    "path-loss": "#009E73",
+    "snr": "#CC79A7",
+    "signal-strength": "#E69F00",
+}
+MARKERS = dict(zip(METRIC_ORDER, ("o", "s", "^", "D", "P")))
+RUN_PATTERN = re.compile(
+    r"^metric-(.+)_sats-(\d+)_(static|dynamic)_duration-(\d+)s"
+    r"(?:-interval-(\d+)s)?$"
+)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "results_dir",
+        nargs="?",
+        type=Path,
+        default=Path("results11514"),
+        help="routing sweep directory (default: results11514)",
+    )
+    parser.add_argument(
+        "-o",
+        "--output-dir",
+        type=Path,
+        help="figure directory (default: RESULTS_DIR/paper-figures)",
+    )
+    parser.add_argument(
+        "--formats",
+        nargs="+",
+        default=("pdf", "png"),
+        choices=("pdf", "png", "svg"),
+        help="output formats (default: pdf png)",
+    )
+    parser.add_argument("--dpi", type=int, default=300, help="raster DPI")
+    parser.add_argument(
+        "--warmup",
+        type=float,
+        default=60.0,
+        help="exclude earlier samples from distribution plots, in seconds",
+    )
+    parser.add_argument(
+        "--smooth",
+        type=int,
+        default=15,
+        help="centred rolling-median window for time-series curves",
+    )
+    return parser.parse_args()
+
+
+def discover_runs(results_dir: Path) -> dict[str, dict]:
+    runs: dict[str, dict] = {}
+    for run_dir in sorted(results_dir.glob("metric-*")):
+        match = RUN_PATTERN.match(run_dir.name) if run_dir.is_dir() else None
+        stats_file = run_dir / "result-statistics.csv"
+        if not match or not stats_file.is_file():
+            continue
+        metric, satellites, mode, duration, interval = match.groups()
+        frame = pd.read_csv(stats_file)
+        required = {
+            "time_s",
+            "pdr",
+            "throughput_mbps",
+            "delay_ms",
+            "hop_count",
+        }
+        missing = required.difference(frame.columns)
+        if missing:
+            raise ValueError(f"{stats_file} lacks columns: {', '.join(sorted(missing))}")
+        frame = frame.sort_values("time_s").drop_duplicates("time_s")
+        runs[metric] = {
+            "dir": run_dir,
+            "data": frame,
+            "satellites": int(satellites),
+            "mode": mode,
+            "duration": float(duration),
+            "interval": float(interval or 0),
+        }
+    if not runs:
+        raise FileNotFoundError(
+            f"No metric-*/result-statistics.csv runs found below {results_dir}"
+        )
+    return runs
+
+
+def read_summary(results_dir: Path, runs: dict[str, dict]) -> pd.DataFrame:
+    summary_file = results_dir / "analysis" / "routing-metric-summary.csv"
+    if summary_file.is_file():
+        summary = pd.read_csv(summary_file)
+        summary = summary[summary["metric"].isin(runs)].copy()
+        if len(summary) == len(runs):
+            return summary.set_index("metric")
+
+    # The final statistics row contains the cumulative network results.
+    records = []
+    for metric, run in runs.items():
+        row = run["data"].iloc[-1]
+        records.append(
+            {
+                "metric": metric,
+                "pdr": row["pdr"],
+                "throughput_mbps": row["throughput_mbps"],
+                "delay_ms": row["delay_ms"],
+                "flow_mean_hop_count": row["hop_count"],
+                "route_changes": np.nan,
+                "unique_paths": np.nan,
+                "mean_route_distance_km": np.nan,
+                "mean_route_min_snr_db": np.nan,
+            }
+        )
+    return pd.DataFrame(records).set_index("metric")
+
+
+def configure_style() -> None:
+    plt.rcParams.update(
+        {
+            "font.family": "serif",
+            "font.size": 8.5,
+            "axes.labelsize": 9,
+            "axes.titlesize": 9,
+            "legend.fontsize": 7.5,
+            "xtick.labelsize": 8,
+            "ytick.labelsize": 8,
+            "axes.linewidth": 0.7,
+            "grid.linewidth": 0.45,
+            "lines.linewidth": 1.35,
+            "lines.markersize": 4,
+            "figure.dpi": 120,
+            "savefig.bbox": "tight",
+            "savefig.pad_inches": 0.03,
+            "pdf.fonttype": 42,
+            "ps.fonttype": 42,
+        }
+    )
+
+
+def ordered_metrics(runs: dict[str, dict]) -> list[str]:
+    known = [metric for metric in METRIC_ORDER if metric in runs]
+    return known + sorted(set(runs).difference(known))
+
+
+def add_grid(axis: plt.Axes) -> None:
+    axis.grid(True, color="#D7D7D7", alpha=0.8)
+    axis.set_axisbelow(True)
+    axis.spines[["top", "right"]].set_visible(False)
+
+
+def plot_timeseries(runs: dict[str, dict], smooth: int) -> plt.Figure:
+    fields = (
+        ("throughput_mbps", "Cumulative throughput (Mbit/s)"),
+        ("delay_ms", "Mean delay (ms)"),
+        ("hop_count", "Mean hop count"),
+        ("pdr", "Packet delivery ratio"),
+    )
+    figure, axes = plt.subplots(2, 2, figsize=(7.15, 4.65), sharex=True)
+    for axis, (field, ylabel) in zip(axes.flat, fields):
+        for metric in ordered_metrics(runs):
+            data = runs[metric]["data"]
+            values = data[field].rolling(
+                max(1, smooth), center=True, min_periods=1
+            ).median()
+            axis.plot(
+                data["time_s"] / 60.0,
+                values,
+                color=COLORS.get(metric),
+                label=LABELS.get(metric, metric),
+            )
+        axis.set_ylabel(ylabel)
+        add_grid(axis)
+    axes[1, 0].set_xlabel("Simulation time (min)")
+    axes[1, 1].set_xlabel("Simulation time (min)")
+    axes[1, 1].legend(
+        loc="upper center",
+        bbox_to_anchor=(-0.08, -0.30),
+        ncol=min(5, len(runs)),
+        frameon=False,
+    )
+    figure.subplots_adjust(bottom=0.22, hspace=0.13, wspace=0.24)
+    return figure
+
+
+def plot_steady_state(runs: dict[str, dict], warmup: float) -> plt.Figure:
+    metrics = ordered_metrics(runs)
+    fields = (
+        ("throughput_mbps", "Cumulative throughput (Mbit/s)"),
+        ("delay_ms", "Mean delay (ms)"),
+        ("hop_count", "Mean hop count"),
+    )
+    figure, axes = plt.subplots(1, 3, figsize=(7.15, 2.65))
+    positions = np.arange(1, len(metrics) + 1)
+    for axis, (field, ylabel) in zip(axes, fields):
+        samples = []
+        for metric in metrics:
+            data = runs[metric]["data"]
+            values = data.loc[data["time_s"] >= warmup, field].dropna().to_numpy()
+            if values.size == 0:
+                raise ValueError(
+                    f"No {metric} samples remain after --warmup={warmup:g}s"
+                )
+            samples.append(values)
+        parts = axis.violinplot(
+            samples,
+            positions=positions,
+            widths=0.82,
+            showmeans=False,
+            showmedians=True,
+            showextrema=False,
+            points=150,
+        )
+        for body, metric in zip(parts["bodies"], metrics):
+            body.set_facecolor(COLORS.get(metric, "#777777"))
+            body.set_edgecolor("black")
+            body.set_alpha(0.72)
+            body.set_linewidth(0.45)
+        parts["cmedians"].set_color("black")
+        parts["cmedians"].set_linewidth(1.1)
+        axis.set_xticks(positions, [LABELS.get(m, m) for m in metrics])
+        axis.tick_params(axis="x", rotation=35)
+        axis.set_ylabel(ylabel)
+        add_grid(axis)
+    figure.subplots_adjust(bottom=0.28, wspace=0.32)
+    return figure
+
+
+def plot_tradeoffs(summary: pd.DataFrame, metrics: list[str]) -> plt.Figure:
+    required = (
+        "mean_route_distance_km",
+        "flow_mean_hop_count",
+        "route_changes",
+        "throughput_mbps",
+    )
+    if any(field not in summary or summary[field].isna().all() for field in required):
+        raise ValueError(
+            "Route-level fields are absent; run analyze_routing_sweep.py first"
+        )
+    data = summary.loc[metrics]
+    figure, (left, right) = plt.subplots(1, 2, figsize=(7.15, 3.05))
+
+    sizes = 35 + 100 * (
+        (data["throughput_mbps"] - data["throughput_mbps"].min())
+        / max(data["throughput_mbps"].max() - data["throughput_mbps"].min(), 1e-12)
+    )
+    for metric in metrics:
+        left.scatter(
+            data.at[metric, "mean_route_distance_km"] / 1000.0,
+            data.at[metric, "flow_mean_hop_count"],
+            s=sizes[metric],
+            marker=MARKERS.get(metric, "o"),
+            color=COLORS.get(metric),
+            edgecolor="black",
+            linewidth=0.5,
+            label=LABELS.get(metric, metric),
+            zorder=3,
+        )
+    left.set_xlabel(r"Mean route distance ($10^3$ km)")
+    left.set_ylabel("Mean flow hop count")
+    left.legend(frameon=False, loc="best")
+    add_grid(left)
+
+    baseline = data.loc["hop"] if "hop" in data.index else data.iloc[0]
+    fields = ("throughput_mbps", "delay_ms", "route_changes")
+    titles = ("Throughput", "Delay", "Route changes")
+    values = np.column_stack(
+        [
+            100.0 * (data[field].to_numpy() / baseline[field] - 1.0)
+            for field in fields
+        ]
+    )
+    x = np.arange(len(metrics))
+    width = 0.23
+    hatches = ("", "//", "xx")
+    for index, title in enumerate(titles):
+        right.bar(
+            x + (index - 1) * width,
+            values[:, index],
+            width,
+            label=title,
+            facecolor="white",
+            edgecolor=("#0072B2", "#D55E00", "#009E73")[index],
+            hatch=hatches[index],
+            linewidth=1.0,
+        )
+    right.axhline(0, color="black", linewidth=0.7)
+    right.set_xticks(x, [LABELS.get(m, m) for m in metrics])
+    right.tick_params(axis="x", rotation=35)
+    right.set_ylabel("Relative change vs. hop routing")
+    right.yaxis.set_major_formatter(PercentFormatter())
+    right.legend(frameon=False, ncol=3, loc="upper left")
+    add_grid(right)
+    figure.subplots_adjust(bottom=0.25, wspace=0.32)
+    return figure
+
+
+def save_figure(
+    figure: plt.Figure,
+    output_dir: Path,
+    stem: str,
+    formats: list[str],
+    dpi: int,
+) -> list[Path]:
+    outputs = []
+    for extension in formats:
+        filename = output_dir / f"{stem}.{extension}"
+        figure.savefig(filename, dpi=dpi)
+        outputs.append(filename)
+    plt.close(figure)
+    return outputs
+
+
+def write_manifest(
+    output_dir: Path, results_dir: Path, runs: dict[str, dict], outputs: list[Path]
+) -> None:
+    with (output_dir / "figure-manifest.csv").open("w", newline="") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(("figure", "source_results", "metrics"))
+        for output in outputs:
+            writer.writerow(
+                (
+                    output.name,
+                    str(results_dir.resolve()),
+                    ";".join(ordered_metrics(runs)),
+                )
+            )
+
+
+def main() -> int:
+    args = parse_args()
+    results_dir = args.results_dir.resolve()
+    output_dir = (args.output_dir or results_dir / "paper-figures").resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    configure_style()
+
+    runs = discover_runs(results_dir)
+    metrics = ordered_metrics(runs)
+    summary = read_summary(results_dir, runs)
+    outputs: list[Path] = []
+    outputs += save_figure(
+        plot_timeseries(runs, args.smooth),
+        output_dir,
+        "routing-performance-timeseries",
+        args.formats,
+        args.dpi,
+    )
+    outputs += save_figure(
+        plot_steady_state(runs, args.warmup),
+        output_dir,
+        "routing-performance-distributions",
+        args.formats,
+        args.dpi,
+    )
+    try:
+        tradeoff_figure = plot_tradeoffs(summary, metrics)
+    except ValueError as error:
+        print(f"Skipping route trade-off figure: {error}")
+    else:
+        outputs += save_figure(
+            tradeoff_figure,
+            output_dir,
+            "routing-tradeoffs",
+            args.formats,
+            args.dpi,
+        )
+    write_manifest(output_dir, results_dir, runs, outputs)
+    print(f"Wrote {len(outputs)} figure files to {output_dir}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
