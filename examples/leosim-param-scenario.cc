@@ -357,7 +357,7 @@ main(int argc, char* argv[])
     std::string islDelay = "100us";
 
     bool enableDynamicRouting = true;
-    double routingUpdateInterval = 10.0;
+    double routingUpdateInterval = 30.0;
     std::string routingMetricName = "hop";
     bool useRouteTreeCache = true;
     std::string routeTreeEngine = "contrib/leosim/utils/rengine/leosim-rengine";
@@ -623,6 +623,7 @@ main(int argc, char* argv[])
         islChannelHelper.SetIslTransmitPower(islTransmitPower);
         islChannelHelper.SetIslAntennaGain(islAntennaGain);
         islChannelHelper.SetUpdateInterval(Seconds(1.0));
+        islChannelHelper.SetDynamicIslSelectionInterval(Seconds(routingUpdateInterval));
         islChannelHelper.SetVerbose(verbose);
         islChannel = islFullMesh
                          ? islChannelHelper.CreateIslMesh(satelliteNodes)

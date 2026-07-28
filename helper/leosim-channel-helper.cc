@@ -27,10 +27,12 @@
 #include <cmath>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <queue>
 #include <set>
 #include <tuple>
+#include <unordered_map>
 #include <vector>
 #include "ns3/names.h"
 namespace ns3
@@ -54,7 +56,8 @@ LeoSimChannelHelper::LeoSimChannelHelper()
       m_islMaxDistance(5000000.0),
       m_islTransmitPower(30.0),
       m_islAntennaGain(30.0),
-      m_islFrequency(26.0e9)
+      m_islFrequency(26.0e9),
+      m_dynamicIslSelectionInterval(Seconds(30))
 {
     NS_LOG_FUNCTION(this);
 }
@@ -62,6 +65,13 @@ LeoSimChannelHelper::LeoSimChannelHelper()
 LeoSimChannelHelper::~LeoSimChannelHelper()
 {
     NS_LOG_FUNCTION(this);
+}
+
+void
+LeoSimChannelHelper::SetDynamicIslSelectionInterval(Time interval)
+{
+    NS_ABORT_MSG_IF(interval <= Time(0), "Dynamic ISL selection interval must be positive");
+    m_dynamicIslSelectionInterval = interval;
 }
 
 Ptr<LeoSimChannelModel>
@@ -573,6 +583,8 @@ LeoSimChannelHelper::CreateIslNearestNeighborMesh(NodeContainer satellites, uint
     ConfigureChannelModel(channelModel);
 
     uint32_t linkCount = AddNearestNeighborIslLinks(channelModel, satellites, maxNeighbors);
+    channelModel->SetDynamicIslSelectionInterval(m_dynamicIslSelectionInterval);
+    channelModel->SetDynamicIslMaxNeighbors(maxNeighbors);
 
     if (m_verbose)
     {
@@ -634,199 +646,222 @@ LeoSimChannelHelper::AddNearestNeighborIslLinks(Ptr<LeoSimChannelModel> channelM
         return 0;
     }
 
-    struct Candidate
-    {
-        double distance;
-        uint32_t first;
-        uint32_t second;
-    };
-
     const uint32_t numSatellites = satellites.GetN();
     const uint32_t candidateLimit = std::max<uint32_t>(16, maxNeighbors * 4);
+    const uint32_t poolLimit = candidateLimit;
     const double maxDistanceSquared = m_islMaxDistance * m_islMaxDistance;
-    std::map<std::pair<uint32_t, uint32_t>, double> uniqueCandidates;
-
-    (void)candidateLimit;
-    (void)maxDistanceSquared;
-
-    // GetObject() is comparatively expensive and this loop examines O(N^2)
-    // pairs. Cache mobility positions once rather than doing two object lookups
-    // for every pair.
-    std::vector<Vector> positions(numSatellites);
-    std::vector<bool> hasMobility(numSatellites, false);
+    const double cellSize = std::max(1.0, m_islMaxDistance / 16.0);
+    std::vector<std::vector<Vector>> trajectories(numSatellites);
+    std::size_t epochs = 1;
+    double minimumEpochStep = std::numeric_limits<double>::infinity();
     for (uint32_t i = 0; i < numSatellites; ++i)
     {
-        Ptr<MobilityModel> mobility = satellites.Get(i)->GetObject<MobilityModel>();
+        Ptr<LeoSimMobilityModel> mobility =
+            satellites.Get(i)->GetObject<LeoSimMobilityModel>();
         if (mobility)
         {
-            positions[i] = mobility->GetPosition();
-            hasMobility[i] = true;
+            const auto waypoints = mobility->GetWaypoints();
+            for (std::size_t w = 0; w < waypoints.size(); ++w)
+            {
+                trajectories[i].push_back(waypoints[w].position);
+                if (w > 0)
+                {
+                    const double step =
+                        (waypoints[w].time - waypoints[w - 1].time).GetSeconds();
+                    if (step > 0.0)
+                    {
+                        minimumEpochStep = std::min(minimumEpochStep, step);
+                    }
+                }
+            }
         }
+        if (trajectories[i].empty())
+        {
+            Ptr<MobilityModel> generic = satellites.Get(i)->GetObject<MobilityModel>();
+            if (generic)
+            {
+                trajectories[i].push_back(generic->GetPosition());
+            }
+        }
+        epochs = std::max(epochs, trajectories[i].size());
     }
 
-    // Keep only a small nearest-neighbor candidate set per satellite. This uses
-    // O(N*k) storage rather than materializing the O(N^2) full mesh.
-    for (uint32_t i = 0; i < numSatellites; ++i)
+    const std::size_t epochStride =
+        std::isfinite(minimumEpochStep)
+            ? std::max<std::size_t>(
+                  1,
+                  static_cast<std::size_t>(
+                      std::floor(m_dynamicIslSelectionInterval.GetSeconds() /
+                                 minimumEpochStep)))
+            : 1;
+    std::vector<std::size_t> sampledEpochs;
+    for (std::size_t epoch = 0; epoch < epochs; epoch += epochStride)
     {
-        if (!hasMobility[i])
+        sampledEpochs.push_back(epoch);
+    }
+    if (sampledEpochs.empty() || sampledEpochs.back() != epochs - 1)
+    {
+        sampledEpochs.push_back(epochs - 1);
+    }
+
+    struct Cell
+    {
+        int32_t x;
+        int32_t y;
+        int32_t z;
+        bool operator==(const Cell& other) const
         {
-            continue;
+            return x == other.x && y == other.y && z == other.z;
         }
-
-        const Vector& satPos = positions[i];
-        // The largest retained candidate is at the top, so a closer candidate
-        // can replace it in O(log k) without allocating an N-element vector.
-        std::priority_queue<std::pair<double, uint32_t>> nearest;
-
-        for (uint32_t j = 0; j < numSatellites; ++j)
+    };
+    struct CellHash
+    {
+        std::size_t operator()(const Cell& cell) const
         {
-            if (i == j || !hasMobility[j])
+            std::size_t hash = static_cast<uint32_t>(cell.x) * 73856093u;
+            hash ^= static_cast<uint32_t>(cell.y) * 19349663u;
+            hash ^= static_cast<uint32_t>(cell.z) * 83492791u;
+            return hash;
+        }
+    };
+    std::vector<std::map<uint32_t, double>> perSatelliteCandidates(numSatellites);
+    for (std::size_t epoch : sampledEpochs)
+    {
+        std::vector<Vector> positions(numSatellites);
+        std::unordered_map<Cell, std::vector<uint32_t>, CellHash> cells;
+        cells.reserve(numSatellites * 2);
+        for (uint32_t i = 0; i < numSatellites; ++i)
+        {
+            if (trajectories[i].empty())
             {
                 continue;
             }
-
-            const Vector& peerPos = positions[j];
-            const double dx = peerPos.x - satPos.x;
-            const double dy = peerPos.y - satPos.y;
-            const double dz = peerPos.z - satPos.z;
-            const double distanceSquared = dx * dx + dy * dy + dz * dz;
-            if (distanceSquared <= maxDistanceSquared)
-            {
-                const auto candidate = std::make_pair(distanceSquared, j);
-                if (nearest.size() < candidateLimit)
-                {
-                    nearest.push(candidate);
-                }
-                else if (candidate < nearest.top())
-                {
-                    nearest.pop();
-                    nearest.push(candidate);
-                }
-            }
+            positions[i] = trajectories[i][std::min(epoch, trajectories[i].size() - 1)];
+            const Vector& p = positions[i];
+            cells[Cell{static_cast<int32_t>(std::floor(p.x / cellSize)),
+                       static_cast<int32_t>(std::floor(p.y / cellSize)),
+                       static_cast<int32_t>(std::floor(p.z / cellSize))}]
+                .push_back(i);
         }
 
-        (void)nearest;
-
-        while (!nearest.empty())
+        for (uint32_t i = 0; i < numSatellites; ++i)
         {
-            const double distance = std::sqrt(nearest.top().first);
-            const uint32_t j = nearest.top().second;
-            nearest.pop();
-            const auto pair = std::make_pair(std::min(i, j), std::max(i, j));
-            auto [it, inserted] = uniqueCandidates.emplace(pair, distance);
-            if (!inserted)
+            if (trajectories[i].empty())
             {
-                it->second = std::min(it->second, distance);
+                continue;
+            }
+            const Vector& p = positions[i];
+            const int32_t cx = static_cast<int32_t>(std::floor(p.x / cellSize));
+            const int32_t cy = static_cast<int32_t>(std::floor(p.y / cellSize));
+            const int32_t cz = static_cast<int32_t>(std::floor(p.z / cellSize));
+            std::priority_queue<std::pair<double, uint32_t>> nearest;
+
+            // Expand a sparse spatial-grid shell until enough candidates are
+            // found. In dense mega-constellations this normally stops after
+            // one or two shells instead of examining every satellite.
+            const int32_t maxShell =
+                static_cast<int32_t>(std::ceil(m_islMaxDistance / cellSize));
+            for (int32_t shell = 0; shell <= maxShell; ++shell)
+            {
+                for (int32_t dxCell = -shell; dxCell <= shell; ++dxCell)
+                {
+                    for (int32_t dyCell = -shell; dyCell <= shell; ++dyCell)
+                    {
+                        for (int32_t dzCell = -shell; dzCell <= shell; ++dzCell)
+                        {
+                            if (std::max({std::abs(dxCell),
+                                          std::abs(dyCell),
+                                          std::abs(dzCell)}) != shell)
+                            {
+                                continue;
+                            }
+                            auto cell = cells.find(
+                                Cell{cx + dxCell, cy + dyCell, cz + dzCell});
+                            if (cell == cells.end())
+                            {
+                                continue;
+                            }
+                            for (uint32_t j : cell->second)
+                            {
+                                if (i == j)
+                                {
+                                    continue;
+                                }
+                                const Vector& q = positions[j];
+                                const double dx = q.x - p.x;
+                                const double dy = q.y - p.y;
+                                const double dz = q.z - p.z;
+                                const double distanceSquared = dx * dx + dy * dy + dz * dz;
+                                if (distanceSquared > maxDistanceSquared)
+                                {
+                                    continue;
+                                }
+                                const auto candidate = std::make_pair(distanceSquared, j);
+                                if (nearest.size() < candidateLimit)
+                                {
+                                    nearest.push(candidate);
+                                }
+                                else if (candidate < nearest.top())
+                                {
+                                    nearest.pop();
+                                    nearest.push(candidate);
+                                }
+                            }
+                        }
+                    }
+                }
+                if (nearest.size() >= candidateLimit &&
+                    (shell + 1) * cellSize > std::sqrt(nearest.top().first) + cellSize)
+                {
+                    break;
+                }
+            }
+            while (!nearest.empty())
+            {
+                const auto [distanceSquared, j] = nearest.top();
+                nearest.pop();
+                auto [it, inserted] =
+                    perSatelliteCandidates[i].emplace(j, distanceSquared);
+                if (!inserted)
+                {
+                    it->second = std::min(it->second, distanceSquared);
+                }
             }
         }
     }
 
-    std::vector<Candidate> candidates;
-    candidates.reserve(uniqueCandidates.size());
-    for (const auto& [pair, distance] : uniqueCandidates)
-    {
-        candidates.push_back({distance, pair.first, pair.second});
-    }
-    std::sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) {
-        if (a.distance != b.distance)
-        {
-            return a.distance < b.distance;
-        }
-        return std::tie(a.first, a.second) < std::tie(b.first, b.second);
-    });
-    (void)candidates;
-
-    std::vector<uint32_t> parent(numSatellites);
-    std::vector<uint32_t> rank(numSatellites, 0);
-    std::vector<uint32_t> degree(numSatellites, 0);
+    // Bound the pre-provisioned interface pool per satellite. This keeps memory,
+    // NetDevice count, route export, and periodic selection O(N*k), independent
+    // of trajectory length.
+    std::set<std::pair<uint32_t, uint32_t>> candidatePairs;
     for (uint32_t i = 0; i < numSatellites; ++i)
     {
-        parent[i] = i;
-    }
-    auto findRoot = [&parent](uint32_t node) {
-        uint32_t root = node;
-        while (parent[root] != root)
+        std::vector<std::pair<double, uint32_t>> ranked;
+        ranked.reserve(perSatelliteCandidates[i].size());
+        for (const auto& [neighbor, distanceSquared] : perSatelliteCandidates[i])
         {
-            root = parent[root];
+            ranked.emplace_back(distanceSquared, neighbor);
         }
-        while (parent[node] != node)
+        std::sort(ranked.begin(), ranked.end());
+        const std::size_t count = std::min<std::size_t>(poolLimit, ranked.size());
+        for (std::size_t n = 0; n < count; ++n)
         {
-            const uint32_t next = parent[node];
-            parent[node] = root;
-            node = next;
+            candidatePairs.emplace(std::min(i, ranked[n].second),
+                                   std::max(i, ranked[n].second));
         }
-        return root;
-    };
-    auto unite = [&parent, &rank, &findRoot](uint32_t a, uint32_t b) {
-        a = findRoot(a);
-        b = findRoot(b);
-        if (a == b)
-        {
-            return;
-        }
-        if (rank[a] < rank[b])
-        {
-            std::swap(a, b);
-        }
-        parent[b] = a;
-        if (rank[a] == rank[b])
-        {
-            rank[a]++;
-        }
-    };
-
-    std::set<std::pair<uint32_t, uint32_t>> selected;
-    auto select = [&](const Candidate& edge) {
-        if (degree[edge.first] >= maxNeighbors || degree[edge.second] >= maxNeighbors)
-        {
-            return false;
-        }
-        const auto pair = std::make_pair(edge.first, edge.second);
-        if (!selected.insert(pair).second)
-        {
-            return false;
-        }
-        degree[edge.first]++;
-        degree[edge.second]++;
-        unite(edge.first, edge.second);
-        return true;
-    };
-
-    // Connectivity pass: prefer short edges that join different components.
-    for (const Candidate& edge : candidates)
-    {
-        if (findRoot(edge.first) != findRoot(edge.second))
-        {
-            select(edge);
-        }
-    }
-
-    // Capacity pass: fill unused terminals with the shortest remaining edges.
-    for (const Candidate& edge : candidates)
-    {
-        select(edge);
     }
 
     uint32_t linkCount = 0;
-    for (const auto& [first, second] : selected)
+    for (const auto& [first, second] : candidatePairs)
     {
         channelModel->AddIslLink(satellites.Get(first), satellites.Get(second));
         linkCount++;
     }
-
-    std::set<uint32_t> components;
-    uint32_t isolated = 0;
-    for (uint32_t i = 0; i < numSatellites; ++i)
+    if (m_verbose)
     {
-        components.insert(findRoot(i));
-        isolated += degree[i] == 0 ? 1 : 0;
-    }
-
-    if (m_verbose || components.size() > 1 || isolated > 0)
-    {
-        std::cout << "ISL spatial topology: " << linkCount << " links, max degree "
-                  << maxNeighbors << ", " << components.size() << " connected components, "
-                  << isolated << " isolated satellites" << std::endl;
+        std::cout << "ISL dynamic candidate pool: " << linkCount << " links for "
+                  << numSatellites << " satellites, max active degree " << maxNeighbors
+                  << ", max candidates/satellite " << poolLimit << std::endl;
     }
 
     return linkCount;

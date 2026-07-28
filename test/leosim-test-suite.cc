@@ -106,6 +106,66 @@ class LeoSimTestSpatialIslDegreeAndConnectivity : public TestCase
     }
 };
 
+class LeoSimTestDynamicIslNeighborReselection : public TestCase
+{
+  public:
+    LeoSimTestDynamicIslNeighborReselection()
+        : TestCase("dynamic ISL updates select new neighbours without exceeding degree")
+    {
+    }
+
+  private:
+    void DoRun() override
+    {
+        NodeContainer satellites;
+        satellites.Create(4);
+        std::vector<Ptr<ConstantPositionMobilityModel>> mobility;
+        for (uint32_t i = 0; i < satellites.GetN(); ++i)
+        {
+            auto model = CreateObject<ConstantPositionMobilityModel>();
+            model->SetPosition(Vector(i * 100000.0, 0.0, 0.0));
+            satellites.Get(i)->AggregateObject(model);
+            mobility.push_back(model);
+        }
+
+        Ptr<LeoSimChannelModel> channel = CreateObject<LeoSimChannelModel>();
+        channel->SetIslMaxDistance(250000.0);
+        for (uint32_t i = 0; i < satellites.GetN(); ++i)
+        {
+            for (uint32_t j = i + 1; j < satellites.GetN(); ++j)
+            {
+                channel->AddIslLink(satellites.Get(i), satellites.Get(j));
+            }
+        }
+        channel->SetDynamicIslSelectionInterval(Seconds(1));
+        channel->SetDynamicIslMaxNeighbors(1);
+
+        mobility[0]->SetPosition(Vector(300000.0, 0.0, 0.0));
+        mobility[3]->SetPosition(Vector(0.0, 0.0, 0.0));
+        Simulator::Schedule(Seconds(1), &LeoSimChannelModel::UpdateAllLinks, channel);
+        Simulator::Run();
+
+        std::map<uint32_t, uint32_t> degree;
+        bool selectedNewPair = false;
+        for (const auto& link : channel->GetLinksByType(LEOSIM_LINK_ISL, false))
+        {
+            degree[link.node1->GetId()]++;
+            degree[link.node2->GetId()]++;
+            selectedNewPair |=
+                (link.node1 == satellites.Get(3) && link.node2 == satellites.Get(1)) ||
+                (link.node1 == satellites.Get(1) && link.node2 == satellites.Get(3));
+        }
+        for (const auto& [node, count] : degree)
+        {
+            NS_TEST_ASSERT_MSG_LT(count, 2, "Dynamic ISL degree exceeded configured bound");
+        }
+        NS_TEST_ASSERT_MSG_EQ(selectedNewPair,
+                              true,
+                              "Periodic update did not select the newly closest neighbour");
+        Simulator::Destroy();
+    }
+};
+
 class LeoSimTestTrajectoryAwareAccessCandidates : public TestCase
 {
   public:
@@ -2761,6 +2821,7 @@ LeoSimTestSuite::LeoSimTestSuite()
 {
     AddTestCase(new LeoSimTestCase1, TestCase::Duration::QUICK);
     AddTestCase(new LeoSimTestSpatialIslDegreeAndConnectivity, TestCase::Duration::QUICK);
+    AddTestCase(new LeoSimTestDynamicIslNeighborReselection, TestCase::Duration::QUICK);
     AddTestCase(new LeoSimTestTrajectoryAwareAccessCandidates, TestCase::Duration::QUICK);
     AddTestCase(new LeoSimTestHexBeamLayout19, TestCase::Duration::QUICK);
     AddTestCase(new LeoSimTestHexBeamLayout61, TestCase::Duration::QUICK);

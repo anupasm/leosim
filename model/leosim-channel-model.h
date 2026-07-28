@@ -30,6 +30,7 @@
 #include "ns3/traced-callback.h"
 
 #include <map>
+#include <set>
 
 namespace ns3
 {
@@ -154,6 +155,23 @@ class LeoSimChannelModel : public Object
      * Recalculates channel quality for all links
      */
     void UpdateAllLinks();
+
+    /**
+     * \brief Enable bounded dynamic selection from the provisioned ISL pool.
+     *
+     * Physical ISL candidates are provisioned before device/address setup.
+     * Each channel update selects a connected, shortest-edge subset while
+     * enforcing this degree limit.
+     */
+    void SetDynamicIslMaxNeighbors(uint32_t maxNeighbors);
+
+    /**
+     * \brief Set how often the bounded ISL neighbour set is recomputed.
+     *
+     * Link quality is still refreshed at the normal channel interval. Between
+     * reselections the cached active set is reused.
+     */
+    void SetDynamicIslSelectionInterval(Time interval);
 
     /**
      * \brief Get channel quality for a specific link
@@ -490,6 +508,16 @@ class LeoSimChannelModel : public Object
     void UpdateLink(uint32_t linkId);
 
     /**
+     * \brief Select the active bounded-degree ISL topology from feasible links.
+     */
+    void SelectDynamicIslTopology();
+
+    /**
+     * \brief Reapply the cached bounded ISL selection after quality updates.
+     */
+    void ApplyDynamicIslSelection();
+
+    /**
      * \brief Periodic update callback
      */
     void PeriodicUpdate();
@@ -508,6 +536,7 @@ class LeoSimChannelModel : public Object
         Ptr<Node> node1;
         Ptr<Node> node2;
         LeoSimChannelQuality quality;
+        LeoSimLinkState physicalLinkState{LEOSIM_LINK_DOWN};
         uint32_t linkId;
         LeoSimLinkType linkType;
     };
@@ -534,6 +563,10 @@ class LeoSimChannelModel : public Object
     double m_islTransmitPower;      //!< ISL transmit power (dBm)
     double m_islAntennaGain;        //!< ISL antenna gain (dB)
     double m_islFrequency;          //!< ISL frequency (Hz)
+    uint32_t m_dynamicIslMaxNeighbors{0}; //!< Zero disables dynamic ISL reselection
+    Time m_dynamicIslSelectionInterval{Seconds(30)}; //!< Neighbour search interval
+    Time m_lastDynamicIslSelection{Seconds(-1)}; //!< Last neighbour search time
+    std::set<uint32_t> m_selectedDynamicIslLinks; //!< Cached selected link IDs
     Ptr<LeoSimOperatorModel> m_operatorModel; //!< Optional operator sharing model
     Ptr<LeoSimWeatherModel> m_weatherModel;   //!< Optional atmospheric weather model
     std::map<std::pair<uint32_t,uint32_t>, LeoSimAttenuationResult>

@@ -94,6 +94,8 @@ class LeoSimChannelHelper
     Ptr<LeoSimChannelModel> CreateIslNearestNeighborMesh(NodeContainer satellites,
                                                          uint32_t maxNeighbors);
 
+    void SetDynamicIslSelectionInterval(Time interval);
+
     /**
      * \brief Create realistic bounded ISL topology candidates.
      *
@@ -360,6 +362,7 @@ class LeoSimChannelHelper
     double m_islTransmitPower;      //!< ISL transmit power (dBm)
     double m_islAntennaGain;        //!< ISL antenna gain (dB)
     double m_islFrequency;          //!< ISL frequency (Hz)
+    Time m_dynamicIslSelectionInterval; //!< Candidate sampling and reselection interval
 };
 
 } // namespace ns3

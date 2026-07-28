@@ -246,6 +246,163 @@ LeoSimChannelModel::UpdateAllLinks()
         NS_LOG_DEBUG("\nlink:" <<pair.second.linkType<<" "<< pair.first<<" "<<pair.second.quality.linkState);
 
     }
+    if (m_dynamicIslMaxNeighbors > 0)
+    {
+        const Time now = Simulator::Now();
+        if (m_lastDynamicIslSelection.IsNegative() ||
+            now - m_lastDynamicIslSelection >= m_dynamicIslSelectionInterval)
+        {
+            SelectDynamicIslTopology();
+        }
+        else
+        {
+            ApplyDynamicIslSelection();
+        }
+    }
+}
+
+void
+LeoSimChannelModel::SetDynamicIslMaxNeighbors(uint32_t maxNeighbors)
+{
+    m_dynamicIslMaxNeighbors = maxNeighbors;
+    m_selectedDynamicIslLinks.clear();
+    m_lastDynamicIslSelection = Seconds(-1);
+    if (maxNeighbors > 0)
+    {
+        SelectDynamicIslTopology();
+    }
+}
+
+void
+LeoSimChannelModel::SetDynamicIslSelectionInterval(Time interval)
+{
+    NS_ABORT_MSG_IF(interval <= Time(0), "Dynamic ISL selection interval must be positive");
+    m_dynamicIslSelectionInterval = interval;
+}
+
+void
+LeoSimChannelModel::SelectDynamicIslTopology()
+{
+    if (m_dynamicIslMaxNeighbors == 0)
+    {
+        return;
+    }
+
+    struct Candidate
+    {
+        double distance;
+        uint32_t linkId;
+        uint32_t first;
+        uint32_t second;
+    };
+    std::vector<Candidate> candidates;
+    candidates.reserve(m_links.size());
+    for (const auto& [linkId, info] : m_links)
+    {
+        if (info.linkType == LEOSIM_LINK_ISL &&
+            info.physicalLinkState != LEOSIM_LINK_DOWN)
+        {
+            candidates.push_back(
+                {info.quality.distance, linkId, info.node1->GetId(), info.node2->GetId()});
+        }
+    }
+    std::sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) {
+        return std::tie(a.distance, a.first, a.second) <
+               std::tie(b.distance, b.first, b.second);
+    });
+
+    // Kruskal's connectivity pass followed by a capacity pass. Node IDs are
+    // intentionally mapped sparsely: only nodes present in the candidate pool
+    // consume state.
+    std::map<uint32_t, uint32_t> parent;
+    std::map<uint32_t, uint32_t> rank;
+    std::map<uint32_t, uint32_t> degree;
+    for (const Candidate& edge : candidates)
+    {
+        parent.emplace(edge.first, edge.first);
+        parent.emplace(edge.second, edge.second);
+    }
+    auto findRoot = [&parent](uint32_t node) {
+        uint32_t root = node;
+        while (parent[root] != root)
+        {
+            root = parent[root];
+        }
+        while (parent[node] != node)
+        {
+            const uint32_t next = parent[node];
+            parent[node] = root;
+            node = next;
+        }
+        return root;
+    };
+    auto unite = [&parent, &rank, &findRoot](uint32_t a, uint32_t b) {
+        a = findRoot(a);
+        b = findRoot(b);
+        if (a == b)
+        {
+            return;
+        }
+        if (rank[a] < rank[b])
+        {
+            std::swap(a, b);
+        }
+        parent[b] = a;
+        if (rank[a] == rank[b])
+        {
+            rank[a]++;
+        }
+    };
+
+    std::set<uint32_t> selected;
+    auto select = [&](const Candidate& edge) {
+        if (degree[edge.first] >= m_dynamicIslMaxNeighbors ||
+            degree[edge.second] >= m_dynamicIslMaxNeighbors ||
+            !selected.insert(edge.linkId).second)
+        {
+            return false;
+        }
+        degree[edge.first]++;
+        degree[edge.second]++;
+        unite(edge.first, edge.second);
+        return true;
+    };
+    for (const Candidate& edge : candidates)
+    {
+        if (findRoot(edge.first) != findRoot(edge.second))
+        {
+            select(edge);
+        }
+    }
+    for (const Candidate& edge : candidates)
+    {
+        select(edge);
+    }
+
+    m_selectedDynamicIslLinks = std::move(selected);
+    m_lastDynamicIslSelection = Simulator::Now();
+    ApplyDynamicIslSelection();
+}
+
+void
+LeoSimChannelModel::ApplyDynamicIslSelection()
+{
+    for (auto& [linkId, info] : m_links)
+    {
+        if (info.linkType != LEOSIM_LINK_ISL)
+        {
+            continue;
+        }
+        const LeoSimLinkState selectedState =
+            m_selectedDynamicIslLinks.count(linkId) == 0
+                ? LEOSIM_LINK_DOWN
+                : info.physicalLinkState;
+        if (info.quality.linkState != selectedState)
+        {
+            info.quality.linkState = selectedState;
+            m_linkStateChangeTrace(info.node1, info.node2, selectedState);
+        }
+    }
 }
 
 void
@@ -279,6 +436,7 @@ LeoSimChannelModel::UpdateLink(uint32_t linkId)
                        << " do not have mobility models");
         }
         NS_LOG_DEBUG("Missing mobility models: mob1=" << mob1 << ", mob2=" << mob2);
+        info.physicalLinkState = LEOSIM_LINK_DOWN;
         info.quality.linkState = LEOSIM_LINK_DOWN;
         return;
     }
@@ -333,6 +491,7 @@ LeoSimChannelModel::UpdateLink(uint32_t linkId)
     if (distance > maxDistance)
     {
         LeoSimLinkState oldState = info.quality.linkState;
+        info.physicalLinkState = LEOSIM_LINK_DOWN;
         info.quality.linkState = LEOSIM_LINK_DOWN;
         info.quality.signalStrength = -200.0; // Very weak signal
         info.quality.snr = -100.0;
@@ -527,6 +686,15 @@ LeoSimChannelModel::UpdateLink(uint32_t linkId)
                 << " dB below floor " << m_snrFloorDb << " dB -> DOWN");
         }
         newState = info.quality.linkState;
+    }
+
+    info.physicalLinkState = newState;
+    if (isIsl && m_dynamicIslMaxNeighbors > 0 &&
+        !m_selectedDynamicIslLinks.empty() &&
+        m_selectedDynamicIslLinks.count(linkId) == 0)
+    {
+        newState = LEOSIM_LINK_DOWN;
+        info.quality.linkState = newState;
     }
 
     // Fire trace callbacks if state changed
