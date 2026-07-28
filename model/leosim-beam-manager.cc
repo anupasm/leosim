@@ -414,7 +414,10 @@ LeoSimBeamManager::SetTopsisWeights(double wRsrp,
     m_topsisWeights[1] = wSinr;
     m_topsisWeights[2] = wTte;
     m_topsisWeights[3] = wLoad;
-    m_topsisWeights[4] = wLatency;
+    // End-to-end routing latency is deliberately excluded from beam
+    // management. Keep the parameter for API compatibility with existing
+    // scenarios, but never give the retired criterion any influence.
+    m_topsisWeights[4] = 0.0;
     m_topsisWeights[5] = wElevation;
     m_topsisWeights[6] = wActive;
     m_topsisWeights[7] = wOperatorCompat;
@@ -1023,9 +1026,9 @@ LeoSimBeamManager::ScanVisibleSatellites(uint32_t ueNodeId)
             continue;
         }
 
-        // Compute Time-To-Exit and latency once per satellite (not per-beam)
+        // Compute Time-To-Exit once per satellite (not per-beam). End-to-end
+        // routing latency is not a beam-management criterion.
         double tte = ComputeTte(ueNodeId, satNodeId);
-        double latency = ComputeEndToEndLatency(ueNodeId, satNodeId);
 
         // Get beam list for this satellite
         const auto& beams = m_multiBeamModel->GetBeamsForSatellite(satNodeId);
@@ -1137,7 +1140,7 @@ LeoSimBeamManager::ScanVisibleSatellites(uint32_t ueNodeId)
             beamRecord.elevationAngle = linkQuality.elevationAngle;
             beamRecord.remainingServiceTime = tte;
             beamRecord.satelliteLoad = 0; // Not used in 7-criterion version, kept for compatibility
-            beamRecord.endToEndLatency = latency;
+            beamRecord.endToEndLatency = 0.0;
             beamRecord.state = LEOSIM_BEAM_CONNECTED;
             beamRecord.associationTime = Simulator::Now();
 
@@ -1148,7 +1151,7 @@ LeoSimBeamManager::ScanVisibleSatellites(uint32_t ueNodeId)
             NS_LOG_DEBUG("   Visible beam for UE "
                          << ueNodeId << " to satellite " << satNodeId << " beam " << beam.beamId
                          << ": RSRP=" << beamRecord.rsrp << " dBm, SINR=" << sinr << " dB, TTE="
-                         << tte << "s, latency=" << latency << "ms, beamLoad=" << beamActiveUeCount
+                         << tte << "s, beamLoad=" << beamActiveUeCount
                          << ", active=" << (int)beam.activeInCurrentSlot);
             }
         }
@@ -1903,7 +1906,7 @@ LeoSimBeamManager::CompleteHandover(uint32_t ueNodeId,
     currentBeam.snr = newLinkQuality.snr;
     currentBeam.elevationAngle = newLinkQuality.elevationAngle;
     currentBeam.remainingServiceTime = ComputeTte(ueNodeId, targetSatId);
-    currentBeam.endToEndLatency = ComputeEndToEndLatency(ueNodeId, targetSatId);
+    currentBeam.endToEndLatency = 0.0;
     currentBeam.associationTime = Simulator::Now();
     currentBeam.state = LEOSIM_BEAM_CONNECTED;
 
@@ -2684,7 +2687,7 @@ LeoSimBeamManager::UpdateCycle()
                 currentBeam.pathLoss = servingQual.pathLoss;
                 currentBeam.elevationAngle = servingQual.elevationAngle;
                 currentBeam.remainingServiceTime = ComputeTte(ueNodeId, currentSatId);
-                currentBeam.endToEndLatency = ComputeEndToEndLatency(ueNodeId, currentSatId);
+                currentBeam.endToEndLatency = 0.0;
             }
         }
 
