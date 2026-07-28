@@ -115,6 +115,11 @@ class LeoSimTestDynamicIslNeighborReselection : public TestCase
     }
 
   private:
+    void OnTopologyChanged()
+    {
+        ++m_topologyChanges;
+    }
+
     void DoRun() override
     {
         NodeContainer satellites;
@@ -139,6 +144,8 @@ class LeoSimTestDynamicIslNeighborReselection : public TestCase
         }
         channel->SetDynamicIslSelectionInterval(Seconds(1));
         channel->SetDynamicIslMaxNeighbors(1);
+        channel->SetDynamicIslTopologyChangeCallback(
+            MakeCallback(&LeoSimTestDynamicIslNeighborReselection::OnTopologyChanged, this));
 
         mobility[0]->SetPosition(Vector(300000.0, 0.0, 0.0));
         mobility[3]->SetPosition(Vector(0.0, 0.0, 0.0));
@@ -162,8 +169,13 @@ class LeoSimTestDynamicIslNeighborReselection : public TestCase
         NS_TEST_ASSERT_MSG_EQ(selectedNewPair,
                               true,
                               "Periodic update did not select the newly closest neighbour");
+        NS_TEST_ASSERT_MSG_EQ(m_topologyChanges,
+                              1,
+                              "Dynamic ISL reselection must notify routing exactly once");
         Simulator::Destroy();
     }
+
+    uint32_t m_topologyChanges{0};
 };
 
 class LeoSimTestTrajectoryAwareAccessCandidates : public TestCase

@@ -22,6 +22,7 @@
 #include "leosim-weather-model.h"
 
 #include "ns3/object.h"
+#include "ns3/callback.h"
 #include "ns3/ptr.h"
 #include "ns3/node.h"
 #include "ns3/node-container.h"
@@ -172,6 +173,15 @@ class LeoSimChannelModel : public Object
      * reselections the cached active set is reused.
      */
     void SetDynamicIslSelectionInterval(Time interval);
+
+    /**
+     * \brief Set a callback fired after the active dynamic ISL set changes.
+     *
+     * Consumers such as routing helpers can use this notification to rebuild
+     * routes from the newly applied topology instead of relying on an
+     * independently scheduled update at the same simulation timestamp.
+     */
+    void SetDynamicIslTopologyChangeCallback(Callback<void> callback);
 
     /**
      * \brief Get channel quality for a specific link
@@ -567,6 +577,7 @@ class LeoSimChannelModel : public Object
     Time m_dynamicIslSelectionInterval{Seconds(30)}; //!< Neighbour search interval
     Time m_lastDynamicIslSelection{Seconds(-1)}; //!< Last neighbour search time
     std::set<uint32_t> m_selectedDynamicIslLinks; //!< Cached selected link IDs
+    Callback<void> m_dynamicIslTopologyChangeCallback; //!< Active ISL set changed
     Ptr<LeoSimOperatorModel> m_operatorModel; //!< Optional operator sharing model
     Ptr<LeoSimWeatherModel> m_weatherModel;   //!< Optional atmospheric weather model
     std::map<std::pair<uint32_t,uint32_t>, LeoSimAttenuationResult>

@@ -333,7 +333,7 @@ main(int argc, char* argv[])
     std::string satelliteFile = leosimDataDir + "/prepro/satellite_mobility.tcl";
     std::string groundDeviceFile;
     std::string outputPrefix = "leosim-param-scenario";
-    double simTime = 60.0;
+    double simTime = 600.0;
     bool useTrace = true;
     bool verbose = false;
 
@@ -371,7 +371,7 @@ main(int argc, char* argv[])
     uint32_t ueId = 0;
     uint16_t port = 9000;
     double appStart = 1.0;
-    double appStop = 59.0;
+    double appStop = 599.0;
     std::string tcpRate = "1Mbps";
     uint32_t tcpPacketSize = 1024;
     bool allToAllTraffic = true;
@@ -874,6 +874,12 @@ main(int argc, char* argv[])
                                                    routingDestinations,
                                                    MilliSeconds(200),
                                                    verbose);
+        if (enableIsl && islChannel)
+        {
+            islChannel->SetDynamicIslTopologyChangeCallback(
+                MakeCallback(&LeoSimExternalRoutingHelper::RequestRouteRefresh,
+                             &routeTreeHelper));
+        }
         beamManager->SetAccessStateChangeCallback(
             MakeCallback(&LeoSimExternalRoutingHelper::RequestRouteRefresh,
                          &routeTreeHelper));

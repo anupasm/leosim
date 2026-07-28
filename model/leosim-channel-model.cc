@@ -281,6 +281,12 @@ LeoSimChannelModel::SetDynamicIslSelectionInterval(Time interval)
 }
 
 void
+LeoSimChannelModel::SetDynamicIslTopologyChangeCallback(Callback<void> callback)
+{
+    m_dynamicIslTopologyChangeCallback = callback;
+}
+
+void
 LeoSimChannelModel::SelectDynamicIslTopology()
 {
     if (m_dynamicIslMaxNeighbors == 0)
@@ -379,9 +385,14 @@ LeoSimChannelModel::SelectDynamicIslTopology()
         select(edge);
     }
 
+    const bool topologyChanged = selected != m_selectedDynamicIslLinks;
     m_selectedDynamicIslLinks = std::move(selected);
     m_lastDynamicIslSelection = Simulator::Now();
     ApplyDynamicIslSelection();
+    if (topologyChanged && !m_dynamicIslTopologyChangeCallback.IsNull())
+    {
+        m_dynamicIslTopologyChangeCallback();
+    }
 }
 
 void
