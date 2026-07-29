@@ -895,10 +895,13 @@ main(int argc, char* argv[])
                                             routingDestinations,
                                             verbose);
         }
+        // Beam management releases access notifications after its active
+        // handover batch completes. Zero delay coalesces same-time callbacks
+        // without relying on an empirical quiet period.
         routeTreeHelper.EnableReactiveRouteRefresh(routingCalculator,
                                                    routingSources,
                                                    routingDestinations,
-                                                   MilliSeconds(200),
+                                                   MilliSeconds(0),
                                                    verbose);
         if (enableIsl && islChannel)
         {
@@ -935,13 +938,14 @@ main(int argc, char* argv[])
     if (!useTrees)
     {
         // Reactive routing: update routes when links change or handover occurs
+        // Match the destination-tree event coalescing above for in-process routing.
         routingHelper.EnableReactiveLinkTriggeredRouting(
             routingCalculator,
             allNodes,
             routingDestinations,
             accessChannel,
             enableIsl ? islChannel : nullptr,
-            MilliSeconds(200),
+            MilliSeconds(0),
             verbose,
             routingMetric);
         beamManager->SetAccessStateChangeCallback(

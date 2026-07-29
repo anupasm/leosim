@@ -41,6 +41,7 @@
 #include <cstdint>
 #include <map>
 #include <queue>
+#include <set>
 #include <vector>
 
 namespace ns3
@@ -719,6 +720,9 @@ class LeoSimBeamManager : public Object
     std::map<uint32_t, LeoSimBeamState> m_beamStates;    //!< Beam connection state per UE
     std::map<uint32_t, Time> m_tttStartTime;             //!< TTT timer start per UE
     std::map<uint32_t, EventId> m_tttEventIds;           //!< TTT scheduled event IDs per UE
+    std::map<uint32_t, EventId> m_ephemerisHandoverEventIds; //!< One predictive HO event per UE
+    std::set<uint32_t> m_inFlightInterSatelliteHandovers; //!< Nodes in CHO execution
+    bool m_accessRouteRefreshPending = false;             //!< Access graph changed in a HO batch
     std::map<uint32_t, Time> m_t310StartTime;            //!< T310 timer start per UE
     std::map<uint32_t, uint32_t> m_t310Counter;          //!< T310 expiry counter per UE
     std::map<uint32_t, std::vector<LeoSimTopsisCandidate>> m_candidates; //!< Ranked candidates
@@ -785,6 +789,9 @@ class LeoSimBeamManager : public Object
      * \brief Main update cycle called periodically
      */
     void UpdateCycle();
+
+    void NotifyAccessStateChanged();
+    void FinishInterSatelliteHandover(uint32_t ueNodeId);
 
     /**
      * \brief Refresh model-owned beam footprints from current satellite positions.

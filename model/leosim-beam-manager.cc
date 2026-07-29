@@ -44,6 +44,20 @@ namespace
 {
 constexpr double EARTH_RADIUS_KM = 6371.0;
 
+double
+FiniteRadioQuality(double preferred, double fallback)
+{
+    if (std::isfinite(preferred))
+    {
+        return preferred;
+    }
+    if (std::isfinite(fallback))
+    {
+        return fallback;
+    }
+    return -200.0;
+}
+
 class RoutingAccessAuthorityGuard
 {
   public:
@@ -218,6 +232,32 @@ LeoSimBeamManager::SetAccessStateChangeCallback(Callback<void> callback)
 {
     NS_LOG_FUNCTION(this);
     m_accessStateChangeCallback = callback;
+    if (m_accessRouteRefreshPending && m_inFlightInterSatelliteHandovers.empty() &&
+        !m_accessStateChangeCallback.IsNull())
+    {
+        m_accessRouteRefreshPending = false;
+        m_accessStateChangeCallback();
+    }
+}
+
+void
+LeoSimBeamManager::NotifyAccessStateChanged()
+{
+    m_accessRouteRefreshPending = true;
+    if (!m_inFlightInterSatelliteHandovers.empty() || m_accessStateChangeCallback.IsNull())
+    {
+        return;
+    }
+
+    m_accessRouteRefreshPending = false;
+    m_accessStateChangeCallback();
+}
+
+void
+LeoSimBeamManager::FinishInterSatelliteHandover(uint32_t ueNodeId)
+{
+    m_inFlightInterSatelliteHandovers.erase(ueNodeId);
+    NotifyAccessStateChanged();
 }
 
 // ============================================================================
@@ -659,10 +699,7 @@ LeoSimBeamManager::RunTttEvaluation(uint32_t ueNodeId)
         {
             m_beamStateCallback(ueNodeId, searching, 0.0);
         }
-        if (!m_accessStateChangeCallback.IsNull())
-        {
-            m_accessStateChangeCallback();
-        }
+        NotifyAccessStateChanged();
         m_currentBeams.erase(beamIt);
 
         NS_LOG_DEBUG("Serving beam retired for UE " << ueNodeId << " at "
@@ -1745,6 +1782,11 @@ LeoSimBeamManager::ExecuteChoHandover(uint32_t ueNodeId,
     }
 
     uint32_t sourceSatId = beamIt->second.satelliteNodeId;
+    if (!m_inFlightInterSatelliteHandovers.insert(ueNodeId).second)
+    {
+        NS_LOG_DEBUG("Ignoring duplicate CHO execution request for UE " << ueNodeId);
+        return;
+    }
     beamIt->second.state = LEOSIM_BEAM_EXECUTING;
 
     if (!m_beamStateCallback.IsNull())
@@ -1841,8 +1883,8 @@ LeoSimBeamManager::RecordInterSatelliteHandover(uint32_t ueNodeId,
     evt.packetsBuffered = 0;
     evt.packetsDropped = 0;
     evt.success = true;
-    evt.sinrBefore = source.sinr;
-    evt.sinrAfter = target.sinr;
+    evt.sinrBefore = FiniteRadioQuality(source.sinr, source.snr);
+    evt.sinrAfter = FiniteRadioQuality(target.sinr, target.snr);
 
     m_handoverHistory.push_back(evt);
     m_lastHandoverTime[ueNodeId] = completedAt;
@@ -1852,10 +1894,7 @@ LeoSimBeamManager::RecordInterSatelliteHandover(uint32_t ueNodeId,
     {
         m_handoverCallback(evt);
     }
-    if (!m_accessStateChangeCallback.IsNull())
-    {
-        m_accessStateChangeCallback();
-    }
+    NotifyAccessStateChanged();
 
     NS_LOG_DEBUG("Recorded inter-satellite handover for node "
                  << ueNodeId << ": sat " << evt.sourceSatId << " beam " << evt.sourceBeamId
@@ -1873,6 +1912,7 @@ LeoSimBeamManager::CompleteHandover(uint32_t ueNodeId,
     if (!m_channelModel || !m_loader)
     {
         NS_LOG_WARN("Channel model or loader not configured for handover completion");
+        FinishInterSatelliteHandover(ueNodeId);
         return;
     }
 
@@ -1881,11 +1921,13 @@ LeoSimBeamManager::CompleteHandover(uint32_t ueNodeId,
     // may have left coverage, gone dark, or otherwise become ineligible before
     // this callback runs.
     LeoSimChannelQuality newLinkQuality = m_channelModel->GetLinkQuality(ueNodeId, targetSatId);
+    LeoSimChannelQuality oldLinkQuality = m_channelModel->GetLinkQuality(ueNodeId, sourceSatId);
 
     auto beamIt = m_currentBeams.find(ueNodeId);
     if (beamIt == m_currentBeams.end())
     {
         NS_LOG_WARN("UE " << ueNodeId << " has no beam record for handover completion");
+        FinishInterSatelliteHandover(ueNodeId);
         return;
     }
 
@@ -1941,9 +1983,10 @@ LeoSimBeamManager::CompleteHandover(uint32_t ueNodeId,
         failedEvent.packetsBuffered = 0;
         failedEvent.packetsDropped = 0;
         failedEvent.success = false;
-        failedEvent.sinrBefore = sourceBeam.sinr;
+        failedEvent.sinrBefore = FiniteRadioQuality(sourceBeam.sinr, oldLinkQuality.snr);
         failedEvent.sinrAfter =
-            targetVisible ? targetBeam.sinr : newLinkQuality.snr;
+            targetVisible ? FiniteRadioQuality(targetBeam.sinr, newLinkQuality.snr)
+                          : FiniteRadioQuality(newLinkQuality.snr, -200.0);
         m_handoverHistory.push_back(failedEvent);
         m_lastHandoverTime[ueNodeId] = Simulator::Now();
         m_ueHandoverCount[ueNodeId]++;
@@ -1970,10 +2013,7 @@ LeoSimBeamManager::CompleteHandover(uint32_t ueNodeId,
         {
             m_handoverCallback(failedEvent);
         }
-        if (!m_accessStateChangeCallback.IsNull())
-        {
-            m_accessStateChangeCallback();
-        }
+        FinishInterSatelliteHandover(ueNodeId);
         return;
     }
 
@@ -1993,11 +2033,6 @@ LeoSimBeamManager::CompleteHandover(uint32_t ueNodeId,
     {
         m_beamStateCallback(ueNodeId, currentBeam, 0.0);
     }
-    if (!m_accessStateChangeCallback.IsNull())
-    {
-        m_accessStateChangeCallback();
-    }
-
     NS_LOG_DEBUG("Updated beam record for UE " << ueNodeId << " to satellite " << targetSatId
                                                << ": RSRP=" << currentBeam.rsrp
                                                << " dBm, SNR=" << currentBeam.snr << " dB");
@@ -2034,8 +2069,8 @@ LeoSimBeamManager::CompleteHandover(uint32_t ueNodeId,
     hoEvent.packetsBuffered = 0; // TODO: get from buffer manager
     hoEvent.packetsDropped = 0;  // TODO: get from buffer manager
     hoEvent.success = true;
-    hoEvent.sinrBefore = sourceBeam.sinr;
-    hoEvent.sinrAfter = currentBeam.sinr;
+    hoEvent.sinrBefore = FiniteRadioQuality(sourceBeam.sinr, oldLinkQuality.snr);
+    hoEvent.sinrAfter = FiniteRadioQuality(currentBeam.sinr, newLinkQuality.snr);
 
     NS_LOG_DEBUG("Built handover event: latency=" << hoEvent.handoverLatencyMs
                                                   << "ms, success=" << hoEvent.success);
@@ -2084,6 +2119,8 @@ LeoSimBeamManager::CompleteHandover(uint32_t ueNodeId,
         NS_LOG_DEBUG("Fired handover callback for UE " << ueNodeId);
     }
 
+    FinishInterSatelliteHandover(ueNodeId);
+
     // Step 13: Log NS_LOG_DEBUG
     NS_LOG_DEBUG("CHO completed for UE " << ueNodeId << ": satellite " << sourceSatId << " -> "
                                          << targetSatId << ", latency=" << hoEvent.handoverLatencyMs
@@ -2111,6 +2148,20 @@ LeoSimBeamManager::PreScheduleEphemerisHandovers(Time lookaheadWindow)
         uint32_t ueNodeId = entry.first;
         const LeoSimBeamRecord& beamRecord = entry.second;
         uint32_t satNodeId = beamRecord.satelliteNodeId;
+
+        // Recomputing the lookahead must replace, not accumulate, predictive
+        // callbacks. CompleteHandover() calls this method after every access
+        // change, so leaving the old event pending executes the same handover
+        // several times.
+        auto scheduled = m_ephemerisHandoverEventIds.find(ueNodeId);
+        if (scheduled != m_ephemerisHandoverEventIds.end())
+        {
+            if (scheduled->second.IsPending())
+            {
+                scheduled->second.Cancel();
+            }
+            m_ephemerisHandoverEventIds.erase(scheduled);
+        }
 
         // Compute Time-To-Exit from current serving satellite
         double tte = ComputeTte(ueNodeId, satNodeId);
@@ -2142,6 +2193,7 @@ LeoSimBeamManager::PreScheduleEphemerisHandovers(Time lookaheadWindow)
         // Create lambda callback for scheduled handover preparation
         // Explicitly capture all required variables by value
         auto prepCallback = [this, ueNodeId, satNodeId, tte]() {
+            m_ephemerisHandoverEventIds.erase(ueNodeId);
             NS_LOG_DEBUG("Ephemeris-triggered handover preparation for UE "
                          << ueNodeId << " from satellite " << satNodeId << " (TTE was " << tte
                          << "s) at time " << Simulator::Now().GetSeconds() << "s");
@@ -2173,7 +2225,8 @@ LeoSimBeamManager::PreScheduleEphemerisHandovers(Time lookaheadWindow)
         };
 
         // Schedule the preparation callback
-        Simulator::Schedule(prepTime, prepCallback);
+        m_ephemerisHandoverEventIds[ueNodeId] =
+            Simulator::Schedule(prepTime, prepCallback);
 
         NS_LOG_DEBUG("Pre-scheduled ephemeris handover for UE "
                      << ueNodeId << " from satellite " << satNodeId << " (TTE=" << tte
@@ -2471,10 +2524,7 @@ LeoSimBeamManager::ExecuteIntraBeamHandover(uint32_t ueNodeId,
         {
             m_beamStateCallback(ueNodeId, r, 0.0);
         }
-        if (!m_accessStateChangeCallback.IsNull())
-        {
-            m_accessStateChangeCallback();
-        }
+        NotifyAccessStateChanged();
 
         NS_LOG_DEBUG("Intra-beam handover complete: UE "
                      << ueNodeId << " beam " << sourceBeamId << " -> " << targetBeam.beamId
@@ -2713,10 +2763,7 @@ LeoSimBeamManager::UpdateCycle()
                     searching.state = LEOSIM_BEAM_SEARCHING;
                     m_beamStateCallback(ueNodeId, searching, 0.0);
                 }
-                if (!m_accessStateChangeCallback.IsNull())
-                {
-                    m_accessStateChangeCallback();
-                }
+                NotifyAccessStateChanged();
                 continue;
             }
 
@@ -2742,10 +2789,7 @@ LeoSimBeamManager::UpdateCycle()
             {
                 m_beamStateCallback(ueNodeId, serving, ranked[0].topsisScore);
             }
-            if (!m_accessStateChangeCallback.IsNull())
-            {
-                m_accessStateChangeCallback();
-            }
+            NotifyAccessStateChanged();
  
             continue;
         }
