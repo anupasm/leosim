@@ -21,16 +21,21 @@
 #include "ns3/data-rate.h"
 #include "ns3/internet-stack-helper.h"
 #include "ns3/log.h"
+#include "ns3/mobility-model.h"
 #include "ns3/node.h"
+#include "ns3/point-to-point-channel.h"
 #include "ns3/point-to-point-helper.h"
 #include "ns3/point-to-point-net-device.h"
 #include "ns3/simulator.h"
 #include "ns3/simple-channel.h"
 #include "ns3/string.h"
+#include "ns3/nstime.h"
 #include "ns3/uinteger.h"
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
+#include <stdexcept>
 
 namespace ns3
 {
@@ -40,6 +45,9 @@ NS_LOG_COMPONENT_DEFINE("LeoSimDeviceInstaller");
 LeoSimDeviceInstaller::LeoSimDeviceInstaller()
     : m_dataRate("100Mbps"),
       m_delay("1ms"),
+      m_delayMode(LeoSimDelayMode::GEOMETRY),
+      m_delayUpdateInterval(Seconds(1)),
+      m_propagationSpeed(299792458.0),
       m_mtu(1500),
       m_verbose(false),
       m_numInstalledDevices(0),
@@ -127,6 +135,116 @@ LeoSimDeviceInstaller::SetDeviceDelay(std::string delay)
 }
 
 void
+LeoSimDeviceInstaller::SetDelayMode(std::string mode)
+{
+    std::transform(mode.begin(),
+                   mode.end(),
+                   mode.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (mode == "constant")
+    {
+        m_delayMode = LeoSimDelayMode::CONSTANT;
+    }
+    else if (mode == "geometry")
+    {
+        m_delayMode = LeoSimDelayMode::GEOMETRY;
+    }
+    else
+    {
+        throw std::invalid_argument("Unknown LeoSim delay mode '" + mode +
+                                    "'; expected constant or geometry");
+    }
+}
+
+void
+LeoSimDeviceInstaller::SetDelayUpdateInterval(Time interval)
+{
+    if (!interval.IsStrictlyPositive())
+    {
+        throw std::invalid_argument("Delay update interval must be positive");
+    }
+    m_delayUpdateInterval = interval;
+}
+
+void
+LeoSimDeviceInstaller::SetPropagationSpeed(double metersPerSecond)
+{
+    if (!std::isfinite(metersPerSecond) || metersPerSecond <= 0.0)
+    {
+        throw std::invalid_argument("Propagation speed must be finite and positive");
+    }
+    m_propagationSpeed = metersPerSecond;
+}
+
+Time
+LeoSimDeviceInstaller::CalculateLinkDelay(Ptr<Node> node1, Ptr<Node> node2) const
+{
+    if (m_delayMode == LeoSimDelayMode::CONSTANT)
+    {
+        return Time(m_delay);
+    }
+
+    Ptr<MobilityModel> mobility1 = node1 ? node1->GetObject<MobilityModel>() : nullptr;
+    Ptr<MobilityModel> mobility2 = node2 ? node2->GetObject<MobilityModel>() : nullptr;
+    if (!mobility1 || !mobility2)
+    {
+        NS_LOG_WARN("Geometry delay requested for link without mobility; using constant fallback");
+        return Time(m_delay);
+    }
+
+    const Vector p1 = mobility1->GetPosition();
+    const Vector p2 = mobility2->GetPosition();
+    const double dx = p1.x - p2.x;
+    const double dy = p1.y - p2.y;
+    const double dz = p1.z - p2.z;
+    const double distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+    return Seconds(distance / m_propagationSpeed);
+}
+
+void
+LeoSimDeviceInstaller::UpdatePropagationDelays()
+{
+    if (m_delayMode != LeoSimDelayMode::GEOMETRY)
+    {
+        return;
+    }
+
+    for (const auto& [key, devices] : m_installedLinks)
+    {
+        Ptr<PointToPointNetDevice> device =
+            DynamicCast<PointToPointNetDevice>(devices.first);
+        Ptr<PointToPointNetDevice> peer =
+            DynamicCast<PointToPointNetDevice>(devices.second);
+        if (!device || !peer)
+        {
+            continue;
+        }
+        Ptr<PointToPointChannel> channel =
+            DynamicCast<PointToPointChannel>(device->GetChannel());
+        if (!channel)
+        {
+            continue;
+        }
+        const Time delay = CalculateLinkDelay(device->GetNode(), peer->GetNode());
+        channel->SetAttribute("Delay", TimeValue(delay));
+    }
+
+    ScheduleDelayUpdate();
+}
+
+void
+LeoSimDeviceInstaller::ScheduleDelayUpdate()
+{
+    if (m_delayMode == LeoSimDelayMode::GEOMETRY && !m_delayUpdateEvent.IsPending())
+    {
+        m_delayUpdateEvent =
+            Simulator::Schedule(m_delayUpdateInterval,
+                                &LeoSimDeviceInstaller::UpdatePropagationDelays,
+                                this);
+    }
+}
+
+void
 LeoSimDeviceInstaller::SetDeviceMtu(uint32_t mtu)
 {
     NS_LOG_FUNCTION(this << mtu);
@@ -179,7 +297,8 @@ LeoSimDeviceInstaller::InstallLink(Ptr<Node> node1, Ptr<Node> node2)
     // Create point-to-point devices between the two nodes
     PointToPointHelper p2pHelper;
     p2pHelper.SetDeviceAttribute("DataRate", ns3::StringValue(m_dataRate));
-    p2pHelper.SetChannelAttribute("Delay", ns3::StringValue(m_delay));
+    p2pHelper.SetChannelAttribute("Delay",
+                                  TimeValue(CalculateLinkDelay(node1, node2)));
 
     NetDeviceContainer devices = p2pHelper.Install(node1, node2);
 
@@ -250,6 +369,7 @@ LeoSimDeviceInstaller::Install(NodeContainer satellites, NodeContainer groundNod
         NS_LOG_DEBUG("Installed " << allDevices.GetN() << " total devices");
     }
 
+    ScheduleDelayUpdate();
     return allDevices;
 }
 
@@ -463,6 +583,10 @@ void
 LeoSimDeviceInstaller::Clear()
 {
     NS_LOG_FUNCTION(this);
+    if (m_delayUpdateEvent.IsPending())
+    {
+        Simulator::Cancel(m_delayUpdateEvent);
+    }
     m_installedLinks.clear();
     m_linkErrorModels.clear();
     m_nodeDevices.clear();

@@ -344,6 +344,9 @@ main(int argc, char* argv[])
     double accessMaxDistance = 2500000.0;
     std::string accessDataRate = "100Mbps";
     std::string accessDelay = "1ms";
+    std::string delayMode = "geometry";
+    double delayUpdateInterval = 1.0;
+    double propagationSpeed = 299792458.0;
     uint32_t maxAccessSatellites = 8;
 
     bool enableIsl = true;
@@ -399,6 +402,15 @@ main(int argc, char* argv[])
     cmd.AddValue("accessMaxDistance", "Maximum satellite-ground link distance in meters", accessMaxDistance);
     cmd.AddValue("accessDataRate", "Satellite-ground point-to-point data rate", accessDataRate);
     cmd.AddValue("accessDelay", "Satellite-ground propagation delay, e.g. 1ms", accessDelay);
+    cmd.AddValue("delayMode",
+                 "Packet propagation-delay model: constant or geometry",
+                 delayMode);
+    cmd.AddValue("delayUpdateInterval",
+                 "Geometry-delay refresh interval in seconds",
+                 delayUpdateInterval);
+    cmd.AddValue("propagationSpeed",
+                 "Signal propagation speed in metres per second for geometry delay",
+                 propagationSpeed);
     cmd.AddValue("maxAccessSatellites",
                  "Maximum candidate satellite access links created per ground node",
                  maxAccessSatellites);
@@ -535,7 +547,10 @@ main(int argc, char* argv[])
 
     std::cout << "Scenario: satellites=" << numSatellites << ", servers=" << numServers
               << ", UEs=" << numUes << ", accessMaxDistance=" << accessMaxDistance
-              << "m, accessDelay=" << accessDelay << ", islMaxDistance=" << islMaxDistance
+              << "m, delayMode=" << delayMode << ", accessDelay=" << accessDelay
+              << ", delayUpdateInterval=" << delayUpdateInterval
+              << "s, propagationSpeed=" << propagationSpeed
+              << "m/s, islMaxDistance=" << islMaxDistance
               << "m, islDelay=" << islDelay << std::endl;
 
     NodeContainer satelliteNodes;
@@ -672,6 +687,9 @@ main(int argc, char* argv[])
     accessInstaller.SetOperatorModel(operatorModel);
     accessInstaller.SetDeviceDataRate(accessDataRate);
     accessInstaller.SetDeviceDelay(accessDelay);
+    accessInstaller.SetDelayMode(delayMode);
+    accessInstaller.SetDelayUpdateInterval(Seconds(delayUpdateInterval));
+    accessInstaller.SetPropagationSpeed(propagationSpeed);
     accessInstaller.SetDeviceMtu(1500);
     accessInstaller.SetVerbose(verbose);
     NetDeviceContainer accessDevices = accessInstaller.Install(satelliteNodes, allGroundNodes);
@@ -688,6 +706,9 @@ main(int argc, char* argv[])
         islInstaller.SetOperatorModel(operatorModel);
         islInstaller.SetDeviceDataRate(islDataRate);
         islInstaller.SetDeviceDelay(islDelay);
+        islInstaller.SetDelayMode(delayMode);
+        islInstaller.SetDelayUpdateInterval(Seconds(delayUpdateInterval));
+        islInstaller.SetPropagationSpeed(propagationSpeed);
         islInstaller.SetDeviceMtu(1500);
         islInstaller.SetVerbose(verbose);
         islDevices = islInstaller.Install(satelliteNodes, NodeContainer());

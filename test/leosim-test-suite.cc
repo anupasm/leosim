@@ -19,13 +19,17 @@
 #include "ns3/leosim-channel-helper.h"
 #include "ns3/leosim-operator-model.h"
 #include "ns3/leosim-beam-manager.h"
+#include "ns3/leosim-device-installer.h"
 #include "ns3/leosim-routing-calculator-helper.h"
 #include "ns3/leosim-visualization-helper.h"
 #include "ns3/test.h"
 #include "ns3/constant-position-mobility-model.h"
 #include "ns3/internet-stack-helper.h"
 #include "ns3/node-container.h"
+#include "ns3/point-to-point-channel.h"
+#include "ns3/point-to-point-net-device.h"
 #include "ns3/simulator.h"
+#include "ns3/nstime.h"
 
 #include <cstdio>
 #include <algorithm>
@@ -223,6 +227,105 @@ class LeoSimTestTrajectoryAwareAccessCandidates : public TestCase
         NS_TEST_ASSERT_MSG_EQ(candidates.size(),
                               2,
                               "Candidate union must include the satellite visible at each epoch");
+        Simulator::Destroy();
+    }
+};
+
+class LeoSimTestConstantDelayMode : public TestCase
+{
+  public:
+    LeoSimTestConstantDelayMode()
+        : TestCase("constant delay mode preserves the configured link delay")
+    {
+    }
+
+  private:
+    void DoRun() override
+    {
+        NodeContainer satellites;
+        satellites.Create(2);
+        auto left = CreateObject<ConstantPositionMobilityModel>();
+        auto right = CreateObject<ConstantPositionMobilityModel>();
+        left->SetPosition(Vector(0.0, 0.0, 0.0));
+        right->SetPosition(Vector(600000.0, 0.0, 0.0));
+        satellites.Get(0)->AggregateObject(left);
+        satellites.Get(1)->AggregateObject(right);
+
+        Ptr<LeoSimChannelModel> model = CreateObject<LeoSimChannelModel>();
+        model->AddIslLink(satellites.Get(0), satellites.Get(1));
+
+        LeoSimDeviceInstaller installer;
+        installer.SetChannelModel(model);
+        installer.SetDeviceDelay("7ms");
+        installer.SetDelayMode("constant");
+        NetDeviceContainer devices = installer.Install(satellites, NodeContainer());
+
+        Ptr<PointToPointNetDevice> device =
+            DynamicCast<PointToPointNetDevice>(devices.Get(0));
+        Ptr<PointToPointChannel> channel =
+            DynamicCast<PointToPointChannel>(device->GetChannel());
+        TimeValue delay;
+        channel->GetAttribute("Delay", delay);
+        NS_TEST_ASSERT_MSG_EQ(delay.Get(),
+                              MilliSeconds(7),
+                              "Constant mode did not preserve SetDeviceDelay");
+        Simulator::Destroy();
+    }
+};
+
+class LeoSimTestGeometryDelayMode : public TestCase
+{
+  public:
+    LeoSimTestGeometryDelayMode()
+        : TestCase("default geometry delay mode follows changing endpoint distance")
+    {
+    }
+
+  private:
+    void DoRun() override
+    {
+        NodeContainer satellites;
+        satellites.Create(2);
+        auto left = CreateObject<ConstantPositionMobilityModel>();
+        auto right = CreateObject<ConstantPositionMobilityModel>();
+        left->SetPosition(Vector(0.0, 0.0, 0.0));
+        right->SetPosition(Vector(300000.0, 0.0, 0.0));
+        satellites.Get(0)->AggregateObject(left);
+        satellites.Get(1)->AggregateObject(right);
+
+        Ptr<LeoSimChannelModel> model = CreateObject<LeoSimChannelModel>();
+        model->AddIslLink(satellites.Get(0), satellites.Get(1));
+
+        LeoSimDeviceInstaller installer;
+        installer.SetChannelModel(model);
+        installer.SetDeviceDelay("7ms");
+        installer.SetPropagationSpeed(300000000.0);
+        installer.SetDelayUpdateInterval(Seconds(1));
+        NetDeviceContainer devices = installer.Install(satellites, NodeContainer());
+
+        Ptr<PointToPointNetDevice> device =
+            DynamicCast<PointToPointNetDevice>(devices.Get(0));
+        Ptr<PointToPointChannel> channel =
+            DynamicCast<PointToPointChannel>(device->GetChannel());
+        TimeValue delay;
+        channel->GetAttribute("Delay", delay);
+        NS_TEST_ASSERT_MSG_EQ_TOL(delay.Get().GetSeconds(),
+                                  0.001,
+                                  1e-12,
+                                  "Initial geometry delay should be distance / speed");
+
+        Simulator::Schedule(Seconds(0.5),
+                            &ConstantPositionMobilityModel::SetPosition,
+                            right,
+                            Vector(600000.0, 0.0, 0.0));
+        Simulator::Stop(Seconds(1.1));
+        Simulator::Run();
+
+        channel->GetAttribute("Delay", delay);
+        NS_TEST_ASSERT_MSG_EQ_TOL(delay.Get().GetSeconds(),
+                                  0.002,
+                                  1e-12,
+                                  "Geometry delay was not refreshed after movement");
         Simulator::Destroy();
     }
 };
@@ -2835,6 +2938,8 @@ LeoSimTestSuite::LeoSimTestSuite()
     AddTestCase(new LeoSimTestSpatialIslDegreeAndConnectivity, TestCase::Duration::QUICK);
     AddTestCase(new LeoSimTestDynamicIslNeighborReselection, TestCase::Duration::QUICK);
     AddTestCase(new LeoSimTestTrajectoryAwareAccessCandidates, TestCase::Duration::QUICK);
+    AddTestCase(new LeoSimTestConstantDelayMode, TestCase::Duration::QUICK);
+    AddTestCase(new LeoSimTestGeometryDelayMode, TestCase::Duration::QUICK);
     AddTestCase(new LeoSimTestHexBeamLayout19, TestCase::Duration::QUICK);
     AddTestCase(new LeoSimTestHexBeamLayout61, TestCase::Duration::QUICK);
     AddTestCase(new LeoSimTestSinrWithICI, TestCase::Duration::QUICK);

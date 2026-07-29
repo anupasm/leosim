@@ -21,7 +21,9 @@
 #include "ns3/leosim-channel-model.h"
 #include "ns3/leosim-operator-model.h"
 #include "ns3/error-model.h"
+#include "ns3/event-id.h"
 #include "ns3/net-device-container.h"
+#include "ns3/nstime.h"
 #include "ns3/node-container.h"
 #include "ns3/ptr.h"
 #include "ns3/simple-channel.h"
@@ -31,6 +33,13 @@
 
 namespace ns3
 {
+
+/** Packet propagation-delay model used by installed point-to-point links. */
+enum class LeoSimDelayMode
+{
+    CONSTANT,
+    GEOMETRY
+};
 
 /**
  * \ingroup leosim
@@ -92,6 +101,30 @@ class LeoSimDeviceInstaller
      * \param delay Delay as string (e.g., "1ms", "10us")
      */
     void SetDeviceDelay(std::string delay);
+
+    /**
+     * \brief Select the propagation-delay model.
+     * \param mode "constant" or "geometry"
+     *
+     * Constant mode uses SetDeviceDelay(). Geometry mode uses the current
+     * endpoint distance divided by the configured propagation speed.
+     */
+    void SetDelayMode(std::string mode);
+
+    /**
+     * \brief Set the interval at which geometry-derived delays are refreshed.
+     * \param interval Positive update interval
+     */
+    void SetDelayUpdateInterval(Time interval);
+
+    /**
+     * \brief Set signal propagation speed for geometry mode.
+     * \param metersPerSecond Propagation speed in metres per second
+     */
+    void SetPropagationSpeed(double metersPerSecond);
+
+    /** Refresh every installed link's geometry-derived propagation delay now. */
+    void UpdatePropagationDelays();
 
     /**
      * \brief Set MTU size for installed devices
@@ -258,6 +291,12 @@ class LeoSimDeviceInstaller
      */
     LeoSimLinkDirection InferDirection(Ptr<Node> nodeA, Ptr<Node> nodeB) const;
 
+    /** Calculate the configured delay for a link at the current simulation time. */
+    Time CalculateLinkDelay(Ptr<Node> node1, Ptr<Node> node2) const;
+
+    /** Schedule the next geometry-delay refresh. */
+    void ScheduleDelayUpdate();
+
   private:
     /**
      * \brief Create a unique key for a node pair
@@ -274,6 +313,10 @@ class LeoSimDeviceInstaller
     // Device configuration
     std::string m_dataRate;  //!< Data rate for devices
     std::string m_delay;     //!< Propagation delay for devices
+    LeoSimDelayMode m_delayMode; //!< Constant or geometry-derived propagation delay
+    Time m_delayUpdateInterval; //!< Geometry-delay refresh interval
+    double m_propagationSpeed; //!< Signal propagation speed in metres per second
+    EventId m_delayUpdateEvent; //!< Pending geometry-delay refresh
     uint32_t m_mtu;          //!< MTU size for devices
     uint64_t m_baseGroundRateBps = 100000000; //!< Baseline ground-link rate (100 Mbps)
     uint64_t m_baseIslRateBps = 10000000000; //!< Baseline ISL rate (10 Gbps)
