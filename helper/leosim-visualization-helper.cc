@@ -325,6 +325,19 @@ LeoSimVisualizationHelper::EnableBeamLogging(bool enable)
 }
 
 void
+LeoSimVisualizationHelper::InitializeBeamLogging()
+{
+    if (!m_enableBeamLogging || m_beamLoggingInitialized)
+    {
+        return;
+    }
+
+    InitBeamLogging();
+    m_beamLoggingInitialized = true;
+    InstallBeamManagerCallbacks();
+}
+
+void
 LeoSimVisualizationHelper::SetLoaderHelper(LeoSimLoaderHelper& loaderHelper)
 {
     m_loaderHelper = &loaderHelper;
@@ -433,12 +446,7 @@ LeoSimVisualizationHelper::Initialize()
         }
     }
 
-    if (m_enableBeamLogging && !m_beamLoggingInitialized)
-    {
-        InitBeamLogging();
-        m_beamLoggingInitialized = true;
-        InstallBeamManagerCallbacks();
-    }
+    InitializeBeamLogging();
 
     // Initialize coverage and link quality logging
     InitCoverageAndLinkQualityLogging();
@@ -1553,32 +1561,38 @@ LeoSimVisualizationHelper::InitBeamLogging()
         }
     }
 
-    // Open handover event file and write header
-    m_handoverFileStream.open(m_handoverFile, std::ios::out | std::ios::trunc);
-    if (m_handoverFileStream.is_open())
+    // Open handover event file and write header when explicitly configured.
+    if (!m_handoverFile.empty())
     {
-        m_handoverFileStream << "time_ms,ue_id,src_sat,tgt_sat,src_beam,src_cell,tgt_beam,tgt_cell,"
-                             << "mode,type,trigger,latency_ms,buff_pkts,drop_pkts,success,"
-                             << "route_change,sinr_before,sinr_after\n";
-        m_handoverFileStream.flush();
-        NS_LOG_DEBUG("Opened handover event file: " << m_handoverFile);
-    }
-    else
-    {
-        NS_LOG_WARN("Could not open handover event file: " << m_handoverFile);
+        m_handoverFileStream.open(m_handoverFile, std::ios::out | std::ios::trunc);
+        if (m_handoverFileStream.is_open())
+        {
+            m_handoverFileStream << "time_ms,ue_id,src_sat,tgt_sat,src_beam,src_cell,tgt_beam,tgt_cell,"
+                                 << "mode,type,trigger,latency_ms,buff_pkts,drop_pkts,success,"
+                                 << "route_change,sinr_before,sinr_after\n";
+            m_handoverFileStream.flush();
+            NS_LOG_DEBUG("Opened handover event file: " << m_handoverFile);
+        }
+        else
+        {
+            NS_LOG_WARN("Could not open handover event file: " << m_handoverFile);
+        }
     }
 
-    // Open CHO config file and write header
-    m_choFileStream.open(m_choFile, std::ios::out | std::ios::trunc);
-    if (m_choFileStream.is_open())
+    // Open CHO config file and write header when explicitly configured.
+    if (!m_choFile.empty())
     {
-        m_choFileStream << "time,ue_id,serving_sat,candidate_sat,topsis_rank,topsis_score,tte_sec,config_expiry\n";
-        m_choFileStream.flush();
-        NS_LOG_DEBUG("Opened CHO config file: " << m_choFile);
-    }
-    else
-    {
-        NS_LOG_WARN("Could not open CHO config file: " << m_choFile);
+        m_choFileStream.open(m_choFile, std::ios::out | std::ios::trunc);
+        if (m_choFileStream.is_open())
+        {
+            m_choFileStream << "time,ue_id,serving_sat,candidate_sat,topsis_rank,topsis_score,tte_sec,config_expiry\n";
+            m_choFileStream.flush();
+            NS_LOG_DEBUG("Opened CHO config file: " << m_choFile);
+        }
+        else
+        {
+            NS_LOG_WARN("Could not open CHO config file: " << m_choFile);
+        }
     }
 
     if (!m_beamAssociationFile.empty())

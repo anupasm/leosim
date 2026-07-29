@@ -16,9 +16,12 @@ or Python environment. Before simulation, the array combines `alpha.csv`,
 30-minute, 5-second-resolution position CSV is generated only once per array
 job and reused by every routing run.
 
-Every task writes FlowMonitor XML, periodic/summary statistics, selected-route
-history, resource usage, and metadata. By default it loads all UEs and ground
-stations and creates every UE-to-GSS TCP flow at 1 Mbps per flow.
+Every task writes FlowMonitor XML, periodic/summary statistics, a handover-event
+log, resource usage, and metadata. Output files share the `result-` prefix; the
+handover log is named `result-handovers.csv`. Set
+`ENABLE_HANDOVER_LOGGING=0` when submitting to disable it. By default the
+scenario loads all UEs and ground stations and creates every UE-to-GSS TCP flow
+at 1 Mbps per flow.
 
 ## Put LeoSim on Sonic
 

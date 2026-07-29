@@ -382,6 +382,7 @@ main(int argc, char* argv[])
     bool enableTaskProfiler = true;
     double statisticsInterval = 1.0;
     bool enableRouteLogging = true;
+    bool enableHandoverLogging = false;
     double progressLogInterval = 5.0;
 
     CommandLine cmd;
@@ -460,6 +461,9 @@ main(int argc, char* argv[])
     cmd.AddValue("enableRouteLogging",
                  "Write selected paths and path-specific routing metrics",
                  enableRouteLogging);
+    cmd.AddValue("enableHandoverLogging",
+                 "Write handover events to <outputPrefix>-handovers.csv",
+                 enableHandoverLogging);
     cmd.AddValue("progressLogInterval",
                  "Simulation-time interval for wall-clock progress logs; 0 disables",
                  progressLogInterval);
@@ -584,6 +588,7 @@ main(int argc, char* argv[])
     const std::string positionFile = outputPrefix + "-positions.csv";
     const std::string linkFile = outputPrefix + "-links.csv";
     const std::string packetFile = outputPrefix + "-packets.csv";
+    const std::string handoverFile = outputPrefix + "-handovers.csv";
     if (enableVisualization)
     {
         visualizationHelper.SetOutputFile(positionFile);
@@ -593,8 +598,25 @@ main(int argc, char* argv[])
         visualizationHelper.EnablePacketLogging(true);
         visualizationHelper.EnablePacketGeolocationLogging(true);
         visualizationHelper.SetLoaderHelper(loaderHelper);
+        if (enableHandoverLogging)
+        {
+            visualizationHelper.SetBeamFile("");
+            visualizationHelper.SetChoFile("");
+            visualizationHelper.SetHandoverFile(handoverFile);
+            visualizationHelper.EnableBeamLogging(true);
+        }
         visualizationHelper.Initialize();
         timer.Log("visualization initialization");
+    }
+    else if (enableHandoverLogging)
+    {
+        // Initialize only the event stream; do not create the other visualization CSVs.
+        visualizationHelper.SetBeamFile("");
+        visualizationHelper.SetChoFile("");
+        visualizationHelper.SetHandoverFile(handoverFile);
+        visualizationHelper.EnableBeamLogging(true);
+        visualizationHelper.InitializeBeamLogging();
+        timer.Log("handover logging initialization");
     }
 
     NodeContainer allGroundNodes;
@@ -811,6 +833,10 @@ main(int argc, char* argv[])
         beamHelper.Install(allGroundNodes, satelliteNodes, Seconds(simTime));
     beamManager->SetOperatorModel(operatorModel);
     routingCalculator->SetBeamManager(beamManager);
+    if (enableVisualization || enableHandoverLogging)
+    {
+        visualizationHelper.SetBeamManager(beamManager);
+    }
     timer.Log("beam manager installation");
 
     timer.Begin("routing setup");
@@ -1037,10 +1063,17 @@ main(int argc, char* argv[])
     {
         std::cout << "Route data: " << routeLogFile << std::endl;
     }
+    if (enableHandoverLogging)
+    {
+        std::cout << "Handover data: " << handoverFile << std::endl;
+    }
 
-    if (enableVisualization)
+    if (enableVisualization || enableHandoverLogging)
     {
         visualizationHelper.Finalize();
+    }
+    if (enableVisualization)
+    {
         std::cout << "Visualization data: " << positionFile << ", " << linkFile << ", "
                   << packetFile << std::endl;
         std::cout << "Render with: python3 contrib/leosim/utils/visualize_3d.py"

@@ -97,6 +97,16 @@ class LeoSimVisualizationHelper
     void EnableBeamLogging(bool enable);
 
     /**
+     * \brief Initialize beam/handover event logging without initializing the
+     *        position, link, or packet visualization outputs.
+     *
+     * This is useful for scenarios that only need the event CSV streams.
+     * Configure the desired filenames (and set unwanted streams to an empty
+     * filename) before calling this method.
+     */
+    void InitializeBeamLogging();
+
+    /**
      * \brief Set the loader helper reference
      * \param loaderHelper Reference to the LeoSimLoaderHelper
      */
