@@ -1876,10 +1876,12 @@ LeoSimBeamManager::CompleteHandover(uint32_t ueNodeId,
         return;
     }
 
-    // Step 1: Get new link quality
+    // Revalidate the target at execution completion.  CHO preparation and
+    // execution are asynchronous, so a candidate that was valid when prepared
+    // may have left coverage, gone dark, or otherwise become ineligible before
+    // this callback runs.
     LeoSimChannelQuality newLinkQuality = m_channelModel->GetLinkQuality(ueNodeId, targetSatId);
 
-    // Step 2: Update m_currentBeam[ueNodeId]
     auto beamIt = m_currentBeams.find(ueNodeId);
     if (beamIt == m_currentBeams.end())
     {
@@ -1889,17 +1891,94 @@ LeoSimBeamManager::CompleteHandover(uint32_t ueNodeId,
 
     LeoSimBeamRecord& currentBeam = beamIt->second;
     LeoSimBeamRecord sourceBeam = currentBeam;
-    LeoSimBeamRecord targetBeam = currentBeam;
-    auto preparedUeIt = m_preparedCandidateBeams.find(ueNodeId);
-    if (preparedUeIt != m_preparedCandidateBeams.end())
+    LeoSimBeamRecord targetBeam;
+    bool targetVisible = false;
+    const std::vector<LeoSimBeamRecord> visibleTargets = ScanVisibleSatellites(ueNodeId);
+    auto visibleTarget =
+        std::find_if(visibleTargets.begin(),
+                     visibleTargets.end(),
+                     [targetSatId](const LeoSimBeamRecord& candidate) {
+                         return candidate.satelliteNodeId == targetSatId &&
+                                candidate.beamActive;
+                     });
+    if (visibleTarget != visibleTargets.end())
     {
-        auto preparedSatIt = preparedUeIt->second.find(targetSatId);
-        if (preparedSatIt != preparedUeIt->second.end())
-        {
-            targetBeam = preparedSatIt->second;
-        }
+        targetBeam = *visibleTarget;
+        targetVisible = true;
     }
 
+    const bool targetLinkUp =
+        newLinkQuality.linkState == LEOSIM_LINK_UP ||
+        newLinkQuality.linkState == LEOSIM_LINK_DEGRADED;
+    if (!targetLinkUp || !targetVisible)
+    {
+        NS_LOG_WARN("Rejecting stale handover target for ground node "
+                    << ueNodeId << ": satellite=" << targetSatId
+                    << ", linkState=" << newLinkQuality.linkState
+                    << ", visibleActiveBeam=" << (targetVisible ? "true" : "false"));
+
+        LeoSimHandoverEvent failedEvent;
+        failedEvent.ueNodeId = ueNodeId;
+        failedEvent.sourceSatId = sourceSatId;
+        failedEvent.targetSatId = targetSatId;
+        failedEvent.sourceBeamId = sourceBeam.beamId;
+        failedEvent.targetBeamId =
+            targetVisible ? targetBeam.beamId : std::numeric_limits<uint32_t>::max();
+        failedEvent.sourceCellId = sourceBeam.cellId;
+        failedEvent.targetCellId =
+            targetVisible ? targetBeam.cellId : std::numeric_limits<uint32_t>::max();
+        failedEvent.mode = LEOSIM_HO_MODE_CHO;
+        const uint32_t sourcePlane =
+            m_loader->GetOrbitPlane(GetLeoSimIdFromNodeId(sourceSatId));
+        const uint32_t targetPlane =
+            m_loader->GetOrbitPlane(GetLeoSimIdFromNodeId(targetSatId));
+        failedEvent.type = sourcePlane == targetPlane ? LEOSIM_HO_INTER_SATELLITE
+                                                       : LEOSIM_HO_INTER_ORBIT;
+        failedEvent.trigger = trigger;
+        failedEvent.initiatedAt = Simulator::Now() - m_prepDelay - m_execDelay;
+        failedEvent.completedAt = Simulator::Now();
+        failedEvent.handoverLatencyMs = (m_prepDelay + m_execDelay).GetMilliSeconds();
+        failedEvent.packetsBuffered = 0;
+        failedEvent.packetsDropped = 0;
+        failedEvent.success = false;
+        failedEvent.sinrBefore = sourceBeam.sinr;
+        failedEvent.sinrAfter =
+            targetVisible ? targetBeam.sinr : newLinkQuality.snr;
+        m_handoverHistory.push_back(failedEvent);
+        m_lastHandoverTime[ueNodeId] = Simulator::Now();
+        m_ueHandoverCount[ueNodeId]++;
+
+        // Do not leave routing pinned to a target that failed validation.  With
+        // no current beam, the next update cycle performs initial association
+        // from a fresh visibility scan and then requests another route refresh.
+        sourceBeam.state = LEOSIM_BEAM_SEARCHING;
+        m_retiredBeams[ueNodeId] = sourceBeam;
+        m_currentBeams.erase(beamIt);
+        m_choConfigs[ueNodeId].clear();
+        m_preparedCandidateBeams[ueNodeId].clear();
+
+        if (!m_beamStateCallback.IsNull())
+        {
+            LeoSimBeamRecord searching = sourceBeam;
+            searching.satelliteNodeId = std::numeric_limits<uint32_t>::max();
+            searching.beamId = std::numeric_limits<uint32_t>::max();
+            searching.cellId = std::numeric_limits<uint32_t>::max();
+            searching.beamActive = false;
+            m_beamStateCallback(ueNodeId, searching, 0.0);
+        }
+        if (!m_handoverCallback.IsNull())
+        {
+            m_handoverCallback(failedEvent);
+        }
+        if (!m_accessStateChangeCallback.IsNull())
+        {
+            m_accessStateChangeCallback();
+        }
+        return;
+    }
+
+    // The target is valid at completion; commit the fresh beam record rather
+    // than the potentially stale record cached during CHO preparation.
     currentBeam = targetBeam;
     currentBeam.satelliteNodeId = targetSatId;
     currentBeam.rsrp = newLinkQuality.signalStrength;
