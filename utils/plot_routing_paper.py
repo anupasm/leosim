@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import argparse
 import csv
+import ipaddress
+import json
 import re
 from pathlib import Path
 
@@ -105,6 +107,7 @@ def discover_runs(results_dir: Path) -> dict[str, dict]:
         runs[metric] = {
             "dir": run_dir,
             "data": frame,
+            "traffic_pairs": read_traffic_pairs(run_dir / "result-statistics.json"),
             "satellites": int(satellites),
             "mode": mode,
             "duration": float(duration),
@@ -115,6 +118,77 @@ def discover_runs(results_dir: Path) -> dict[str, dict]:
             f"No metric-*/result-statistics.csv runs found below {results_dir}"
         )
     return runs
+
+
+def read_traffic_pairs(statistics_file: Path) -> pd.DataFrame:
+    """Aggregate FlowMonitor statistics by bidirectional ground-node pair."""
+    if not statistics_file.is_file():
+        raise FileNotFoundError(
+            f"{statistics_file} is required for per-ground-node-pair traffic plots"
+        )
+
+    with statistics_file.open() as stream:
+        statistics = json.load(stream)
+    flows = statistics.get("flows", [])
+    if not flows:
+        raise ValueError(f"{statistics_file} contains no per-flow statistics")
+
+    pairs: dict[tuple[str, str], dict[str, float | str]] = {}
+    for flow in flows:
+        source = str(flow["source"])
+        destination = str(flow["destination"])
+        endpoints = tuple(
+            sorted(
+                (source, destination),
+                key=lambda address: int(ipaddress.ip_address(address)),
+            )
+        )
+        pair = pairs.setdefault(
+            endpoints,
+            {
+                "endpoint_a": endpoints[0],
+                "endpoint_b": endpoints[1],
+                "tx_packets": 0.0,
+                "rx_packets": 0.0,
+                "lost_packets": 0.0,
+                "throughput_mbps": 0.0,
+                "delay_weighted": 0.0,
+                "hop_weighted": 0.0,
+            },
+        )
+        received = float(flow["rx_packets"])
+        pair["tx_packets"] += float(flow["tx_packets"])
+        pair["rx_packets"] += received
+        pair["lost_packets"] += float(flow["lost_packets"])
+        pair["throughput_mbps"] += float(flow["throughput_mbps"])
+        pair["delay_weighted"] += float(flow["delay_ms"]) * received
+        pair["hop_weighted"] += float(flow["mean_hop_count"]) * received
+
+    records = []
+    for pair in pairs.values():
+        transmitted = float(pair["tx_packets"])
+        received = float(pair["rx_packets"])
+        records.append(
+            {
+                "endpoint_a": pair["endpoint_a"],
+                "endpoint_b": pair["endpoint_b"],
+                "throughput_mbps": pair["throughput_mbps"],
+                "pdr": received / transmitted if transmitted else np.nan,
+                "delay_ms": (
+                    float(pair["delay_weighted"]) / received if received else np.nan
+                ),
+                "hop_count": (
+                    float(pair["hop_weighted"]) / received if received else np.nan
+                ),
+                "lost_packets": pair["lost_packets"],
+            }
+        )
+
+    return (
+        pd.DataFrame(records)
+        .sort_values(["endpoint_a", "endpoint_b"])
+        .set_index(["endpoint_a", "endpoint_b"])
+    )
 
 
 def read_summary(results_dir: Path, runs: dict[str, dict]) -> pd.DataFrame:
@@ -325,6 +399,81 @@ def plot_tradeoffs(summary: pd.DataFrame, metrics: list[str]) -> plt.Figure:
     return figure
 
 
+def compact_pair_label(pair: tuple[str, str]) -> str:
+    """Return a compact but unambiguous IPv4 pair label for the x axis."""
+    left, right = pair
+
+    def compact(address: str) -> str:
+        octets = address.split(".")
+        return ".".join(octets[-2:]) if len(octets) == 4 else address
+
+    return f"{compact(left)}↔{compact(right)}"
+
+
+def plot_pair_traffic(runs: dict[str, dict]) -> plt.Figure:
+    """Plot final bidirectional traffic statistics for every ground-node pair."""
+    metrics = ordered_metrics(runs)
+    pair_sets = [set(runs[metric]["traffic_pairs"].index) for metric in metrics]
+    common_pairs = set.intersection(*pair_sets)
+    all_pairs = set.union(*pair_sets)
+    if common_pairs != all_pairs:
+        missing = {
+            metric: sorted(all_pairs.difference(runs[metric]["traffic_pairs"].index))
+            for metric in metrics
+        }
+        raise ValueError(f"Ground-node pairs differ between runs: {missing}")
+    if not all_pairs:
+        raise ValueError("No ground-node traffic pairs were found")
+
+    pairs = sorted(
+        all_pairs,
+        key=lambda pair: (
+            int(ipaddress.ip_address(pair[0])),
+            int(ipaddress.ip_address(pair[1])),
+        ),
+    )
+    fields = (
+        ("throughput_mbps", "Combined throughput (Mbit/s)"),
+        ("delay_ms", "Packet-weighted delay (ms)"),
+        ("pdr", "Packet delivery ratio"),
+        ("lost_packets", "Lost packets"),
+    )
+    figure, axes = plt.subplots(2, 2, figsize=(7.15, 5.2), sharex=True)
+    x = np.arange(len(pairs))
+    for axis, (field, ylabel) in zip(axes.flat, fields):
+        for metric in metrics:
+            pair_data = runs[metric]["traffic_pairs"]
+            values = [pair_data.loc[pair, field] for pair in pairs]
+            axis.plot(
+                x,
+                values,
+                color=COLORS.get(metric),
+                marker=MARKERS.get(metric, "o"),
+                label=LABELS.get(metric, metric),
+            )
+        axis.set_ylabel(ylabel)
+        if field == "pdr":
+            axis.yaxis.set_major_formatter(PercentFormatter(xmax=1.0, decimals=2))
+        add_grid(axis)
+
+    labels = [compact_pair_label(pair) for pair in pairs]
+    for axis in axes[1]:
+        axis.set_xticks(x, labels)
+        axis.tick_params(axis="x", rotation=42, labelsize=7)
+    figure.supxlabel("Bidirectional ground-node pair", y=0.105)
+    handles, legend_labels = axes[0, 0].get_legend_handles_labels()
+    figure.legend(
+        handles,
+        legend_labels,
+        loc="lower center",
+        bbox_to_anchor=(0.5, 0.005),
+        ncol=min(5, len(metrics)),
+        frameon=False,
+    )
+    figure.subplots_adjust(bottom=0.28, hspace=0.14, wspace=0.28)
+    return figure
+
+
 def save_figure(
     figure: plt.Figure,
     output_dir: Path,
@@ -379,6 +528,13 @@ def main() -> int:
         plot_steady_state(runs, args.warmup),
         output_dir,
         "routing-performance-distributions",
+        args.formats,
+        args.dpi,
+    )
+    outputs += save_figure(
+        plot_pair_traffic(runs),
+        output_dir,
+        "ground-pair-traffic",
         args.formats,
         args.dpi,
     )
