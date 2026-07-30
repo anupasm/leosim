@@ -255,6 +255,15 @@ class LeoSimBeamManager : public Object
     void SetRoutingCalculator(Ptr<LeoSimRoutingCalculator> routingCalculator);
 
     /**
+     * \brief Set application peers used to validate a ground-node handover.
+     *
+     * A completed handover is successful only when its selected access link is
+     * active and routes exist in both directions between the ground node and
+     * every configured peer.
+     */
+    void SetHandoverValidationPeers(uint32_t groundNodeId, const NodeContainer& peers);
+
+    /**
      * \brief Set the satellite/beam loader
      * \param loader Pointer to loader
      */
@@ -527,6 +536,12 @@ class LeoSimBeamManager : public Object
     bool IsServingAccessLink(uint32_t groundNodeId, uint32_t satNodeId) const;
 
     /**
+     * \brief Validate the serving access link and bidirectional application routes.
+     */
+    bool HasEndToEndHandoverConnectivity(uint32_t groundNodeId,
+                                         uint32_t servingSatId);
+
+    /**
      * \brief Get CHO-prepared candidate beams for a ground node.
      * \param groundNodeId Ground node identifier.
      * \return Valid prepared candidate beam records.
@@ -669,6 +684,7 @@ class LeoSimBeamManager : public Object
     Ptr<LeoSimChannelModel> m_channelModel;            //!< Propagation channel model
     Ptr<LeoSimChannelModel> m_islChannelModel;         //!< Inter-satellite link model
     Ptr<LeoSimRoutingCalculator> m_routingCalculator;  //!< Routing calculator
+    std::map<uint32_t, NodeContainer> m_handoverValidationPeers; //!< Traffic peers by ground node
     Ptr<LeoSimOperatorModel> m_operatorModel;          //!< Operator sharing model
     Ptr<LeoSimWeatherModel> m_weatherModel;            //!< Weather model for HO/TOPSIS
     Ptr<LeoSimLoader> m_loader;                        //!< Satellite/beam loader

@@ -290,6 +290,62 @@ LeoSimBeamManager::SetRoutingCalculator(Ptr<LeoSimRoutingCalculator> routingCalc
 }
 
 void
+LeoSimBeamManager::SetHandoverValidationPeers(uint32_t groundNodeId,
+                                              const NodeContainer& peers)
+{
+    m_handoverValidationPeers[groundNodeId] = peers;
+}
+
+bool
+LeoSimBeamManager::HasEndToEndHandoverConnectivity(uint32_t groundNodeId,
+                                                   uint32_t servingSatId)
+{
+    if (!m_channelModel || !IsServingAccessLink(groundNodeId, servingSatId))
+    {
+        return false;
+    }
+
+    const auto beamIt = m_currentBeams.find(groundNodeId);
+    if (beamIt == m_currentBeams.end() || !beamIt->second.beamActive ||
+        beamIt->second.state != LEOSIM_BEAM_CONNECTED)
+    {
+        return false;
+    }
+
+    const LeoSimLinkState accessState =
+        m_channelModel->GetLinkState(groundNodeId, servingSatId);
+    if (accessState != LEOSIM_LINK_UP && accessState != LEOSIM_LINK_DEGRADED)
+    {
+        return false;
+    }
+
+    const auto peersIt = m_handoverValidationPeers.find(groundNodeId);
+    if (peersIt == m_handoverValidationPeers.end())
+    {
+        // Non-traffic users retain access-only validation until peers are configured.
+        return true;
+    }
+    if (!m_routingCalculator || groundNodeId >= NodeList::GetNNodes() ||
+        peersIt->second.GetN() == 0)
+    {
+        return false;
+    }
+
+    Ptr<Node> ground = NodeList::GetNode(groundNodeId);
+    for (uint32_t i = 0; i < peersIt->second.GetN(); ++i)
+    {
+        Ptr<Node> peer = peersIt->second.Get(i);
+        if (!ground || !peer || ground == peer ||
+            !m_routingCalculator->ComputeRoute(ground, peer).valid ||
+            !m_routingCalculator->ComputeRoute(peer, ground).valid)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+void
 LeoSimBeamManager::SetLoader(Ptr<LeoSimLoader> loader)
 {
     NS_LOG_FUNCTION(this << loader);
@@ -1882,7 +1938,7 @@ LeoSimBeamManager::RecordInterSatelliteHandover(uint32_t ueNodeId,
     evt.handoverLatencyMs = std::max(0.0, (completedAt - initiatedAt).GetSeconds() * 1000.0);
     evt.packetsBuffered = 0;
     evt.packetsDropped = 0;
-    evt.success = true;
+    evt.success = HasEndToEndHandoverConnectivity(ueNodeId, target.satelliteNodeId);
     evt.sinrBefore = FiniteRadioQuality(source.sinr, source.snr);
     evt.sinrAfter = FiniteRadioQuality(target.sinr, target.snr);
 
@@ -2068,7 +2124,7 @@ LeoSimBeamManager::CompleteHandover(uint32_t ueNodeId,
     hoEvent.handoverLatencyMs = (m_prepDelay + m_execDelay).GetMilliSeconds();
     hoEvent.packetsBuffered = 0; // TODO: get from buffer manager
     hoEvent.packetsDropped = 0;  // TODO: get from buffer manager
-    hoEvent.success = true;
+    hoEvent.success = HasEndToEndHandoverConnectivity(ueNodeId, targetSatId);
     hoEvent.sinrBefore = FiniteRadioQuality(sourceBeam.sinr, oldLinkQuality.snr);
     hoEvent.sinrAfter = FiniteRadioQuality(currentBeam.sinr, newLinkQuality.snr);
 
@@ -2506,7 +2562,7 @@ LeoSimBeamManager::ExecuteIntraBeamHandover(uint32_t ueNodeId,
         evt.handoverLatencyMs = m_intraBeamHoDelayMs;
         evt.packetsBuffered = 0;
         evt.packetsDropped = 0;
-        evt.success = true;
+        evt.success = HasEndToEndHandoverConnectivity(ueNodeId, satId);
         evt.sourceBeamId = sourceBeamId;
         evt.targetBeamId = targetBeam.beamId;
         evt.sourceCellId = sourceCellId;
@@ -2770,6 +2826,7 @@ LeoSimBeamManager::UpdateCycle()
             LeoSimBeamRecord serving = ranked[0].beamRecord;
             serving.state = LEOSIM_BEAM_CONNECTED;
             serving.associationTime = Simulator::Now();
+            m_currentBeams[ueNodeId] = serving;
 
             auto retiredIt = m_retiredBeams.find(ueNodeId);
             if (retiredIt != m_retiredBeams.end())
@@ -2782,8 +2839,6 @@ LeoSimBeamManager::UpdateCycle()
                                              Simulator::Now());
                 m_retiredBeams.erase(retiredIt);
             }
-
-            m_currentBeams[ueNodeId] = serving;
 
             if (!m_beamStateCallback.IsNull())
             {
