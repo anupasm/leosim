@@ -384,7 +384,7 @@ main(int argc, char* argv[])
     bool enableStatistics = true;
     bool enableTaskProfiler = true;
     double statisticsInterval = 1.0;
-    bool enableRouteLogging = true;
+    bool enableRouteLogging = false;
     bool enableHandoverLogging = true;
     double progressLogInterval = 5.0;
 
@@ -600,10 +600,12 @@ main(int argc, char* argv[])
     timer.Log("operator model construction");
 
     LeoSimVisualizationHelper visualizationHelper;
+    visualizationHelper.SetGroundNodeContainers(serverNodes, ueNodes);
     const std::string positionFile = outputPrefix + "-positions.csv";
     const std::string linkFile = outputPrefix + "-links.csv";
     const std::string packetFile = outputPrefix + "-packets.csv";
     const std::string handoverFile = outputPrefix + "-handovers.csv";
+    const std::string choCandidateFile = outputPrefix + "-cho-candidates.csv";
     if (enableVisualization)
     {
         visualizationHelper.SetOutputFile(positionFile);
@@ -616,7 +618,7 @@ main(int argc, char* argv[])
         if (enableHandoverLogging)
         {
             visualizationHelper.SetBeamFile("");
-            visualizationHelper.SetChoFile("");
+            visualizationHelper.SetChoFile(choCandidateFile);
             visualizationHelper.SetHandoverFile(handoverFile);
             visualizationHelper.EnableBeamLogging(true);
         }
@@ -627,7 +629,7 @@ main(int argc, char* argv[])
     {
         // Initialize only the event stream; do not create the other visualization CSVs.
         visualizationHelper.SetBeamFile("");
-        visualizationHelper.SetChoFile("");
+        visualizationHelper.SetChoFile(choCandidateFile);
         visualizationHelper.SetHandoverFile(handoverFile);
         visualizationHelper.EnableBeamLogging(true);
         visualizationHelper.InitializeBeamLogging();
@@ -679,6 +681,10 @@ main(int argc, char* argv[])
                                                     ueNodes,
                                                     visualizationInterval,
                                                     simTime);
+    }
+    if (enableHandoverLogging)
+    {
+        std::cout << "Handover data: " << handoverFile << ", " << choCandidateFile << std::endl;
     }
 
     LeoSimDeviceInstaller accessInstaller;
@@ -1087,6 +1093,7 @@ main(int argc, char* argv[])
     }
     if (enableStatistics)
     {
+        statistics->WriteFinalSample();
         statistics->StopPeriodicSampling();
         if (useTrees)
         {

@@ -132,6 +132,9 @@ class LeoSimVisualizationHelper
      */
     void SetBeamManager(Ptr<LeoSimBeamManager> beamManager);
 
+    /** Set ground-node containers used to label beam event records. */
+    void SetGroundNodeContainers(const NodeContainer& servers, const NodeContainer& ues);
+
     /**
      * \brief Set the multi-beam model for coverage logging
      * \param multiBeamModel Pointer to the LeoSimMultiBeamModel

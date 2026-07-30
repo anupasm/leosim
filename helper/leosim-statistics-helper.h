@@ -126,6 +126,8 @@ class LeoSimStatisticsHelper : public Object
 
     void StartPeriodicSampling(Time interval, const std::string& csvFilename);
     void StopPeriodicSampling();
+    /** Append one unscheduled sample at the current simulation time. */
+    void WriteFinalSample();
     LeoSimStatisticsSnapshot GetSnapshot(bool checkLostPackets = true) const;
     std::vector<LeoSimFlowStatistics> GetFlowStatistics() const;
     void WriteSummary(const std::string& filename, bool includeFlows = true) const;
@@ -146,6 +148,7 @@ class LeoSimStatisticsHelper : public Object
     void OnModelSnr(Ptr<Node>, Ptr<Node>, double value);
     void OnModelDoppler(Ptr<Node>, Ptr<Node>, double value);
     void Sample();
+    void AppendCsvSnapshot();
     void WriteCsvHeader();
 
     Ptr<FlowMonitor> m_monitor;
@@ -162,6 +165,7 @@ class LeoSimStatisticsHelper : public Object
     std::string m_csvFilename;
     EventId m_sampleEvent;
     bool m_sampling{false};
+    double m_lastCsvSampleSeconds{-1.0};
 };
 
 } // namespace ns3

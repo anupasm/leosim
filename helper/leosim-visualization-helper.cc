@@ -535,6 +535,14 @@ LeoSimVisualizationHelper::OnBeamState(uint32_t nodeId, LeoSimBeamRecord rec, do
 }
 
 void
+LeoSimVisualizationHelper::SetGroundNodeContainers(const NodeContainer& servers,
+                                                    const NodeContainer& ues)
+{
+    m_servers = servers;
+    m_ues = ues;
+}
+
+void
 LeoSimVisualizationHelper::OnHandoverEvent(LeoSimHandoverEvent evt)
 {
     LogHandoverEvent(evt);
@@ -1569,7 +1577,7 @@ LeoSimVisualizationHelper::InitBeamLogging()
         {
             m_handoverFileStream << "time_ms,ue_id,src_sat,tgt_sat,src_beam,src_cell,tgt_beam,tgt_cell,"
                                  << "mode,type,trigger,latency_ms,buff_pkts,drop_pkts,success,"
-                                 << "route_change,sinr_before,sinr_after\n";
+                                 << "failure_reason,route_change,sinr_before,sinr_after\n";
             m_handoverFileStream.flush();
             NS_LOG_DEBUG("Opened handover event file: " << m_handoverFile);
         }
@@ -1585,7 +1593,9 @@ LeoSimVisualizationHelper::InitBeamLogging()
         m_choFileStream.open(m_choFile, std::ios::out | std::ios::trunc);
         if (m_choFileStream.is_open())
         {
-            m_choFileStream << "time,ue_id,serving_sat,candidate_sat,topsis_rank,topsis_score,tte_sec,config_expiry\n";
+            m_choFileStream
+                << "time,ground_id,serving_sat,candidate_count,candidate_sat,topsis_rank,"
+                   "topsis_score,rsrp_dbm,sinr_db,elevation_deg,tte_sec,config_expiry\n";
             m_choFileStream.flush();
             NS_LOG_DEBUG("Opened CHO config file: " << m_choFile);
         }
@@ -1628,9 +1638,11 @@ LeoSimVisualizationHelper::LogBeamState(uint32_t groundId,
 
     // Compute beam utilization
     double beamUtil = (m_maxUesPerBeam > 0) ? (rec.beamLoad / (double)m_maxUesPerBeam) : 0.0;
-    const bool isServing = rec.state != LEOSIM_BEAM_SEARCHING &&
-                           rec.satelliteNodeId != std::numeric_limits<uint32_t>::max() &&
-                           rec.beamId != std::numeric_limits<uint32_t>::max();
+    const bool isServing =
+        m_beamManager &&
+        rec.satelliteNodeId != std::numeric_limits<uint32_t>::max() &&
+        rec.beamId != std::numeric_limits<uint32_t>::max() &&
+        m_beamManager->IsServingAccessLink(groundId, rec.satelliteNodeId);
 
     if (m_beamFileStream.is_open())
     {
@@ -1759,12 +1771,12 @@ LeoSimVisualizationHelper::LogHandoverEvent(const LeoSimHandoverEvent& evt)
     m_handoverFileStream << std::fixed << std::setprecision(1)
                          << timeMs << ","
                          << evt.ueNodeId << ","
-                         << evt.sourceSatId << ","
-                         << evt.targetSatId << ","
-                         << evt.sourceBeamId << ","
-                         << evt.sourceCellId << ","
-                         << evt.targetBeamId << ","
-                         << evt.targetCellId << ","
+                         << CsvId(evt.sourceSatId) << ","
+                         << CsvId(evt.targetSatId) << ","
+                         << CsvId(evt.sourceBeamId) << ","
+                         << CsvId(evt.sourceCellId) << ","
+                         << CsvId(evt.targetBeamId) << ","
+                         << CsvId(evt.targetCellId) << ","
                          << mode << ","
                          << type << ","
                          << trigger << ","
@@ -1772,6 +1784,7 @@ LeoSimVisualizationHelper::LogHandoverEvent(const LeoSimHandoverEvent& evt)
                          << evt.packetsBuffered << ","
                          << evt.packetsDropped << ","
                          << (evt.success ? "1" : "0") << ","
+                         << evt.failureReason << ","
                          << routeChange << ","
                          << evt.sinrBefore << ","
                          << evt.sinrAfter << "\n";
@@ -1791,18 +1804,22 @@ LeoSimVisualizationHelper::LogChoConfig(uint32_t ueId,
     }
 
     Time now = Simulator::Now();
-    Time configExpiry = now + Seconds(30.0);  // Default 30 second CHO config validity
-
     for (uint32_t rank = 0; rank < candidates.size(); ++rank)
     {
         const LeoSimTopsisCandidate& candidate = candidates[rank];
+        const Time configExpiry =
+            now + Seconds(std::max(0.0, candidate.beamRecord.remainingServiceTime));
         m_choFileStream << std::fixed << std::setprecision(3)
                         << now.GetSeconds() << ","
                         << ueId << ","
                         << servingSatId << ","
+                        << candidates.size() << ","
                         << candidate.beamRecord.satelliteNodeId << ","
                         << rank << ","
                         << candidate.topsisScore << ","
+                        << candidate.beamRecord.rsrp << ","
+                        << candidate.beamRecord.sinr << ","
+                        << candidate.beamRecord.elevationAngle << ","
                         << candidate.beamRecord.remainingServiceTime << ","
                         << configExpiry.GetSeconds() << "\n";
     }

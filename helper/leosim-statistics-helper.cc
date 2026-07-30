@@ -184,9 +184,17 @@ LeoSimStatisticsHelper::GetSnapshot(bool checkLostPackets) const
         std::vector<double> latency;
         double sum = 0;
         out.handovers = events.size(); out.pingPongs = m_beamManager->GetPingPongCount();
-        for (const auto& e : events) { out.successfulHandovers += e.success; sum += e.handoverLatencyMs; latency.push_back(e.handoverLatencyMs); }
+        for (const auto& e : events)
+        {
+            if (e.success)
+            {
+                ++out.successfulHandovers;
+                sum += e.handoverLatencyMs;
+                latency.push_back(e.handoverLatencyMs);
+            }
+        }
         out.handoverSuccessRatio = events.empty() ? 1.0 : static_cast<double>(out.successfulHandovers) / events.size();
-        out.meanHandoverLatencyMs = events.empty() ? 0.0 : sum / events.size();
+        out.meanHandoverLatencyMs = latency.empty() ? 0.0 : sum / latency.size();
         if (!latency.empty()) { std::sort(latency.begin(), latency.end()); const size_t i = static_cast<size_t>(std::ceil(0.95 * latency.size())) - 1; out.p95HandoverLatencyMs = latency[i]; }
     }
     return out;
@@ -198,6 +206,7 @@ LeoSimStatisticsHelper::StartPeriodicSampling(Time interval, const std::string& 
     if (!interval.IsStrictlyPositive()) throw std::invalid_argument("statistics sampling interval must be positive");
     StopPeriodicSampling();
     m_sampleInterval = interval; m_csvFilename = filename; m_sampling = true;
+    m_lastCsvSampleSeconds = -1.0;
     WriteCsvHeader();
     m_sampleEvent = Simulator::Schedule(interval, &LeoSimStatisticsHelper::Sample, this);
 }
@@ -228,6 +237,27 @@ LeoSimStatisticsHelper::Sample()
 {
     LeoSimTaskProfiler::ScopedEvent profile("run_simulation.statistics_sampling");
     if (!m_sampling) return;
+    AppendCsvSnapshot();
+    m_sampleEvent = Simulator::Schedule(m_sampleInterval, &LeoSimStatisticsHelper::Sample, this);
+}
+
+void
+LeoSimStatisticsHelper::WriteFinalSample()
+{
+    if (!m_csvFilename.empty())
+    {
+        AppendCsvSnapshot();
+    }
+}
+
+void
+LeoSimStatisticsHelper::AppendCsvSnapshot()
+{
+    const double nowSeconds = Simulator::Now().GetSeconds();
+    if (nowSeconds == m_lastCsvSampleSeconds)
+    {
+        return;
+    }
     const auto s = GetSnapshot(false);
     std::ofstream out(m_csvFilename, std::ios::app);
     if (!out) throw std::runtime_error("cannot append statistics CSV: " + m_csvFilename);
@@ -236,7 +266,7 @@ LeoSimStatisticsHelper::Sample()
         << s.snrDb.mean << ',' << s.snrDb.min << ',' << s.snrDb.max << ',' << s.dopplerHz.mean << ',' << s.pathLossDb.mean << ','
         << s.linkUpEvents << ',' << s.linkDownEvents << ',' << s.linkDegradedEvents << ',' << s.handovers << ',' << s.handoverSuccessRatio << ','
         << s.meanHandoverLatencyMs << ',' << s.p95HandoverLatencyMs << ',' << s.pingPongs << '\n';
-    m_sampleEvent = Simulator::Schedule(m_sampleInterval, &LeoSimStatisticsHelper::Sample, this);
+    m_lastCsvSampleSeconds = nowSeconds;
 }
 
 void

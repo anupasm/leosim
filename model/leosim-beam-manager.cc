@@ -701,9 +701,11 @@ LeoSimBeamManager::RunTttEvaluation(uint32_t ueNodeId)
 
     // Get current beam record for the UE
     auto beamIt = m_currentBeams.find(ueNodeId);
-    if (beamIt == m_currentBeams.end())
+    if (beamIt == m_currentBeams.end() ||
+        beamIt->second.state != LEOSIM_BEAM_CONNECTED)
     {
-        NS_LOG_WARN("No current beam record for UE " << ueNodeId << ", skipping TTT evaluation");
+        NS_LOG_DEBUG("UE " << ueNodeId
+                            << " is not CONNECTED; skipping TTT evaluation");
         return;
     }
     // Refresh serving-beam metrics from the channel model before comparing.
@@ -813,13 +815,16 @@ LeoSimBeamManager::RunTttEvaluation(uint32_t ueNodeId)
         }
 
         // Schedule TTT expiry callback using lambda
-        EventId eventId = Simulator::Schedule(m_ttt, [this, ueNodeId, bestSatId]() {
+        EventId eventId =
+            Simulator::Schedule(m_ttt, [this, ueNodeId, bestSatId, servingSatId]() {
             NS_LOG_DEBUG("TTT expired for UE " << ueNodeId << " at "
                                                << Simulator::Now().GetSeconds() << "s");
 
             // Re-evaluate A3 condition at TTT expiry
             auto beamIt = m_currentBeams.find(ueNodeId);
-            if (beamIt != m_currentBeams.end())
+            if (beamIt != m_currentBeams.end() &&
+                beamIt->second.state == LEOSIM_BEAM_MEASURING &&
+                beamIt->second.satelliteNodeId == servingSatId)
             {
                 std::vector<LeoSimBeamRecord> visibleBeams = ScanVisibleSatellites(ueNodeId);
                 std::vector<LeoSimTopsisCandidate> candidates =
@@ -1557,7 +1562,21 @@ LeoSimBeamManager::InitiateChoPreparation(uint32_t ueNodeId,
     }
 
     uint32_t servingSatId = beamIt->second.satelliteNodeId;
+
+    // CHO preparation supersedes any outstanding TTT measurement. A stale TTT
+    // expiry must not overwrite PREPARING or EVALUATING with CONNECTED.
+    auto tttEvent = m_tttEventIds.find(ueNodeId);
+    if (tttEvent != m_tttEventIds.end())
+    {
+        if (tttEvent->second.IsPending())
+        {
+            tttEvent->second.Cancel();
+        }
+        m_tttEventIds.erase(tttEvent);
+    }
+
     beamIt->second.state = LEOSIM_BEAM_PREPARING;
+    m_choInitiatedAt[ueNodeId] = Simulator::Now();
     NS_LOG_DEBUG("UE " << ueNodeId << " current beam state changed to LEOSIM_BEAM_PREPARING");
 
     if (!m_beamStateCallback.IsNull())
@@ -1567,15 +1586,21 @@ LeoSimBeamManager::InitiateChoPreparation(uint32_t ueNodeId,
 
     // Step 2: Clear any existing m_choConfigs[ueNodeId]
     m_choConfigs[ueNodeId].clear();
+    m_choCandidateOrder[ueNodeId].clear();
     m_preparedCandidateBeams[ueNodeId].clear();
     NS_LOG_DEBUG("Cleared existing CHO configs for UE " << ueNodeId);
 
-    // Step 3: Iterate over the first min(topN.size(), m_maxCandidates) candidates
+    // Step 3: Configure distinct satellites. TOPSIS can return several spot
+    // beams belonging to one satellite; those do not represent distinct CHO
+    // targets and must not consume separate candidate slots.
     std::vector<LeoSimTopsisCandidate> configured;
-    size_t numCandidates = std::min(static_cast<size_t>(m_maxCandidates), topN.size());
-    for (size_t i = 0; i < numCandidates; ++i)
+    std::set<uint32_t> configuredSatellites;
+    for (const auto& candidate : topN)
     {
-        const auto& candidate = topN[i];
+        if (configured.size() >= m_maxCandidates)
+        {
+            break;
+        }
         uint32_t candidateSatId = candidate.beamRecord.satelliteNodeId;
 
         // Skip if candidate is the current serving satellite
@@ -1583,6 +1608,11 @@ LeoSimBeamManager::InitiateChoPreparation(uint32_t ueNodeId,
         {
             NS_LOG_DEBUG("Skipping CHO candidate " << candidateSatId
                                                    << " (current serving satellite)");
+            continue;
+        }
+        if (!configuredSatellites.insert(candidateSatId).second)
+        {
+            NS_LOG_DEBUG("Skipping duplicate CHO satellite candidate " << candidateSatId);
             continue;
         }
 
@@ -1612,6 +1642,7 @@ LeoSimBeamManager::InitiateChoPreparation(uint32_t ueNodeId,
 
         // Step 3c: Push the config into m_choConfigs[ueNodeId]
         m_choConfigs[ueNodeId][candidateSatId] = cfg;
+        m_choCandidateOrder[ueNodeId].push_back(candidateSatId);
         m_preparedCandidateBeams[ueNodeId][candidateSatId] = candidate.beamRecord;
         NS_LOG_DEBUG("Added CHO config for UE " << ueNodeId << " -> satellite " << candidateSatId);
 
@@ -1629,27 +1660,55 @@ LeoSimBeamManager::InitiateChoPreparation(uint32_t ueNodeId,
                  << "serving satellite " << servingSatId << " at time "
                  << Simulator::Now().GetSeconds() << "s");
 
-    // Step 5: Schedule Simulator::Schedule(m_prepDelay, lambda)
-    auto prepCallback = [this, ueNodeId]() {
-        // Lambda body: Set state to LEOSIM_BEAM_EVALUATING and call EvaluateChoConditions
-        auto beamIt2 = m_currentBeams.find(ueNodeId);
-        if (beamIt2 != m_currentBeams.end())
+    if (m_choConfigs[ueNodeId].empty())
+    {
+        beamIt->second.state = LEOSIM_BEAM_CONNECTED;
+        m_choInitiatedAt.erase(ueNodeId);
+        if (!m_beamStateCallback.IsNull())
         {
-            beamIt2->second.state = LEOSIM_BEAM_EVALUATING;
-            NS_LOG_DEBUG("UE " << ueNodeId
-                               << " current beam state changed to LEOSIM_BEAM_EVALUATING");
+            m_beamStateCallback(ueNodeId, beamIt->second, 0.0);
+        }
+        return;
+    }
 
-            if (!m_beamStateCallback.IsNull())
-            {
-                m_beamStateCallback(ueNodeId, beamIt2->second, 0.0);
-            }
+    auto pendingPreparation = m_choPreparationEventIds.find(ueNodeId);
+    if (pendingPreparation != m_choPreparationEventIds.end() &&
+        pendingPreparation->second.IsPending())
+    {
+        pendingPreparation->second.Cancel();
+    }
+
+    // Step 5: Schedule Simulator::Schedule(m_prepDelay, lambda)
+    auto prepCallback = [this, ueNodeId, servingSatId]() {
+        m_choPreparationEventIds.erase(ueNodeId);
+
+        // Ignore callbacks belonging to an association that has already failed,
+        // recovered, or been replaced.
+        auto beamIt2 = m_currentBeams.find(ueNodeId);
+        auto configs = m_choConfigs.find(ueNodeId);
+        if (beamIt2 == m_currentBeams.end() ||
+            beamIt2->second.satelliteNodeId != servingSatId ||
+            beamIt2->second.state != LEOSIM_BEAM_PREPARING ||
+            configs == m_choConfigs.end() || configs->second.empty())
+        {
+            return;
+        }
+
+        // Lambda body: Set state to LEOSIM_BEAM_EVALUATING and call EvaluateChoConditions
+        beamIt2->second.state = LEOSIM_BEAM_EVALUATING;
+        NS_LOG_DEBUG("UE " << ueNodeId
+                           << " current beam state changed to LEOSIM_BEAM_EVALUATING");
+
+        if (!m_beamStateCallback.IsNull())
+        {
+            m_beamStateCallback(ueNodeId, beamIt2->second, 0.0);
         }
         EvaluateChoConditions(ueNodeId);
         NS_LOG_DEBUG("CHO evaluation initiated for UE " << ueNodeId << " at "
                                                         << Simulator::Now().GetSeconds() << "s");
     };
 
-    Simulator::Schedule(m_prepDelay, prepCallback);
+    m_choPreparationEventIds[ueNodeId] = Simulator::Schedule(m_prepDelay, prepCallback);
     NS_LOG_DEBUG("Scheduled CHO evaluation after " << m_prepDelay.GetMilliSeconds() << "ms for UE "
                                                    << ueNodeId);
 }
@@ -1692,16 +1751,27 @@ LeoSimBeamManager::EvaluateChoConditions(uint32_t ueNodeId)
             ++cfgIt;
         }
     }
+    auto& candidateOrder = m_choCandidateOrder[ueNodeId];
+    candidateOrder.erase(
+        std::remove_if(candidateOrder.begin(),
+                       candidateOrder.end(),
+                       [&choConfigMap](uint32_t satelliteId) {
+                           return choConfigMap.find(satelliteId) == choConfigMap.end();
+                       }),
+        candidateOrder.end());
 
-    // Step 3: If configs is now empty, set state to LEOSIM_BEAM_SEARCHING and return
+    // Candidate lifetime is independent of the serving-link deadline. If all
+    // candidates expire while the serving link is still usable, return to the
+    // connected state so the next decision cycle can scan and prepare a fresh set.
     if (choConfigMap.empty())
     {
         auto beamIt = m_currentBeams.find(ueNodeId);
         if (beamIt != m_currentBeams.end())
         {
-            beamIt->second.state = LEOSIM_BEAM_SEARCHING;
-            NS_LOG_DEBUG("UE " << ueNodeId << " state changed to LEOSIM_BEAM_SEARCHING "
-                               << "(all CHO configs expired)");
+            beamIt->second.state = LEOSIM_BEAM_CONNECTED;
+            m_choInitiatedAt.erase(ueNodeId);
+            NS_LOG_DEBUG("UE " << ueNodeId << " returned to LEOSIM_BEAM_CONNECTED "
+                               << "after all CHO candidates expired; candidates will be rescanned");
             if (!m_beamStateCallback.IsNull())
             {
                 m_beamStateCallback(ueNodeId, beamIt->second, 0.0);
@@ -1721,9 +1791,15 @@ LeoSimBeamManager::EvaluateChoConditions(uint32_t ueNodeId)
     const LeoSimBeamRecord& servingBeam = servingBeamIt->second;
     uint32_t servingSatId = servingBeam.satelliteNodeId;
 
-    // Step 4: For each remaining config
-    for (auto& [candidateSatId, cfg] : choConfigMap)
+    // Step 4: Evaluate remaining configurations in their original TOPSIS order.
+    for (uint32_t candidateSatId : candidateOrder)
     {
+        auto orderedConfig = choConfigMap.find(candidateSatId);
+        if (orderedConfig == choConfigMap.end())
+        {
+            continue;
+        }
+        LeoSimChoConfig& cfg = orderedConfig->second;
         NS_LOG_DEBUG("Evaluating CHO conditions for UE " << ueNodeId << " -> candidate satellite "
                                                          << candidateSatId);
 
@@ -1820,6 +1896,136 @@ LeoSimBeamManager::EvaluateChoConditions(uint32_t ueNodeId)
     // Step 5: If no condition was met, do nothing
     // Re-evaluation happens on the next UpdateCycle() call automatically
     NS_LOG_DEBUG("No CHO conditions met for UE " << ueNodeId << "; awaiting next evaluation cycle");
+}
+
+bool
+LeoSimBeamManager::RecoverGroundAssociation(uint32_t groundNodeId)
+{
+    std::vector<LeoSimBeamRecord> visible = ScanVisibleSatellites(groundNodeId);
+    std::vector<LeoSimTopsisCandidate> ranked = RankByTopsis(visible, groundNodeId);
+    if (ranked.empty())
+    {
+        return false;
+    }
+
+    LeoSimBeamRecord serving = ranked.front().beamRecord;
+    serving.state = LEOSIM_BEAM_CONNECTED;
+    serving.associationTime = Simulator::Now();
+    m_currentBeams[groundNodeId] = serving;
+
+    auto retiredIt = m_retiredBeams.find(groundNodeId);
+    if (retiredIt != m_retiredBeams.end())
+    {
+        RecordInterSatelliteHandover(groundNodeId,
+                                     retiredIt->second,
+                                     serving,
+                                     LEOSIM_HO_RLF,
+                                     Simulator::Now(),
+                                     Simulator::Now());
+        m_retiredBeams.erase(retiredIt);
+    }
+
+    if (!m_beamStateCallback.IsNull())
+    {
+        m_beamStateCallback(groundNodeId, serving, ranked.front().topsisScore);
+    }
+    NotifyAccessStateChanged();
+    return true;
+}
+
+bool
+LeoSimBeamManager::FailChoIfServingLinkLost(uint32_t ueNodeId)
+{
+    auto beamIt = m_currentBeams.find(ueNodeId);
+    if (beamIt == m_currentBeams.end() ||
+        (beamIt->second.state != LEOSIM_BEAM_PREPARING &&
+         beamIt->second.state != LEOSIM_BEAM_EVALUATING))
+    {
+        return false;
+    }
+
+    const LeoSimBeamRecord sourceBeam = beamIt->second;
+    const LeoSimLinkState state =
+        m_channelModel
+            ? m_channelModel->GetLinkState(ueNodeId, sourceBeam.satelliteNodeId)
+            : LEOSIM_LINK_DOWN;
+    if (state == LEOSIM_LINK_UP || state == LEOSIM_LINK_DEGRADED)
+    {
+        return false;
+    }
+
+    LeoSimBeamRecord targetBeam{};
+    targetBeam.satelliteNodeId = std::numeric_limits<uint32_t>::max();
+    targetBeam.beamId = std::numeric_limits<uint32_t>::max();
+    targetBeam.cellId = std::numeric_limits<uint32_t>::max();
+    targetBeam.sinr = -200.0;
+    targetBeam.snr = -200.0;
+
+    LeoSimHandoverEvent failedEvent;
+    failedEvent.ueNodeId = ueNodeId;
+    failedEvent.sourceSatId = sourceBeam.satelliteNodeId;
+    failedEvent.targetSatId = targetBeam.satelliteNodeId;
+    failedEvent.sourceBeamId = sourceBeam.beamId;
+    failedEvent.targetBeamId = targetBeam.beamId;
+    failedEvent.sourceCellId = sourceBeam.cellId;
+    failedEvent.targetCellId = targetBeam.cellId;
+    failedEvent.mode = m_hoMode;
+    failedEvent.type = LEOSIM_HO_INTER_SATELLITE;
+    failedEvent.trigger = LEOSIM_HO_RLF;
+    const auto initiated = m_choInitiatedAt.find(ueNodeId);
+    failedEvent.initiatedAt =
+        initiated == m_choInitiatedAt.end() ? Simulator::Now() : initiated->second;
+    failedEvent.completedAt = Simulator::Now();
+    failedEvent.handoverLatencyMs =
+        (failedEvent.completedAt - failedEvent.initiatedAt).GetSeconds() * 1000.0;
+    failedEvent.packetsBuffered = 0;
+    failedEvent.packetsDropped = 0;
+    failedEvent.success = false;
+    failedEvent.failureReason = "SERVING_LINK_LOST";
+    failedEvent.sinrBefore = FiniteRadioQuality(sourceBeam.sinr, sourceBeam.snr);
+    failedEvent.sinrAfter = FiniteRadioQuality(targetBeam.sinr, targetBeam.snr);
+    m_handoverHistory.push_back(failedEvent);
+    m_lastHandoverTime[ueNodeId] = Simulator::Now();
+    m_ueHandoverCount[ueNodeId]++;
+
+    LeoSimBeamRecord retired = sourceBeam;
+    retired.state = LEOSIM_BEAM_SEARCHING;
+    m_retiredBeams[ueNodeId] = retired;
+    m_currentBeams.erase(beamIt);
+    auto prepEvent = m_choPreparationEventIds.find(ueNodeId);
+    if (prepEvent != m_choPreparationEventIds.end())
+    {
+        if (prepEvent->second.IsPending())
+        {
+            prepEvent->second.Cancel();
+        }
+        m_choPreparationEventIds.erase(prepEvent);
+    }
+    m_choConfigs.erase(ueNodeId);
+    m_choCandidateOrder.erase(ueNodeId);
+    m_preparedCandidateBeams.erase(ueNodeId);
+    m_choInitiatedAt.erase(ueNodeId);
+
+    if (!m_beamStateCallback.IsNull())
+    {
+        LeoSimBeamRecord searching = retired;
+        searching.satelliteNodeId = std::numeric_limits<uint32_t>::max();
+        searching.beamId = std::numeric_limits<uint32_t>::max();
+        searching.cellId = std::numeric_limits<uint32_t>::max();
+        searching.beamActive = false;
+        m_beamStateCallback(ueNodeId, searching, 0.0);
+    }
+
+    if (!m_handoverCallback.IsNull())
+    {
+        m_handoverCallback(failedEvent);
+    }
+    NotifyAccessStateChanged();
+
+    // The serving-link loss is the hard deadline: do not wait for another
+    // periodic cycle before looking for a currently usable replacement.
+    RecoverGroundAssociation(ueNodeId);
+    return true;
 }
 
 void
@@ -1939,6 +2145,10 @@ LeoSimBeamManager::RecordInterSatelliteHandover(uint32_t ueNodeId,
     evt.packetsBuffered = 0;
     evt.packetsDropped = 0;
     evt.success = HasEndToEndHandoverConnectivity(ueNodeId, target.satelliteNodeId);
+    if (!evt.success)
+    {
+        evt.failureReason = "END_TO_END_VALIDATION_FAILED";
+    }
     evt.sinrBefore = FiniteRadioQuality(source.sinr, source.snr);
     evt.sinrAfter = FiniteRadioQuality(target.sinr, target.snr);
 
@@ -2033,12 +2243,19 @@ LeoSimBeamManager::CompleteHandover(uint32_t ueNodeId,
         failedEvent.type = sourcePlane == targetPlane ? LEOSIM_HO_INTER_SATELLITE
                                                        : LEOSIM_HO_INTER_ORBIT;
         failedEvent.trigger = trigger;
-        failedEvent.initiatedAt = Simulator::Now() - m_prepDelay - m_execDelay;
+        const auto initiated = m_choInitiatedAt.find(ueNodeId);
+        failedEvent.initiatedAt =
+            initiated == m_choInitiatedAt.end()
+                ? Simulator::Now() - m_prepDelay - m_execDelay
+                : initiated->second;
         failedEvent.completedAt = Simulator::Now();
-        failedEvent.handoverLatencyMs = (m_prepDelay + m_execDelay).GetMilliSeconds();
+        failedEvent.handoverLatencyMs =
+            std::max(0.0,
+                     (failedEvent.completedAt - failedEvent.initiatedAt).GetSeconds() * 1000.0);
         failedEvent.packetsBuffered = 0;
         failedEvent.packetsDropped = 0;
         failedEvent.success = false;
+        failedEvent.failureReason = "TARGET_ACCESS_UNAVAILABLE";
         failedEvent.sinrBefore = FiniteRadioQuality(sourceBeam.sinr, oldLinkQuality.snr);
         failedEvent.sinrAfter =
             targetVisible ? FiniteRadioQuality(targetBeam.sinr, newLinkQuality.snr)
@@ -2053,8 +2270,19 @@ LeoSimBeamManager::CompleteHandover(uint32_t ueNodeId,
         sourceBeam.state = LEOSIM_BEAM_SEARCHING;
         m_retiredBeams[ueNodeId] = sourceBeam;
         m_currentBeams.erase(beamIt);
+        auto prepEvent = m_choPreparationEventIds.find(ueNodeId);
+        if (prepEvent != m_choPreparationEventIds.end())
+        {
+            if (prepEvent->second.IsPending())
+            {
+                prepEvent->second.Cancel();
+            }
+            m_choPreparationEventIds.erase(prepEvent);
+        }
         m_choConfigs[ueNodeId].clear();
+        m_choCandidateOrder[ueNodeId].clear();
         m_preparedCandidateBeams[ueNodeId].clear();
+        m_choInitiatedAt.erase(ueNodeId);
 
         if (!m_beamStateCallback.IsNull())
         {
@@ -2119,12 +2347,20 @@ LeoSimBeamManager::CompleteHandover(uint32_t ueNodeId,
     hoEvent.mode = LEOSIM_HO_MODE_CHO; // Conditional handover
     hoEvent.type = hoType;
     hoEvent.trigger = trigger;
-    hoEvent.initiatedAt = Simulator::Now() - m_prepDelay - m_execDelay;
+    const auto initiated = m_choInitiatedAt.find(ueNodeId);
+    hoEvent.initiatedAt =
+        initiated == m_choInitiatedAt.end() ? Simulator::Now() - m_prepDelay - m_execDelay
+                                            : initiated->second;
     hoEvent.completedAt = Simulator::Now();
-    hoEvent.handoverLatencyMs = (m_prepDelay + m_execDelay).GetMilliSeconds();
+    hoEvent.handoverLatencyMs =
+        std::max(0.0, (hoEvent.completedAt - hoEvent.initiatedAt).GetSeconds() * 1000.0);
     hoEvent.packetsBuffered = 0; // TODO: get from buffer manager
     hoEvent.packetsDropped = 0;  // TODO: get from buffer manager
     hoEvent.success = HasEndToEndHandoverConnectivity(ueNodeId, targetSatId);
+    if (!hoEvent.success)
+    {
+        hoEvent.failureReason = "END_TO_END_VALIDATION_FAILED";
+    }
     hoEvent.sinrBefore = FiniteRadioQuality(sourceBeam.sinr, oldLinkQuality.snr);
     hoEvent.sinrAfter = FiniteRadioQuality(currentBeam.sinr, newLinkQuality.snr);
 
@@ -2161,7 +2397,10 @@ LeoSimBeamManager::CompleteHandover(uint32_t ueNodeId,
 
     // Step 10: Clear m_choConfigs[ueNodeId]
     m_choConfigs[ueNodeId].clear();
+    m_choCandidateOrder[ueNodeId].clear();
     m_preparedCandidateBeams[ueNodeId].clear();
+    m_choInitiatedAt.erase(ueNodeId);
+    m_choPreparationEventIds.erase(ueNodeId);
     NS_LOG_DEBUG("Cleared CHO configs for UE " << ueNodeId);
 
     // Step 11: Call PreScheduleEphemerisHandovers(Seconds(600))
@@ -2303,7 +2542,8 @@ LeoSimBeamManager::EvaluateIntraBeamNeed(uint32_t ueNodeId)
     }
 
     auto currentIt = m_currentBeams.find(ueNodeId);
-    if (currentIt == m_currentBeams.end())
+    if (currentIt == m_currentBeams.end() ||
+        currentIt->second.state != LEOSIM_BEAM_CONNECTED)
     {
         return;
     }
@@ -2453,7 +2693,8 @@ LeoSimBeamManager::ExecuteIntraBeamHandover(uint32_t ueNodeId,
     }
 
     auto it = m_currentBeams.find(ueNodeId);
-    if (it == m_currentBeams.end())
+    if (it == m_currentBeams.end() ||
+        it->second.state != LEOSIM_BEAM_CONNECTED)
     {
         return;
     }
@@ -2485,7 +2726,9 @@ LeoSimBeamManager::ExecuteIntraBeamHandover(uint32_t ueNodeId,
                      trigger,
                      delay]() {
         auto curIt = m_currentBeams.find(ueNodeId);
-        if (curIt == m_currentBeams.end())
+        if (curIt == m_currentBeams.end() ||
+            curIt->second.state != LEOSIM_BEAM_EXECUTING ||
+            curIt->second.satelliteNodeId != satId)
         {
             return;
         }
@@ -2563,6 +2806,10 @@ LeoSimBeamManager::ExecuteIntraBeamHandover(uint32_t ueNodeId,
         evt.packetsBuffered = 0;
         evt.packetsDropped = 0;
         evt.success = HasEndToEndHandoverConnectivity(ueNodeId, satId);
+        if (!evt.success)
+        {
+            evt.failureReason = "END_TO_END_VALIDATION_FAILED";
+        }
         evt.sourceBeamId = sourceBeamId;
         evt.targetBeamId = targetBeam.beamId;
         evt.sourceCellId = sourceCellId;
@@ -2910,6 +3157,31 @@ LeoSimBeamManager::UpdateCycle()
             continue;
         }
 
+        // PREPARING/EVALUATING remains live until the current serving access
+        // link disconnects. That loss is the CHO deadline and triggers an
+        // immediate recovery scan.
+        if (FailChoIfServingLinkLost(ueNodeId))
+        {
+            continue;
+        }
+
+        refreshed = m_currentBeams.find(ueNodeId);
+        if (refreshed == m_currentBeams.end())
+        {
+            continue;
+        }
+
+        // Revisit CHO conditions on every decision cycle. Previously the
+        // generic non-CONNECTED early return made this branch unreachable and
+        // left nodes permanently stuck in EVALUATING.
+        if (refreshed->second.state == LEOSIM_BEAM_EVALUATING)
+        {
+            LeoSimTaskProfiler::ScopedEvent phase(
+                "run_simulation.beam_update_cycle.evaluate_cho_conditions");
+            EvaluateChoConditions(ueNodeId);
+            continue;
+        }
+
         if (refreshed->second.state != LEOSIM_BEAM_CONNECTED)
         {
             continue;
@@ -2955,16 +3227,8 @@ LeoSimBeamManager::UpdateCycle()
             }
         }
 
-        // CHO condition evaluation should be revisited periodically.
-        if (currentBeam.state == LEOSIM_BEAM_EVALUATING)
-        {
-            LeoSimTaskProfiler::ScopedEvent phase(
-                "run_simulation.beam_update_cycle.evaluate_cho_conditions");
-            EvaluateChoConditions(ueNodeId);
-        }
-
         // When connected, run TTT/A3/A4 evaluation to trigger CHO preparation.
-        if (currentBeam.state == LEOSIM_BEAM_CONNECTED)
+        if (currentBeamPostIntra.state == LEOSIM_BEAM_CONNECTED)
         {
             LeoSimTaskProfiler::ScopedEvent phase(
                 "run_simulation.beam_update_cycle.run_ttt_evaluation");
@@ -3566,8 +3830,20 @@ LeoSimBeamManager::GetPreparedCandidateBeams(uint32_t groundNodeId) const
         return prepared;
     }
 
-    for (const auto& [candidateSatId, cfg] : configIt->second)
+    auto orderIt = m_choCandidateOrder.find(groundNodeId);
+    if (orderIt == m_choCandidateOrder.end())
     {
+        return prepared;
+    }
+
+    for (uint32_t candidateSatId : orderIt->second)
+    {
+        auto cfgIt = configIt->second.find(candidateSatId);
+        if (cfgIt == configIt->second.end())
+        {
+            continue;
+        }
+        const auto& cfg = cfgIt->second;
         if (Simulator::Now() > cfg.configValidUntil)
         {
             continue;
@@ -3956,6 +4232,16 @@ LeoSimBeamManager::Stop()
         }
     }
     m_tttEventIds.clear();
+
+    for (auto& entry : m_choPreparationEventIds)
+    {
+        EventId& event = entry.second;
+        if (event.IsPending())
+        {
+            event.Cancel();
+        }
+    }
+    m_choPreparationEventIds.clear();
 
     // === Compute KPI Summary ===
     uint32_t totalHo = m_handoverHistory.size();

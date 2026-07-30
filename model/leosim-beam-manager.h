@@ -42,6 +42,7 @@
 #include <map>
 #include <queue>
 #include <set>
+#include <string>
 #include <vector>
 
 namespace ns3
@@ -185,6 +186,7 @@ struct LeoSimHandoverEvent
     uint32_t packetsBuffered;          //!< Packets buffered during handover
     uint32_t packetsDropped;           //!< Packets dropped during handover
     bool success;                      //!< Whether handover completed successfully
+    std::string failureReason;         //!< Empty on success; machine-readable reason on failure
     double sinrBefore;                 //!< SINR of source beam before HO (dB)
     double sinrAfter;                  //!< SINR of target beam after HO (dB)
 };
@@ -758,6 +760,9 @@ class LeoSimBeamManager : public Object
 
     // Per-candidate CHO configurations (indexed by [UE ID][sat ID])
     std::map<uint32_t, std::map<uint32_t, LeoSimChoConfig>> m_choConfigs;
+    std::map<uint32_t, std::vector<uint32_t>> m_choCandidateOrder; //!< TOPSIS satellite order
+    std::map<uint32_t, Time> m_choInitiatedAt; //!< Start time of active CHO attempt
+    std::map<uint32_t, EventId> m_choPreparationEventIds; //!< Pending preparation callbacks
     std::map<uint32_t, std::map<uint32_t, LeoSimBeamRecord>> m_preparedCandidateBeams; //!< Prepared CHO beam records
 
     // Packet buffering during handover
@@ -921,6 +926,18 @@ class LeoSimBeamManager : public Object
                           uint32_t sourceSatId,
                           uint32_t targetSatId,
                           LeoSimHandoverTrigger trigger);
+
+    /**
+     * \brief Fail an active CHO if its serving access link has disconnected.
+     * \return True if the attempt was failed and its serving state was replaced.
+     */
+    bool FailChoIfServingLinkLost(uint32_t ueNodeId);
+
+    /**
+     * \brief Immediately scan and attach a disconnected ground node.
+     * \return True when a replacement serving association was established.
+     */
+    bool RecoverGroundAssociation(uint32_t groundNodeId);
 
     /**
      * \brief Pre-schedule ephemeris-based handovers for upcoming coverage changes
