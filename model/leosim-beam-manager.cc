@@ -1561,6 +1561,20 @@ LeoSimBeamManager::InitiateChoPreparation(uint32_t ueNodeId,
         return;
     }
 
+    // A UE may reach this method through several triggers scheduled for the
+    // same simulation time (for example, ephemeris and periodic evaluation).
+    // Once one trigger starts CHO, subsequent triggers must not replace its
+    // candidates, initiation timestamp, or pending preparation callback.
+    // MEASURING is allowed because a successful TTT expiry legitimately
+    // transitions that state into PREPARING.
+    const LeoSimBeamState state = beamIt->second.state;
+    if (state != LEOSIM_BEAM_CONNECTED && state != LEOSIM_BEAM_MEASURING)
+    {
+        NS_LOG_DEBUG("Ignoring duplicate CHO preparation for UE "
+                     << ueNodeId << " while beam state=" << state);
+        return;
+    }
+
     uint32_t servingSatId = beamIt->second.satelliteNodeId;
 
     // CHO preparation supersedes any outstanding TTT measurement. A stale TTT
