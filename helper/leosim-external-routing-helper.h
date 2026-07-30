@@ -16,6 +16,7 @@
 #include "ns3/leosim-statistics-helper.h"
 
 #include <cstdint>
+#include <fstream>
 #include <map>
 #include <set>
 #include <string>
@@ -73,6 +74,8 @@ class LeoSimExternalRoutingHelper
     /** Restrict compact route statistics to these application path pairs. */
     void SetStatisticsEndpoints(const NodeContainer& sources,
                                 const NodeContainer& destinations);
+    /** Log the compact application endpoint routes produced by each snapshot. */
+    void EnableRouteLogging(const std::string& filename);
     LeoSimRouteStatistics GetRouteStatistics() const;
 
     /**
@@ -150,6 +153,14 @@ class LeoSimExternalRoutingHelper
     void UpdateRouteStatistics(Ptr<LeoSimRoutingCalculator> calculator,
                                const GraphExport& exportInfo,
                                const std::vector<RouteResultRecord>& results);
+    void LogStatisticsRoute(Ptr<Node> source,
+                            Ptr<Node> destination,
+                            bool valid,
+                            const std::vector<uint32_t>& path,
+                            double distanceKm,
+                            double minSnr,
+                            double pathLoss,
+                            double minSignal);
 
     void UpdateRoutesAndReschedule(Ptr<LeoSimRoutingCalculator> calculator,
                                    const NodeContainer& sources,
@@ -192,6 +203,8 @@ class LeoSimExternalRoutingHelper
     double m_routeMinimumSnr{0.0};
     std::map<std::pair<uint32_t, uint32_t>, std::vector<uint32_t>> m_previousPaths;
     std::set<std::vector<uint32_t>> m_uniquePaths;
+    std::ofstream m_routeLog;
+    std::map<std::pair<uint32_t, uint32_t>, std::string> m_previousLoggedPaths;
     uint64_t m_nextSnapshotId;
     EventId m_dynamicRoutingUpdate;
     EventId m_pendingReactiveUpdate;

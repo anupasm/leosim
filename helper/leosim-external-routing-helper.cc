@@ -158,6 +158,85 @@ LeoSimExternalRoutingHelper::SetStatisticsEndpoints(const NodeContainer& sources
     m_statisticsDestinations = destinations;
 }
 
+void
+LeoSimExternalRoutingHelper::EnableRouteLogging(const std::string& filename)
+{
+    if (m_routeLog.is_open())
+    {
+        m_routeLog.close();
+    }
+    m_previousLoggedPaths.clear();
+    m_routeLog.open(filename, std::ios::out | std::ios::trunc);
+    if (!m_routeLog.is_open())
+    {
+        NS_LOG_ERROR("Could not open external route log: " << filename);
+        return;
+    }
+    m_routeLog << "time_s,source_node,destination_node,metric,valid,path,hop_count,"
+                  "total_distance_m,min_snr_db,total_path_loss_db,min_signal_strength_dbm,"
+                  "route_changed"
+               << std::endl;
+}
+
+void
+LeoSimExternalRoutingHelper::LogStatisticsRoute(
+    Ptr<Node> source,
+    Ptr<Node> destination,
+    bool valid,
+    const std::vector<uint32_t>& path,
+    double distanceKm,
+    double minSnr,
+    double pathLoss,
+    double minSignal)
+{
+    if (!m_routeLog.is_open() || !source || !destination)
+    {
+        return;
+    }
+
+    const char* metricName = "hop";
+    switch (m_metric)
+    {
+    case LEOSIM_EXTERNAL_WEIGHT_DISTANCE: metricName = "distance"; break;
+    case LEOSIM_EXTERNAL_WEIGHT_PATH_LOSS: metricName = "path-loss"; break;
+    case LEOSIM_EXTERNAL_WEIGHT_SNR: metricName = "snr"; break;
+    case LEOSIM_EXTERNAL_WEIGHT_SIGNAL_STRENGTH: metricName = "signal-strength"; break;
+    default: break;
+    }
+
+    std::ostringstream pathText;
+    if (valid)
+    {
+        for (std::size_t i = 0; i < path.size(); ++i)
+        {
+            if (i)
+            {
+                pathText << '>';
+            }
+            pathText << path[i];
+        }
+    }
+    else
+    {
+        pathText << "NO_ROUTE";
+    }
+
+    const auto key = std::make_pair(source->GetId(), destination->GetId());
+    const auto previous = m_previousLoggedPaths.find(key);
+    const bool changed =
+        previous != m_previousLoggedPaths.end() && previous->second != pathText.str();
+    m_previousLoggedPaths[key] = pathText.str();
+
+    m_routeLog << std::fixed << std::setprecision(6) << Simulator::Now().GetSeconds() << ','
+               << source->GetId() << ',' << destination->GetId() << ',' << metricName << ','
+               << (valid ? 1 : 0) << ',' << pathText.str() << ','
+               << (valid ? path.size() - 1 : 0) << ','
+               << (valid ? distanceKm * 1000.0 : 0.0) << ','
+               << (valid ? minSnr : 0.0) << ','
+               << (valid ? pathLoss : 0.0) << ','
+               << (valid ? minSignal : 0.0) << ',' << (changed ? 1 : 0) << std::endl;
+}
+
 LeoSimRouteStatistics
 LeoSimExternalRoutingHelper::GetRouteStatistics() const
 {
@@ -305,8 +384,24 @@ LeoSimExternalRoutingHelper::UpdateRouteStatistics(
 
             if (!valid || path.size() < 2)
             {
+                LogStatisticsRoute(source,
+                                   destination,
+                                   false,
+                                   path,
+                                   0.0,
+                                   0.0,
+                                   0.0,
+                                   0.0);
                 continue;
             }
+            LogStatisticsRoute(source,
+                               destination,
+                               true,
+                               path,
+                               distanceKm,
+                               minSnr,
+                               pathLoss,
+                               minSignal);
             ++m_routeValidSamples;
             m_routeHopSum += path.size() - 1;
             m_routeDistanceKmSum += distanceKm;

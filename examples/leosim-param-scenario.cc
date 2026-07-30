@@ -333,7 +333,7 @@ main(int argc, char* argv[])
     std::string satelliteFile = leosimDataDir + "/prepro/satellite_mobility.tcl";
     std::string groundDeviceFile;
     std::string outputPrefix = "leosim-param-scenario";
-    double simTime = 600.0;
+    double simTime = 400.0;
     bool useTrace = true;
     bool verbose = false;
 
@@ -385,7 +385,7 @@ main(int argc, char* argv[])
     bool enableTaskProfiler = true;
     double statisticsInterval = 1.0;
     bool enableRouteLogging = true;
-    bool enableHandoverLogging = false;
+    bool enableHandoverLogging = true;
     double progressLogInterval = 5.0;
 
     CommandLine cmd;
@@ -788,7 +788,7 @@ main(int argc, char* argv[])
 
     LeoSimRoutingCalculatorHelper routingHelper;
     const std::string routeLogFile = outputPrefix + "-routes.csv";
-    if (enableRouteLogging)
+    if (enableRouteLogging && !useTrees)
     {
         routingHelper.EnableRouteLogging(routeLogFile);
     }
@@ -853,6 +853,14 @@ main(int argc, char* argv[])
     Ptr<LeoSimBeamManager> beamManager =
         beamHelper.Install(allGroundNodes, satelliteNodes, Seconds(simTime));
     beamManager->SetOperatorModel(operatorModel);
+    for (uint32_t i = 0; i < ueNodes.GetN(); ++i)
+    {
+        beamManager->SetHandoverValidationPeers(ueNodes.Get(i)->GetId(), serverNodes);
+    }
+    for (uint32_t i = 0; i < serverNodes.GetN(); ++i)
+    {
+        beamManager->SetHandoverValidationPeers(serverNodes.Get(i)->GetId(), ueNodes);
+    }
     routingCalculator->SetBeamManager(beamManager);
     if (enableVisualization || enableHandoverLogging)
     {
@@ -899,6 +907,10 @@ main(int argc, char* argv[])
         routeTreeHelper.SetDestinationTreeAllNodes(true);
         routeTreeHelper.SetStatisticsEndpoints(statisticsRouteSources,
                                                statisticsRouteDestinations);
+        if (enableRouteLogging)
+        {
+            routeTreeHelper.EnableRouteLogging(routeLogFile);
+        }
 
         if (enableDynamicRouting)
         {
