@@ -1066,6 +1066,20 @@ LeoSimRoutingCalculator::GetLinkMetricValue(Ptr<Node> source,
     case LEOSIM_METRIC_SIGNAL_STRENGTH:
         return -quality.signalStrength; // Negative signal strength so we minimize it (maximize
                                          // signal strength)
+    case LEOSIM_METRIC_REMAINING_LIFETIME:
+        if (quality.remainingConnectionTimeSeconds < 0.0)
+        {
+            return 1.0; // Neutral cost for ground/access links.
+        }
+        if (quality.remainingConnectionTimeSeconds == 0.0)
+        {
+            return 1.0e12;
+        }
+        if (std::isinf(quality.remainingConnectionTimeSeconds))
+        {
+            return 1.0e-12;
+        }
+        return 1.0 / quality.remainingConnectionTimeSeconds;
     default:
         return 1.0;
     }

@@ -201,6 +201,7 @@ LeoSimExternalRoutingHelper::LogStatisticsRoute(
     case LEOSIM_EXTERNAL_WEIGHT_PATH_LOSS: metricName = "path-loss"; break;
     case LEOSIM_EXTERNAL_WEIGHT_SNR: metricName = "snr"; break;
     case LEOSIM_EXTERNAL_WEIGHT_SIGNAL_STRENGTH: metricName = "signal-strength"; break;
+    case LEOSIM_EXTERNAL_WEIGHT_REMAINING_LIFETIME: metricName = "lifetime"; break;
     default: break;
     }
 
@@ -582,6 +583,24 @@ LeoSimExternalRoutingHelper::GetExportedWeight(Ptr<LeoSimRoutingCalculator> calc
         // Signal strength is normally negative dBm, so negating it turns
         // stronger (less-negative) signals into smaller positive costs.
         weight = -quality.signalStrength;
+        break;
+    case LEOSIM_EXTERNAL_WEIGHT_REMAINING_LIFETIME:
+        if (quality.remainingConnectionTimeSeconds < 0.0)
+        {
+            weight = 1.0;
+        }
+        else if (quality.remainingConnectionTimeSeconds == 0.0)
+        {
+            weight = 1.0e12;
+        }
+        else if (std::isinf(quality.remainingConnectionTimeSeconds))
+        {
+            weight = 1.0e-12;
+        }
+        else
+        {
+            weight = 1.0 / quality.remainingConnectionTimeSeconds;
+        }
         break;
     case LEOSIM_EXTERNAL_HOP_COUNT:
         weight = 1.0;

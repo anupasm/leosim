@@ -2048,10 +2048,12 @@ LeoSimVisualizationHelper::InitCoverageAndLinkQualityLogging()
         m_linkQualityFileStream.open(m_linkQualityFile, std::ios::out | std::ios::trunc);
         if (m_linkQualityFileStream.is_open())
         {
-            // CSV header: time, node1_id, node2_id, link_type, snr_db, distance_m, elevation_deg, 
-            //             path_loss_db, signal_strength_dbm, link_state, out_of_threshold_reason
+            // CSV header: time, node1_id, node2_id, link_type, snr_db, distance_m, elevation_deg,
+            //             path_loss_db, signal_strength_dbm, remaining_connection_time_sec,
+            //             link_state, out_of_threshold_reason
             m_linkQualityFileStream << "time,node1_id,node2_id,link_type,snr_db,distance_m,elevation_deg,"
-                                    << "path_loss_db,signal_strength_dbm,link_state,degradation_reason"
+                                    << "path_loss_db,signal_strength_dbm,remaining_connection_time_sec,"
+                                    << "link_state,degradation_reason"
                                     << std::endl;
             NS_LOG_DEBUG("Opened link quality file: " << m_linkQualityFile);
         }
@@ -2212,6 +2214,7 @@ LeoSimVisualizationHelper::LogOutOfThresholdLinks()
                                << quality.elevationAngle << ","
                                << pathLossToLog << ","
                                << quality.signalStrength << ","
+                               << quality.remainingConnectionTimeSeconds << ","
                                << LinkStateToString(quality.linkState) << ","
                                << degradationReason << std::endl;
     }

@@ -4,7 +4,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
 #SBATCH --time=24:00:00
-#SBATCH --array=0-4%10
+#SBATCH --array=0-5%5
 #SBATCH --output=logs/%x-%A_%a.out
 #SBATCH --error=logs/%x-%A_%a.err
 
@@ -25,8 +25,8 @@ if command -v module >/dev/null 2>&1; then
   module load "${APPTAINER_MODULE:-apptainer/1.3.4-gcc-11.5.0-ojp6nts}"
 fi
 
-# Matrix: 5 metrics x 1 constellation size x 1 duration x 1 update interval.
-METRICS=(hop distance path-loss snr signal-strength)
+# Matrix: 6 metrics x 1 constellation size x 1 duration x 1 update interval.
+METRICS=(hop distance path-loss snr signal-strength lifetime)
 SATELLITE_COUNTS=(1000)
 SIM_TIMES=(1200)
 UPDATE_INTERVALS=(30)

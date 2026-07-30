@@ -96,7 +96,8 @@ class LeoSimRoutingCalculator : public Object
         LEOSIM_METRIC_PATH_LOSS,      //!< Minimize path loss
         LEOSIM_METRIC_SNR,            //!< Maximize SNR (minimize negative SNR)
         LEOSIM_METRIC_DISTANCE,       //!< Minimize distance
-        LEOSIM_METRIC_SIGNAL_STRENGTH //!< Maximize signal strength
+        LEOSIM_METRIC_SIGNAL_STRENGTH, //!< Maximize signal strength
+        LEOSIM_METRIC_REMAINING_LIFETIME //!< Prefer links with more connection time left
     };
 
     /**

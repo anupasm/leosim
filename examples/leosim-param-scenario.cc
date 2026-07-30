@@ -155,9 +155,12 @@ ParseRoutingMetric(const std::string& value)
         return LeoSimRoutingCalculator::LEOSIM_METRIC_SNR;
     if (value == "signal-strength")
         return LeoSimRoutingCalculator::LEOSIM_METRIC_SIGNAL_STRENGTH;
+    if (value == "lifetime" || value == "remaining-lifetime")
+        return LeoSimRoutingCalculator::LEOSIM_METRIC_REMAINING_LIFETIME;
 
     NS_FATAL_ERROR("Unknown routingMetric '" << value
-                                              << "'; use hop, distance, path-loss, snr, or signal-strength");
+                                              << "'; use hop, distance, path-loss, snr, "
+                                                 "signal-strength, or lifetime");
     return LeoSimRoutingCalculator::LEOSIM_METRIC_HOP_COUNT;
 }
 
@@ -426,7 +429,7 @@ main(int argc, char* argv[])
     cmd.AddValue("enableDynamicRouting", "Recompute routes periodically during the run", enableDynamicRouting);
     cmd.AddValue("routingUpdateInterval", "Dynamic routing update interval in seconds", routingUpdateInterval);
     cmd.AddValue("routingMetric",
-                 "Dijkstra metric: hop, distance, path-loss, snr, or signal-strength",
+                 "Dijkstra metric: hop, distance, path-loss, snr, signal-strength, or lifetime",
                  routingMetricName);
     cmd.AddValue("useRouteTreeCache",
                  "Use one cached reverse shortest-path tree per traffic destination "
@@ -904,6 +907,10 @@ main(int argc, char* argv[])
         case LeoSimRoutingCalculator::LEOSIM_METRIC_SIGNAL_STRENGTH:
             treeMetric =
                 LeoSimExternalRoutingHelper::LEOSIM_EXTERNAL_WEIGHT_SIGNAL_STRENGTH;
+            break;
+        case LeoSimRoutingCalculator::LEOSIM_METRIC_REMAINING_LIFETIME:
+            treeMetric =
+                LeoSimExternalRoutingHelper::LEOSIM_EXTERNAL_WEIGHT_REMAINING_LIFETIME;
             break;
         case LeoSimRoutingCalculator::LEOSIM_METRIC_HOP_COUNT:
             break;

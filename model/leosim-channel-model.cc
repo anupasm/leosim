@@ -27,6 +27,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace ns3
 {
@@ -480,6 +481,7 @@ LeoSimChannelModel::UpdateLink(uint32_t linkId)
     // Signed radial Doppler: positive when the endpoints are separating.
     const Vector velocity1 = mob1->GetVelocity();
     const Vector velocity2 = mob2->GetVelocity();
+    info.quality.remainingConnectionTimeSeconds = -1.0;
     if (distance > 0.0)
     {
         const double radialVelocity = ((velocity2.x - velocity1.x) * dx +
@@ -491,6 +493,62 @@ LeoSimChannelModel::UpdateLink(uint32_t linkId)
     else
     {
         info.quality.dopplerHz = 0.0;
+    }
+
+    // Establish the complete predicted lifetime once, when the ISL enters
+    // range. Subsequent quality updates count down from that baseline rather
+    // than replacing it with a new prediction.
+    if (isIsl)
+    {
+        if (distance > maxDistance)
+        {
+            info.quality.remainingConnectionTimeSeconds = 0.0;
+            info.islLifetimeInitialized = false;
+            info.islInitialLifetimeSeconds = -1.0;
+        }
+        else
+        {
+            if (!info.islLifetimeInitialized)
+            {
+                const double dvx = velocity2.x - velocity1.x;
+                const double dvy = velocity2.y - velocity1.y;
+                const double dvz = velocity2.z - velocity1.z;
+                const double a = dvx * dvx + dvy * dvy + dvz * dvz;
+                const double b = 2.0 * (dx * dvx + dy * dvy + dz * dvz);
+                const double c = distance * distance - maxDistance * maxDistance;
+
+                info.islInitialLifetimeSeconds =
+                    std::numeric_limits<double>::infinity();
+                if (a > std::numeric_limits<double>::epsilon())
+                {
+                    const double discriminant = b * b - 4.0 * a * c;
+                    if (discriminant >= 0.0)
+                    {
+                        const double exitTime =
+                            (-b + std::sqrt(discriminant)) / (2.0 * a);
+                        if (exitTime >= 0.0)
+                        {
+                            info.islInitialLifetimeSeconds = exitTime;
+                        }
+                    }
+                }
+                info.islLifetimeStart = Simulator::Now();
+                info.islLifetimeInitialized = true;
+            }
+
+            if (std::isinf(info.islInitialLifetimeSeconds))
+            {
+                info.quality.remainingConnectionTimeSeconds =
+                    std::numeric_limits<double>::infinity();
+            }
+            else
+            {
+                const double elapsed =
+                    (Simulator::Now() - info.islLifetimeStart).GetSeconds();
+                info.quality.remainingConnectionTimeSeconds =
+                    std::max(0.0, info.islInitialLifetimeSeconds - elapsed);
+            }
+        }
     }
 
     NS_LOG_DEBUG("Link type: " << (isIsl ? "ISL" : "Ground"));
@@ -763,6 +821,7 @@ LeoSimChannelModel::GetChannelQuality(Ptr<Node> node1, Ptr<Node> node2)
     quality.signalStrength = -200.0;
     quality.snr = -100.0;
     quality.dopplerHz = 0.0;
+    quality.remainingConnectionTimeSeconds = -1.0;
     quality.peerNodeId = 0;
     quality.lastUpdate = Simulator::Now();
     return quality;

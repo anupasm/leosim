@@ -69,6 +69,9 @@ struct LeoSimChannelQuality
     double signalStrength;     //!< Received signal strength (dBm)
     double snr;                //!< Signal-to-noise ratio (dB)
     double dopplerHz{0.0};     //!< Signed radial Doppler shift (Hz)
+    double remainingConnectionTimeSeconds{-1.0}; //!< Estimated ISL time until range loss (s);
+                                                 //!< +inf means no loss under current relative
+                                                 //!< velocity, -1 means not applicable
     uint32_t peerNodeId;       //!< Peer node ID for node-scoped link queries
     LeoSimLinkState linkState; //!< Current link state
     LeoSimLinkType linkType;   //!< Link type (ground or ISL)
@@ -547,6 +550,9 @@ class LeoSimChannelModel : public Object
         Ptr<Node> node2;
         LeoSimChannelQuality quality;
         LeoSimLinkState physicalLinkState{LEOSIM_LINK_DOWN};
+        bool islLifetimeInitialized{false};
+        Time islLifetimeStart{Seconds(0)};
+        double islInitialLifetimeSeconds{-1.0};
         uint32_t linkId;
         LeoSimLinkType linkType;
     };

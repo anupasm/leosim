@@ -90,6 +90,9 @@ LeoSimRoutingCalculatorHelper::LogRoute(
     case LeoSimRoutingCalculator::LEOSIM_METRIC_SIGNAL_STRENGTH:
         metricName = "signal-strength";
         break;
+    case LeoSimRoutingCalculator::LEOSIM_METRIC_REMAINING_LIFETIME:
+        metricName = "lifetime";
+        break;
     default: break;
     }
 

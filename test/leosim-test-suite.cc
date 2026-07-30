@@ -24,6 +24,7 @@
 #include "ns3/leosim-visualization-helper.h"
 #include "ns3/test.h"
 #include "ns3/constant-position-mobility-model.h"
+#include "ns3/constant-velocity-mobility-model.h"
 #include "ns3/internet-stack-helper.h"
 #include "ns3/node-container.h"
 #include "ns3/point-to-point-channel.h"
@@ -2359,6 +2360,90 @@ LeoSimTestIslRouteMetricsUseIslQuality::DoRun()
   Simulator::Destroy();
 }
 
+/**
+ * \ingroup leosim-test-suite
+ * \brief Test ISL remaining connection time from relative motion and range.
+ */
+class LeoSimTestIslRemainingConnectionTime : public TestCase
+{
+  public:
+  LeoSimTestIslRemainingConnectionTime()
+    : TestCase("LeoSim ISL quality estimates remaining connection time")
+  {
+  }
+
+  private:
+  void DoRun() override
+  {
+    NodeContainer sats;
+    sats.Create(2);
+
+    Ptr<ConstantVelocityMobilityModel> first =
+      CreateObject<ConstantVelocityMobilityModel>();
+    first->SetPosition(Vector(0.0, 0.0, 0.0));
+    first->SetVelocity(Vector(0.0, 0.0, 0.0));
+    sats.Get(0)->AggregateObject(first);
+
+    Ptr<ConstantVelocityMobilityModel> second =
+      CreateObject<ConstantVelocityMobilityModel>();
+    second->SetPosition(Vector(100.0, 0.0, 0.0));
+    second->SetVelocity(Vector(10.0, 0.0, 0.0));
+    sats.Get(1)->AggregateObject(second);
+
+    Ptr<LeoSimChannelModel> channel = CreateObject<LeoSimChannelModel>();
+    channel->SetIslMaxDistance(1000.0);
+    channel->AddIslLink(sats.Get(0), sats.Get(1));
+
+    LeoSimChannelQuality quality =
+      channel->GetChannelQuality(sats.Get(0), sats.Get(1));
+    NS_TEST_ASSERT_MSG_EQ_TOL(quality.remainingConnectionTimeSeconds,
+                              90.0,
+                              1e-9,
+                              "100 m separation growing at 10 m/s should reach 1 km in 90 s");
+
+    double remainingAt10 = -1.0;
+    double remainingAt20 = -1.0;
+    double remainingAt100 = -1.0;
+    Simulator::Schedule(Seconds(10), [&]() {
+      // A velocity change must not replace the lifetime established at t=0.
+      second->SetVelocity(Vector(-10.0, 0.0, 0.0));
+      channel->UpdateAllLinks();
+      remainingAt10 =
+        channel->GetChannelQuality(sats.Get(0), sats.Get(1))
+          .remainingConnectionTimeSeconds;
+    });
+    Simulator::Schedule(Seconds(20), [&]() {
+      second->SetVelocity(Vector(0.0, 0.0, 0.0));
+      channel->UpdateAllLinks();
+      remainingAt20 =
+        channel->GetChannelQuality(sats.Get(0), sats.Get(1))
+          .remainingConnectionTimeSeconds;
+    });
+    Simulator::Schedule(Seconds(100), [&]() {
+      channel->UpdateAllLinks();
+      remainingAt100 =
+        channel->GetChannelQuality(sats.Get(0), sats.Get(1))
+          .remainingConnectionTimeSeconds;
+    });
+    Simulator::Run();
+
+    NS_TEST_ASSERT_MSG_EQ_TOL(remainingAt10,
+                              80.0,
+                              1e-9,
+                              "Lifetime should count down by elapsed simulation time");
+    NS_TEST_ASSERT_MSG_EQ_TOL(remainingAt20,
+                              70.0,
+                              1e-9,
+                              "Later velocity changes must not reset the countdown");
+    NS_TEST_ASSERT_MSG_EQ_TOL(remainingAt100,
+                              0.0,
+                              1e-9,
+                              "Expired predicted lifetime should remain clamped at zero");
+
+    Simulator::Destroy();
+  }
+};
+
 // ============================================================================
 // Phase 9: Weather Model & Integration Tests (Tests 10–18)
 // ============================================================================
@@ -2973,6 +3058,7 @@ LeoSimTestSuite::LeoSimTestSuite()
     AddTestCase(new LeoSimTestStaticRoutingNoPeriodicRefresh, TestCase::Duration::QUICK);
     AddTestCase(new LeoSimTestRoutingChoosesLowestDistancePath, TestCase::Duration::QUICK);
     AddTestCase(new LeoSimTestIslRouteMetricsUseIslQuality, TestCase::Duration::QUICK);
+    AddTestCase(new LeoSimTestIslRemainingConnectionTime, TestCase::Duration::QUICK);
     // Phase 9 Weather Model Tests (Tests 10–18)
     AddTestCase(new LeoSimTestMarkovDwellTime, TestCase::Duration::QUICK);
     AddTestCase(new LeoSimTestWeatherStateRetrieval, TestCase::Duration::QUICK);
