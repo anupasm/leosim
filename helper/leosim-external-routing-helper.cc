@@ -972,25 +972,29 @@ LeoSimExternalRoutingHelper::RemoveComputedHostRoutes(Ptr<Node> node, bool verbo
         return;
     }
 
-    std::vector<uint32_t> removeIndices;
-    for (uint32_t routeIdx = 0; routeIdx < staticRouting->GetNRoutes(); ++routeIdx)
+    uint32_t removed = 0;
+    for (uint32_t routeIdx = 0; routeIdx < staticRouting->GetNRoutes();)
     {
         Ipv4RoutingTableEntry entry = staticRouting->GetRoute(routeIdx);
         if (entry.GetDestNetworkMask() == Ipv4Mask("255.255.255.255") &&
             entry.GetGateway() != Ipv4Address::GetZero())
         {
-            removeIndices.push_back(routeIdx);
+            // Ipv4StaticRouting stores routes in a linked list, so removing
+            // collected indices in reverse repeatedly walks almost the entire
+            // list and becomes quadratic.  After erasing this entry, the next
+            // entry occupies the same index and can be checked immediately.
+            staticRouting->RemoveRoute(routeIdx);
+            ++removed;
+        }
+        else
+        {
+            ++routeIdx;
         }
     }
 
-    for (int i = static_cast<int>(removeIndices.size()) - 1; i >= 0; --i)
+    if (verbose && removed != 0)
     {
-        staticRouting->RemoveRoute(removeIndices[i]);
-    }
-
-    if (verbose && !removeIndices.empty())
-    {
-        NS_LOG_DEBUG("External routing removed " << removeIndices.size()
+        NS_LOG_DEBUG("External routing removed " << removed
                                                   << " old host routes on node "
                                                   << node->GetId());
     }
