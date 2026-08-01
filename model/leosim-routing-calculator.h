@@ -36,6 +36,8 @@
 namespace ns3
 {
 
+class LeoSimIslLoadModel;
+
 class LeoSimBeamManager;
 class LeoSimDijkstraRoutingModel;
 class LeoSimRouteProvider;
@@ -97,7 +99,8 @@ class LeoSimRoutingCalculator : public Object
         LEOSIM_METRIC_SNR,            //!< Maximize SNR (minimize negative SNR)
         LEOSIM_METRIC_DISTANCE,       //!< Minimize distance
         LEOSIM_METRIC_SIGNAL_STRENGTH, //!< Maximize signal strength
-        LEOSIM_METRIC_REMAINING_LIFETIME //!< Prefer links with more connection time left
+        LEOSIM_METRIC_REMAINING_LIFETIME, //!< Prefer links with more connection time left
+        LEOSIM_METRIC_LOAD //!< Prefer links with more residual synthetic-load capacity
     };
 
     /**
@@ -181,6 +184,15 @@ class LeoSimRoutingCalculator : public Object
      * \return Pointer to the ISL channel model (null if not set)
      */
     Ptr<LeoSimChannelModel> GetIslChannelModel() const;
+
+    /** Set the synthetic directed-ISL load model used by the load metric. */
+    void SetIslLoadModel(Ptr<LeoSimIslLoadModel> loadModel);
+
+    /** Get the synthetic directed-ISL load model. */
+    Ptr<LeoSimIslLoadModel> GetIslLoadModel() const;
+
+    /** Return the load-metric cost for a directed ISL, or neutral cost for non-ISLs. */
+    double GetIslLoadCost(Ptr<Node> source, Ptr<Node> destination) const;
 
     /**
      * \brief Set beam manager used as the access-link authority.
@@ -544,6 +556,9 @@ class LeoSimRoutingCalculator : public Object
 
     // Pointer to the ISL channel model for inter-satellite links
     Ptr<LeoSimChannelModel> m_islChannelModel;
+
+    // Synthetic directed-ISL utilization used by LEOSIM_METRIC_LOAD.
+    Ptr<LeoSimIslLoadModel> m_islLoadModel;
 
     // Beam manager authority for satellite-ground access links
     Ptr<LeoSimBeamManager> m_beamManager;

@@ -21,6 +21,7 @@ namespace ns3
 class LeoSimBeamManager;
 class LeoSimChannel;
 class LeoSimChannelModel;
+class LeoSimIslLoadModel;
 class NetDevice;
 class Node;
 class Packet;
@@ -123,6 +124,7 @@ class LeoSimStatisticsHelper : public Object
     bool AttachChannelModel(Ptr<LeoSimChannelModel> channelModel);
     void SetBeamManager(Ptr<LeoSimBeamManager> beamManager);
     void SetRouteStatistics(const LeoSimRouteStatistics& statistics);
+    void SetIslLoadModel(Ptr<LeoSimIslLoadModel> loadModel);
 
     void StartPeriodicSampling(Time interval, const std::string& csvFilename);
     void StopPeriodicSampling();
@@ -154,6 +156,7 @@ class LeoSimStatisticsHelper : public Object
     Ptr<FlowMonitor> m_monitor;
     Ptr<Ipv4FlowClassifier> m_classifier;
     Ptr<LeoSimBeamManager> m_beamManager;
+    Ptr<LeoSimIslLoadModel> m_islLoadModel;
     LeoSimRouteStatistics m_routeStatistics;
     LeoSimRunningStatistics m_snr;
     LeoSimRunningStatistics m_doppler;

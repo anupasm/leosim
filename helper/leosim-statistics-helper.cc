@@ -5,6 +5,7 @@
 #include "ns3/leosim-beam-manager.h"
 #include "ns3/leosim-channel-model.h"
 #include "ns3/leosim-channel.h"
+#include "ns3/leosim-isl-load-model.h"
 #include "ns3/log.h"
 #include "ns3/net-device.h"
 #include "ns3/node.h"
@@ -23,6 +24,12 @@ namespace ns3
 
 NS_LOG_COMPONENT_DEFINE("LeoSimStatisticsHelper");
 NS_OBJECT_ENSURE_REGISTERED(LeoSimStatisticsHelper);
+
+void
+LeoSimStatisticsHelper::SetIslLoadModel(Ptr<LeoSimIslLoadModel> loadModel)
+{
+    m_islLoadModel = loadModel;
+}
 
 TypeId
 LeoSimStatisticsHelper::GetTypeId()
@@ -299,6 +306,80 @@ LeoSimStatisticsHelper::WriteSummary(const std::string& filename, bool includeFl
         << ", \"minimum_snr_db\": " << m_routeStatistics.minimumSnrDb
         << ", \"mean_path_loss_db\": " << m_routeStatistics.meanPathLossDb
         << ", \"mean_min_signal_dbm\": " << m_routeStatistics.meanMinSignalDbm << "}";
+    if (m_islLoadModel)
+    {
+        const auto links = m_islLoadModel->GetAllIslLoads();
+        const auto satellites = m_islLoadModel->GetAllSatelliteCapacities();
+        uint64_t requested = 0;
+        uint64_t admitted = 0;
+        uint64_t dropped = 0;
+        uint64_t residual = 0;
+        uint64_t effective = 0;
+        uint64_t saturatedLinks = 0;
+        uint64_t activeLinks = 0;
+        uint64_t saturatedSatellites = 0;
+        double requestedLoadSum = 0.0;
+        double activeRequestedLoadSum = 0.0;
+        double effectiveUtilizationSum = 0.0;
+        double routingCostSum = 0.0;
+        double maximumRoutingCost = 0.0;
+        for (const auto& link : links)
+        {
+            requestedLoadSum += link.requestedSyntheticLoad;
+            if (!link.active)
+            {
+                continue;
+            }
+            ++activeLinks;
+            activeRequestedLoadSum += link.requestedSyntheticLoad;
+            requested += link.requestedBackgroundBps;
+            admitted += link.admittedBackgroundBps;
+            dropped += link.droppedBackgroundBps;
+            residual += link.remainingCapacityBps;
+            effective += link.effectiveCapacityBps;
+            effectiveUtilizationSum += link.effectiveUtilization;
+            const double cost =
+                m_islLoadModel->GetRoutingCost(link.sourceSatelliteId,
+                                               link.destinationSatelliteId);
+            routingCostSum += cost;
+            maximumRoutingCost = std::max(maximumRoutingCost, cost);
+            saturatedLinks += link.effectiveCapacityBps == 0 ? 1 : 0;
+        }
+        double satelliteUtilizationSum = 0.0;
+        double maximumSatelliteUtilization = 0.0;
+        for (const auto& satellite : satellites)
+        {
+            satelliteUtilizationSum += satellite.utilization;
+            maximumSatelliteUtilization =
+                std::max(maximumSatelliteUtilization, satellite.utilization);
+            saturatedSatellites += satellite.remainingCapacityBps == 0 ? 1 : 0;
+        }
+        const double linkCount = static_cast<double>(links.size());
+        const double activeLinkCount = static_cast<double>(activeLinks);
+        const double satelliteCount = static_cast<double>(satellites.size());
+        out << ",\n  \"synthetic_isl_load\": {\"directed_links\": " << links.size()
+            << ", \"active_directed_links\": " << activeLinks
+            << ", \"satellites\": " << satellites.size()
+            << ", \"requested_background_bps\": " << requested
+            << ", \"admitted_background_bps\": " << admitted
+            << ", \"dropped_background_bps\": " << dropped
+            << ", \"link_residual_bps\": " << residual
+            << ", \"effective_capacity_bps\": " << effective
+            << ", \"mean_candidate_requested_load\": "
+            << (links.empty() ? 0.0 : requestedLoadSum / linkCount)
+            << ", \"mean_active_requested_load\": "
+            << (activeLinks == 0 ? 0.0 : activeRequestedLoadSum / activeLinkCount)
+            << ", \"mean_effective_utilization\": "
+            << (activeLinks == 0 ? 0.0 : effectiveUtilizationSum / activeLinkCount)
+            << ", \"mean_satellite_utilization\": "
+            << (satellites.empty() ? 0.0 : satelliteUtilizationSum / satelliteCount)
+            << ", \"max_satellite_utilization\": " << maximumSatelliteUtilization
+            << ", \"mean_routing_cost\": "
+            << (activeLinks == 0 ? 0.0 : routingCostSum / activeLinkCount)
+            << ", \"max_routing_cost\": " << maximumRoutingCost
+            << ", \"saturated_links\": " << saturatedLinks
+            << ", \"saturated_satellites\": " << saturatedSatellites << "}";
+    }
     if (includeFlows)
     {
         out << ",\n  \"flows\": [";

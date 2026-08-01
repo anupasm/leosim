@@ -202,6 +202,7 @@ LeoSimExternalRoutingHelper::LogStatisticsRoute(
     case LEOSIM_EXTERNAL_WEIGHT_SNR: metricName = "snr"; break;
     case LEOSIM_EXTERNAL_WEIGHT_SIGNAL_STRENGTH: metricName = "signal-strength"; break;
     case LEOSIM_EXTERNAL_WEIGHT_REMAINING_LIFETIME: metricName = "lifetime"; break;
+    case LEOSIM_EXTERNAL_WEIGHT_LOAD: metricName = "load"; break;
     default: break;
     }
 
@@ -601,6 +602,9 @@ LeoSimExternalRoutingHelper::GetExportedWeight(Ptr<LeoSimRoutingCalculator> calc
         {
             weight = 1.0 / quality.remainingConnectionTimeSeconds;
         }
+        break;
+    case LEOSIM_EXTERNAL_WEIGHT_LOAD:
+        weight = calculator->GetIslLoadCost(source, destination);
         break;
     case LEOSIM_EXTERNAL_HOP_COUNT:
         weight = 1.0;

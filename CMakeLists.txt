@@ -6,6 +6,8 @@ build_lib(
     model/leosim-beam-layout-engine.cc
     model/leosim-beam-hopping-manager.cc
     model/leosim-beam-load-balancer.cc
+    model/leosim-isl-load-model.cc
+    model/leosim-tcp-traffic-application.cc
     model/leosim-sinr-engine.cc
     model/leosim-channel.cc
     model/leosim-loader.cc
@@ -34,6 +36,8 @@ build_lib(
     model/leosim-beam-layout-engine.h
     model/leosim-beam-hopping-manager.h
     model/leosim-beam-load-balancer.h
+    model/leosim-isl-load-model.h
+    model/leosim-tcp-traffic-application.h
     model/leosim-sinr-engine.h
     model/leosim-channel.h
     model/leosim-loader.h

@@ -39,6 +39,8 @@
 #include "leosim-beam-load-balancer.h"
 #include "leosim-channel.h"
 #include "leosim-channel-model.h"
+#include "leosim-isl-load-model.h"
+#include "leosim-tcp-traffic-application.h"
 #include "leosim-loader.h"
 #include "leosim-mobility-model.h"
 #include "leosim-multi-beam-model.h"

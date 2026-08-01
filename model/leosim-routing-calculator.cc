@@ -16,6 +16,7 @@
  */
 
 #include "leosim-routing-calculator.h"
+#include "leosim-isl-load-model.h"
 #include "leosim-beam-manager.h"
 #include "leosim-mobility-model.h"
 #include "leosim-task-profiler.h"
@@ -149,6 +150,29 @@ Ptr<LeoSimChannelModel>
 LeoSimRoutingCalculator::GetIslChannelModel() const
 {
     return m_islChannelModel;
+}
+
+void
+LeoSimRoutingCalculator::SetIslLoadModel(Ptr<LeoSimIslLoadModel> loadModel)
+{
+    NS_LOG_FUNCTION(this << loadModel);
+    m_islLoadModel = loadModel;
+}
+
+Ptr<LeoSimIslLoadModel>
+LeoSimRoutingCalculator::GetIslLoadModel() const
+{
+    return m_islLoadModel;
+}
+
+double
+LeoSimRoutingCalculator::GetIslLoadCost(Ptr<Node> source, Ptr<Node> destination) const
+{
+    if (!source || !destination || !m_islLoadModel)
+    {
+        return 1.0;
+    }
+    return m_islLoadModel->GetRoutingCost(source->GetId(), destination->GetId());
 }
 
 void
@@ -1080,6 +1104,8 @@ LeoSimRoutingCalculator::GetLinkMetricValue(Ptr<Node> source,
             return 1.0e-12;
         }
         return 1.0 / quality.remainingConnectionTimeSeconds;
+    case LEOSIM_METRIC_LOAD:
+        return GetIslLoadCost(source, destination);
     default:
         return 1.0;
     }

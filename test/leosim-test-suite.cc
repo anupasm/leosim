@@ -26,10 +26,16 @@
 #include "ns3/constant-position-mobility-model.h"
 #include "ns3/constant-velocity-mobility-model.h"
 #include "ns3/internet-stack-helper.h"
+#include "ns3/ipv4-address-helper.h"
 #include "ns3/node-container.h"
+#include "ns3/on-off-helper.h"
+#include "ns3/packet-sink.h"
+#include "ns3/packet-sink-helper.h"
+#include "ns3/point-to-point-helper.h"
 #include "ns3/point-to-point-channel.h"
 #include "ns3/point-to-point-net-device.h"
 #include "ns3/simulator.h"
+#include "ns3/string.h"
 #include "ns3/nstime.h"
 
 #include <cstdio>
@@ -2235,6 +2241,80 @@ class LeoSimTestRoutingChoosesLowestDistancePath : public TestCase
   void DoRun() override;
 };
 
+class LeoSimTestRoutingChoosesLowestLoadPath : public TestCase
+{
+  public:
+    LeoSimTestRoutingChoosesLowestLoadPath()
+        : TestCase("LeoSim routing chooses the path with most residual ISL capacity")
+    {
+    }
+
+  private:
+    void DoRun() override
+    {
+        NodeContainer sats;
+        sats.Create(4);
+        Ptr<Node> src = sats.Get(0);
+        Ptr<Node> midA = sats.Get(1);
+        Ptr<Node> midB = sats.Get(2);
+        Ptr<Node> dst = sats.Get(3);
+        for (uint32_t i = 0; i < sats.GetN(); ++i)
+        {
+            SetTestPosition(sats.Get(i), Vector(i * 1000.0, 0.0, 550000.0));
+        }
+
+        Ptr<LeoSimChannelModel> ground = CreateObject<LeoSimChannelModel>();
+        Ptr<LeoSimChannelModel> isl = CreateObject<LeoSimChannelModel>();
+        isl->SetIslMaxDistance(1000000.0);
+        isl->AddIslLink(src, midA);
+        isl->AddIslLink(midA, dst);
+        isl->AddIslLink(src, midB);
+        isl->AddIslLink(midB, dst);
+        isl->UpdateAllLinks();
+
+        Ptr<LeoSimIslLoadModel> load = CreateObject<LeoSimIslLoadModel>();
+        load->SetSeed(12345);
+        load->SetLoadRange(0.05, 0.95);
+        for (uint32_t i = 0; i < sats.GetN(); ++i)
+        {
+            load->RegisterSatellite(sats.Get(i)->GetId(), 1000000000000ULL);
+        }
+        const uint64_t capacity = 10000000000ULL;
+        const std::vector<std::pair<Ptr<Node>, Ptr<Node>>> edges = {
+            {src, midA}, {midA, dst}, {src, midB}, {midB, dst}};
+        for (const auto& edge : edges)
+        {
+            load->RegisterDirectedIsl(edge.first->GetId(), edge.second->GetId(), capacity);
+            load->RegisterDirectedIsl(edge.second->GetId(), edge.first->GetId(), capacity);
+        }
+        load->Generate(0);
+
+        Ptr<LeoSimRoutingCalculator> calc = CreateObject<LeoSimRoutingCalculator>();
+        calc->SetChannelModel(ground);
+        calc->SetIslChannelModel(isl);
+        calc->SetIslLoadModel(load);
+
+        const double costA = calc->GetIslLoadCost(src, midA) +
+                             calc->GetIslLoadCost(midA, dst);
+        const double costB = calc->GetIslLoadCost(src, midB) +
+                             calc->GetIslLoadCost(midB, dst);
+        Ptr<Node> expectedMid = costA < costB ? midA : midB;
+
+        LeoSimRoute route = calc->ComputeRoute(src,
+                                               dst,
+                                               LeoSimRoutingCalculator::LEOSIM_METRIC_LOAD,
+                                               LeoSimRoutingCalculator::LEOSIM_PATH_ISL_ONLY);
+        NS_TEST_ASSERT_MSG_EQ(route.valid, true, "Load-weighted ISL route should be valid");
+        NS_TEST_ASSERT_MSG_EQ(route.path.size(),
+                              static_cast<size_t>(3),
+                              "Load route should contain one intermediate satellite");
+        NS_TEST_ASSERT_MSG_EQ(route.path[1],
+                              expectedMid,
+                              "Load metric must select the lower total utilization cost");
+        Simulator::Destroy();
+    }
+};
+
 LeoSimTestRoutingChoosesLowestDistancePath::LeoSimTestRoutingChoosesLowestDistancePath()
   : TestCase("LeoSim routing chooses lowest total-distance path")
 {
@@ -3009,6 +3089,242 @@ LeoSimTestAttenuationResultCompleteness::DoRun()
  * \ingroup leosim-test-suite
  * \brief LeoSim test suite
  */
+class LeoSimTestSyntheticIslUniformDistribution : public TestCase
+{
+  public:
+    LeoSimTestSyntheticIslUniformDistribution()
+        : TestCase("synthetic directed-ISL load follows the configured uniform distribution")
+    {
+    }
+
+  private:
+    void DoRun() override
+    {
+        constexpr uint32_t sampleCount = 10000;
+        constexpr double minimumLoad = 0.1;
+        constexpr double maximumLoad = 0.9;
+        constexpr double expectedMean = (minimumLoad + maximumLoad) / 2.0;
+
+        Ptr<LeoSimIslLoadModel> model = CreateObject<LeoSimIslLoadModel>();
+        model->SetSeed(12345);
+        model->SetDistribution("uniform");
+        model->RegisterSatellite(0, 20000000);
+        for (uint32_t destination = 1; destination <= sampleCount; ++destination)
+        {
+            model->RegisterDirectedIsl(0, destination, 1000);
+        }
+        model->Generate(0);
+
+        const auto records = model->GetAllIslLoads();
+        NS_TEST_ASSERT_MSG_EQ(records.size(),
+                              static_cast<size_t>(sampleCount),
+                              "Uniform-load test did not generate every requested sample");
+
+        double sum = 0.0;
+        for (const auto& record : records)
+        {
+            NS_TEST_ASSERT_MSG_EQ((record.requestedSyntheticLoad >= minimumLoad &&
+                                   record.requestedSyntheticLoad <= maximumLoad),
+                                  true,
+                                  "Uniform synthetic load fell outside configured bounds");
+            sum += record.requestedSyntheticLoad;
+        }
+        const double sampleMean = sum / static_cast<double>(records.size());
+        NS_TEST_ASSERT_MSG_EQ_TOL(sampleMean,
+                                  expectedMean,
+                                  0.01,
+                                  "Uniform synthetic-load mean differs from its expectation");
+
+        model->Generate(0);
+        const auto repeated = model->GetAllIslLoads();
+        for (size_t i = 0; i < records.size(); ++i)
+        {
+            NS_TEST_ASSERT_MSG_EQ(records[i].requestedBackgroundBps,
+                                  repeated[i].requestedBackgroundBps,
+                                  "Uniform load changed when regenerating the same epoch");
+        }
+
+        Simulator::Destroy();
+    }
+};
+
+class LeoSimTestRealPacketsRespectSyntheticCapacity : public TestCase
+{
+  public:
+    LeoSimTestRealPacketsRespectSyntheticCapacity()
+        : TestCase("real packets above enforced residual ISL capacity are dropped")
+    {
+    }
+
+  private:
+    void DoRun() override
+    {
+        NodeContainer nodes;
+        nodes.Create(2);
+
+        PointToPointHelper p2p;
+        p2p.SetDeviceAttribute("DataRate", StringValue("1Mbps"));
+        p2p.SetChannelAttribute("Delay", StringValue("1ms"));
+        p2p.SetQueue("ns3::DropTailQueue<Packet>", "MaxSize", StringValue("1p"));
+        NetDeviceContainer devices = p2p.Install(nodes);
+
+        InternetStackHelper internet;
+        internet.Install(nodes);
+        Ipv4AddressHelper addresses;
+        addresses.SetBase("10.99.0.0", "255.255.255.0");
+        Ipv4InterfaceContainer interfaces = addresses.Assign(devices);
+
+        Ptr<LeoSimIslLoadModel> load = CreateObject<LeoSimIslLoadModel>();
+        load->SetSeed(1);
+        load->SetLoadRange(0.0, 0.0);
+        load->RegisterSatellite(nodes.Get(0)->GetId(), 8000);
+        load->RegisterSatellite(nodes.Get(1)->GetId(), 8000);
+        load->RegisterDirectedIsl(nodes.Get(0)->GetId(), nodes.Get(1)->GetId(), 1000000);
+        load->RegisterDirectedIsl(nodes.Get(1)->GetId(), nodes.Get(0)->GetId(), 1000000);
+        load->Generate(0);
+        load->ApplyToIslDevices(devices);
+
+        Ptr<PointToPointNetDevice> sender =
+            DynamicCast<PointToPointNetDevice>(devices.Get(0));
+        DataRateValue enforcedRate;
+        sender->GetAttribute("DataRate", enforcedRate);
+        NS_TEST_ASSERT_MSG_EQ(enforcedRate.Get().GetBitRate(),
+                              8000,
+                              "Directional ISL device did not receive satellite capacity limit");
+
+        const uint16_t port = 9999;
+        PacketSinkHelper sink("ns3::UdpSocketFactory",
+                              InetSocketAddress(Ipv4Address::GetAny(), port));
+        ApplicationContainer sinkApps = sink.Install(nodes.Get(1));
+        sinkApps.Start(Seconds(0.0));
+        sinkApps.Stop(Seconds(1.5));
+
+        OnOffHelper source("ns3::UdpSocketFactory",
+                           InetSocketAddress(interfaces.GetAddress(1), port));
+        source.SetAttribute("DataRate", StringValue("1Mbps"));
+        source.SetAttribute("PacketSize", UintegerValue(100));
+        source.SetAttribute("OnTime", StringValue("ns3::ConstantRandomVariable[Constant=1]"));
+        source.SetAttribute("OffTime", StringValue("ns3::ConstantRandomVariable[Constant=0]"));
+        ApplicationContainer sourceApps = source.Install(nodes.Get(0));
+        sourceApps.Start(Seconds(0.1));
+        sourceApps.Stop(Seconds(1.1));
+
+        Simulator::Stop(Seconds(1.5));
+        Simulator::Run();
+        Ptr<PacketSink> packetSink = DynamicCast<PacketSink>(sinkApps.Get(0));
+        NS_TEST_ASSERT_MSG_GT(packetSink->GetTotalRx(),
+                              0,
+                              "Capacity limiter should still deliver traffic within its budget");
+        NS_TEST_ASSERT_MSG_LT(packetSink->GetTotalRx(),
+                              5000,
+                              "Offered traffic above residual capacity was not dropped by the queue");
+        Simulator::Destroy();
+    }
+};
+
+class LeoSimTestSyntheticLoadOutput : public TestCase
+{
+  public:
+    LeoSimTestSyntheticLoadOutput()
+        : TestCase("synthetic ISL load CSV and statistics JSON expose auditable metrics")
+    {
+    }
+
+  private:
+    void DoRun() override
+    {
+        Ptr<LeoSimIslLoadModel> load = CreateObject<LeoSimIslLoadModel>();
+        load->SetLoadRange(0.75, 0.75);
+        load->RegisterSatellite(1, 500);
+        load->RegisterDirectedIsl(1, 2, 1000);
+        load->Generate(0);
+
+        const std::string csv = CreateTempDirFilename("synthetic-isl-load.csv");
+        load->WriteCsv(csv);
+        std::ifstream csvInput(csv);
+        std::stringstream csvText;
+        csvText << csvInput.rdbuf();
+        NS_TEST_ASSERT_MSG_NE(csvText.str().find("requested_background_bps"),
+                              std::string::npos,
+                              "Load CSV omitted requested background load");
+        NS_TEST_ASSERT_MSG_NE(csvText.str().find("dropped_background_bps"),
+                              std::string::npos,
+                              "Load CSV omitted dropped background load");
+        NS_TEST_ASSERT_MSG_NE(csvText.str().find("effective_capacity_bps"),
+                              std::string::npos,
+                              "Load CSV omitted effective capacity");
+        NS_TEST_ASSERT_MSG_NE(csvText.str().find("routing_cost"),
+                              std::string::npos,
+                              "Load CSV omitted routing edge cost");
+
+        Ptr<LeoSimStatisticsHelper> statistics = CreateObject<LeoSimStatisticsHelper>();
+        statistics->SetIslLoadModel(load);
+        const std::string json = CreateTempDirFilename("synthetic-isl-load.json");
+        statistics->WriteSummary(json, false);
+        std::ifstream jsonInput(json);
+        std::stringstream jsonText;
+        jsonText << jsonInput.rdbuf();
+        NS_TEST_ASSERT_MSG_NE(jsonText.str().find("\"synthetic_isl_load\""),
+                              std::string::npos,
+                              "Statistics JSON omitted synthetic ISL load summary");
+        NS_TEST_ASSERT_MSG_NE(jsonText.str().find("\"mean_routing_cost\""),
+                              std::string::npos,
+                              "Statistics JSON omitted aggregate routing cost");
+        Simulator::Destroy();
+    }
+};
+
+class LeoSimTestInactiveIslsDoNotConsumeCapacity : public TestCase
+{
+  public:
+    LeoSimTestInactiveIslsDoNotConsumeCapacity()
+        : TestCase("inactive candidate ISLs do not consume satellite capacity")
+    {
+    }
+
+  private:
+    void DoRun() override
+    {
+        NodeContainer nodes;
+        nodes.Create(3);
+        for (uint32_t i = 0; i < nodes.GetN(); ++i)
+        {
+            SetTestPosition(nodes.Get(i), Vector(i * 1000.0, 0.0, 550000.0));
+        }
+        Ptr<LeoSimChannelModel> channel = CreateObject<LeoSimChannelModel>();
+        channel->SetIslMaxDistance(1000000.0);
+        channel->AddIslLink(nodes.Get(0), nodes.Get(1));
+        channel->UpdateAllLinks();
+
+        Ptr<LeoSimIslLoadModel> load = CreateObject<LeoSimIslLoadModel>();
+        load->SetLoadRange(0.5, 0.5);
+        load->RegisterSatellite(nodes.Get(0)->GetId(), 1000);
+        load->RegisterDirectedIsl(nodes.Get(0)->GetId(), nodes.Get(1)->GetId(), 1000);
+        load->RegisterDirectedIsl(nodes.Get(0)->GetId(), nodes.Get(2)->GetId(), 1000);
+        load->AttachChannelModel(channel, NetDeviceContainer());
+        load->Generate(0);
+
+        LeoSimIslLoadRecord active;
+        LeoSimIslLoadRecord inactive;
+        load->GetIslLoad(nodes.Get(0)->GetId(), nodes.Get(1)->GetId(), active);
+        load->GetIslLoad(nodes.Get(0)->GetId(), nodes.Get(2)->GetId(), inactive);
+        NS_TEST_ASSERT_MSG_EQ(active.active, true, "UP ISL was not marked active");
+        NS_TEST_ASSERT_MSG_EQ(inactive.active, false, "Missing/down ISL was charged as active");
+        NS_TEST_ASSERT_MSG_EQ(inactive.admittedBackgroundBps,
+                              0,
+                              "Inactive ISL consumed admitted satellite capacity");
+        LeoSimSatelliteIslCapacity satellite;
+        load->GetSatelliteCapacity(nodes.Get(0)->GetId(), satellite);
+        NS_TEST_ASSERT_MSG_EQ(satellite.backgroundBps,
+                              active.admittedBackgroundBps,
+                              "Satellite aggregate included inactive candidate demand");
+        NS_TEST_ASSERT_MSG_GT(active.effectiveCapacityBps,
+                              0,
+                              "Active ISL received zero capacity despite available budget");
+        Simulator::Destroy();
+    }
+};
+
 class LeoSimTestSuite : public TestSuite
 {
 // marker - will be replaced by real class body below
@@ -3019,6 +3335,97 @@ class LeoSimTestSuite : public TestSuite
 LeoSimTestSuite::LeoSimTestSuite()
     : TestSuite("leosim", Type::UNIT)
 {
+    class DeterministicIslLoadTest : public TestCase
+    {
+      public:
+        DeterministicIslLoadTest()
+            : TestCase("synthetic directed-ISL loads are deterministic and aggregated")
+        {
+        }
+
+      private:
+        void DoRun() override
+        {
+            Ptr<LeoSimIslLoadModel> first = CreateObject<LeoSimIslLoadModel>();
+            first->SetSeed(77);
+            first->SetLoadRange(0.2, 0.7);
+            first->RegisterSatellite(10, 3000);
+            first->RegisterSatellite(11, 3000);
+            first->RegisterDirectedIsl(10, 11, 1000);
+            first->RegisterDirectedIsl(11, 10, 1000);
+            first->Generate(4);
+
+            LeoSimIslLoadRecord forward;
+            LeoSimIslLoadRecord reverse;
+            NS_TEST_ASSERT_MSG_EQ(first->GetIslLoad(10, 11, forward),
+                                  true,
+                                  "Forward directed ISL was not registered");
+            NS_TEST_ASSERT_MSG_EQ(first->GetIslLoad(11, 10, reverse),
+                                  true,
+                                  "Reverse directed ISL was not registered");
+            NS_TEST_ASSERT_MSG_EQ((forward.requestedSyntheticLoad >= 0.2 &&
+                                   forward.requestedSyntheticLoad <= 0.7),
+                                  true,
+                                  "Generated load is outside its configured range");
+
+            Ptr<LeoSimIslLoadModel> rerun = CreateObject<LeoSimIslLoadModel>();
+            rerun->SetSeed(77);
+            rerun->SetLoadRange(0.2, 0.7);
+            rerun->RegisterSatellite(10, 3000);
+            rerun->RegisterDirectedIsl(10, 11, 1000);
+            rerun->Generate(4);
+            LeoSimIslLoadRecord repeated;
+            rerun->GetIslLoad(10, 11, repeated);
+            NS_TEST_ASSERT_MSG_EQ(forward.requestedBackgroundBps,
+                                  repeated.requestedBackgroundBps,
+                                  "Same seed/link/epoch must reproduce the same load");
+
+            rerun->Generate(5);
+            LeoSimIslLoadRecord nextEpoch;
+            rerun->GetIslLoad(10, 11, nextEpoch);
+            NS_TEST_ASSERT_MSG_NE(forward.requestedBackgroundBps,
+                                  nextEpoch.requestedBackgroundBps,
+                                  "A different epoch should produce a different load");
+
+            LeoSimSatelliteIslCapacity satellite;
+            first->GetSatelliteCapacity(10, satellite);
+            NS_TEST_ASSERT_MSG_EQ(satellite.backgroundBps,
+                                  forward.admittedBackgroundBps,
+                                  "Satellite state must aggregate outgoing directed ISLs");
+
+            Ptr<LeoSimIslLoadModel> constrained = CreateObject<LeoSimIslLoadModel>();
+            constrained->SetSeed(77);
+            constrained->SetLoadRange(1.0, 1.0);
+            constrained->RegisterSatellite(20, 1000);
+            constrained->RegisterDirectedIsl(20, 21, 1000);
+            constrained->RegisterDirectedIsl(20, 22, 1000);
+            constrained->Generate(0);
+
+            LeoSimSatelliteIslCapacity constrainedSatellite;
+            constrained->GetSatelliteCapacity(20, constrainedSatellite);
+            NS_TEST_ASSERT_MSG_EQ(constrainedSatellite.backgroundBps,
+                                  1000,
+                                  "Admitted synthetic traffic must not exceed satellite capacity");
+            NS_TEST_ASSERT_MSG_EQ(constrainedSatellite.droppedBackgroundBps,
+                                  1000,
+                                  "Traffic above satellite capacity must be recorded as dropped");
+            LeoSimIslLoadRecord constrainedLink;
+            constrained->GetIslLoad(20, 21, constrainedLink);
+            NS_TEST_ASSERT_MSG_EQ(constrainedLink.admittedBackgroundBps,
+                                  500,
+                                  "Capacity must be shared proportionally across outgoing ISLs");
+            NS_TEST_ASSERT_MSG_EQ(constrainedLink.droppedBackgroundBps,
+                                  500,
+                                  "Each ISL must record its rejected background demand");
+            Simulator::Destroy();
+        }
+    };
+
+    AddTestCase(new DeterministicIslLoadTest, TestCase::Duration::QUICK);
+    AddTestCase(new LeoSimTestSyntheticIslUniformDistribution, TestCase::Duration::QUICK);
+    AddTestCase(new LeoSimTestRealPacketsRespectSyntheticCapacity, TestCase::Duration::QUICK);
+    AddTestCase(new LeoSimTestSyntheticLoadOutput, TestCase::Duration::QUICK);
+    AddTestCase(new LeoSimTestInactiveIslsDoNotConsumeCapacity, TestCase::Duration::QUICK);
     AddTestCase(new LeoSimTestCase1, TestCase::Duration::QUICK);
     AddTestCase(new LeoSimTestSpatialIslDegreeAndConnectivity, TestCase::Duration::QUICK);
     AddTestCase(new LeoSimTestDynamicIslNeighborReselection, TestCase::Duration::QUICK);
@@ -3057,6 +3464,7 @@ LeoSimTestSuite::LeoSimTestSuite()
     AddTestCase(new LeoSimTestBeamGeometryUpdatesWithMotion, TestCase::Duration::QUICK);
     AddTestCase(new LeoSimTestStaticRoutingNoPeriodicRefresh, TestCase::Duration::QUICK);
     AddTestCase(new LeoSimTestRoutingChoosesLowestDistancePath, TestCase::Duration::QUICK);
+    AddTestCase(new LeoSimTestRoutingChoosesLowestLoadPath, TestCase::Duration::QUICK);
     AddTestCase(new LeoSimTestIslRouteMetricsUseIslQuality, TestCase::Duration::QUICK);
     AddTestCase(new LeoSimTestIslRemainingConnectionTime, TestCase::Duration::QUICK);
     // Phase 9 Weather Model Tests (Tests 10–18)

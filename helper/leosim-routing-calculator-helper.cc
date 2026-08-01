@@ -93,6 +93,7 @@ LeoSimRoutingCalculatorHelper::LogRoute(
     case LeoSimRoutingCalculator::LEOSIM_METRIC_REMAINING_LIFETIME:
         metricName = "lifetime";
         break;
+    case LeoSimRoutingCalculator::LEOSIM_METRIC_LOAD: metricName = "load"; break;
     default: break;
     }
 

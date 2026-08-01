@@ -16,6 +16,7 @@
 #include "ns3/leosim-channel-model.h"
 #include "ns3/leosim-device-installer.h"
 #include "ns3/leosim-external-routing-helper.h"
+#include "ns3/leosim-isl-load-model.h"
 #include "ns3/leosim-loader-helper.h"
 #include "ns3/leosim-loader.h"
 #include "ns3/leosim-mobility-helper.h"
@@ -25,6 +26,7 @@
 #include "ns3/leosim-routing-calculator.h"
 #include "ns3/leosim-statistics-helper.h"
 #include "ns3/leosim-task-profiler.h"
+#include "ns3/leosim-tcp-traffic-application.h"
 #include "ns3/leosim-visualization-helper.h"
 #include "ns3/mobility-module.h"
 #include "ns3/network-module.h"
@@ -34,6 +36,7 @@
 #include <chrono>
 #include <iomanip>
 #include <iostream>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -157,10 +160,12 @@ ParseRoutingMetric(const std::string& value)
         return LeoSimRoutingCalculator::LEOSIM_METRIC_SIGNAL_STRENGTH;
     if (value == "lifetime" || value == "remaining-lifetime")
         return LeoSimRoutingCalculator::LEOSIM_METRIC_REMAINING_LIFETIME;
+    if (value == "load")
+        return LeoSimRoutingCalculator::LEOSIM_METRIC_LOAD;
 
     NS_FATAL_ERROR("Unknown routingMetric '" << value
                                               << "'; use hop, distance, path-loss, snr, "
-                                                 "signal-strength, or lifetime");
+                                                 "signal-strength, lifetime, or load");
     return LeoSimRoutingCalculator::LEOSIM_METRIC_HOP_COUNT;
 }
 
@@ -243,13 +248,13 @@ InstallSingleTcpFlow(NodeContainer ueNodes,
     apps.Start(Seconds(startTime > 0.1 ? startTime - 0.1 : 0.0));
     apps.Stop(Seconds(stopTime));
 
-    OnOffHelper sourceHelper("ns3::TcpSocketFactory", InetSocketAddress(serverAddress, port));
-    sourceHelper.SetAttribute("DataRate", DataRateValue(DataRate(tcpRate)));
-    sourceHelper.SetAttribute("PacketSize", UintegerValue(packetSize));
-    sourceHelper.SetAttribute("OnTime", StringValue("ns3::ConstantRandomVariable[Constant=1]"));
-    sourceHelper.SetAttribute("OffTime", StringValue("ns3::ConstantRandomVariable[Constant=0]"));
-
-    ApplicationContainer sourceApps = sourceHelper.Install(ueNode);
+    Ptr<LeoSimTcpTrafficApplication> source = CreateObject<LeoSimTcpTrafficApplication>();
+    source->Configure(InetSocketAddress(serverAddress, port),
+                      DataRate(tcpRate),
+                      packetSize,
+                      Seconds(1.0));
+    ueNode->AddApplication(source);
+    ApplicationContainer sourceApps(source);
     sourceApps.Start(Seconds(startTime));
     sourceApps.Stop(Seconds(stopTime));
     apps.Add(sourceApps);
@@ -336,7 +341,7 @@ main(int argc, char* argv[])
     std::string satelliteFile = leosimDataDir + "/prepro/satellite_mobility.tcl";
     std::string groundDeviceFile;
     std::string outputPrefix = "leosim-param-scenario";
-    double simTime = 400.0;
+    double simTime = 200.0;
     bool useTrace = true;
     bool verbose = false;
 
@@ -361,6 +366,12 @@ main(int argc, char* argv[])
     double islAntennaGain = 35.0;
     std::string islDataRate = "10Gbps";
     std::string islDelay = "100us";
+    bool enableSyntheticIslLoad = true;
+    uint64_t syntheticLoadSeed = 12345;
+    double syntheticLoadMin = 0.1;
+    double syntheticLoadMax = 0.9;
+    std::string syntheticLoadDistribution = "uniform";
+    std::string satelliteIslCapacity = "30Gbps";
 
     bool enableDynamicRouting = true;
     double routingUpdateInterval = 30.0;
@@ -426,10 +437,28 @@ main(int argc, char* argv[])
     cmd.AddValue("islAntennaGain", "ISL antenna gain in dB", islAntennaGain);
     cmd.AddValue("islDataRate", "ISL point-to-point data rate", islDataRate);
     cmd.AddValue("islDelay", "ISL propagation delay, e.g. 100us", islDelay);
+    cmd.AddValue("enableSyntheticIslLoad",
+                 "Generate deterministic synthetic utilization records for directed ISLs",
+                 enableSyntheticIslLoad);
+    cmd.AddValue("syntheticLoadSeed",
+                 "Seed used to deterministically generate directed-ISL load",
+                 syntheticLoadSeed);
+    cmd.AddValue("syntheticLoadMin",
+                 "Minimum generated synthetic ISL utilization in [0,1]",
+                 syntheticLoadMin);
+    cmd.AddValue("syntheticLoadMax",
+                 "Maximum generated synthetic ISL utilization in [0,1]",
+                 syntheticLoadMax);
+    cmd.AddValue("syntheticLoadDistribution",
+                 "Synthetic ISL load distribution (currently: uniform)",
+                 syntheticLoadDistribution);
+    cmd.AddValue("satelliteIslCapacity",
+                 "Maximum aggregate outgoing ISL capacity recorded per satellite",
+                 satelliteIslCapacity);
     cmd.AddValue("enableDynamicRouting", "Recompute routes periodically during the run", enableDynamicRouting);
     cmd.AddValue("routingUpdateInterval", "Dynamic routing update interval in seconds", routingUpdateInterval);
     cmd.AddValue("routingMetric",
-                 "Dijkstra metric: hop, distance, path-loss, snr, signal-strength, or lifetime",
+                 "Dijkstra metric: hop, distance, path-loss, snr, signal-strength, lifetime, or load",
                  routingMetricName);
     cmd.AddValue("useRouteTreeCache",
                  "Use one cached reverse shortest-path tree per traffic destination "
@@ -496,6 +525,13 @@ main(int argc, char* argv[])
         NS_FATAL_ERROR("statisticsInterval must be greater than zero");
     }
     const auto routingMetric = ParseRoutingMetric(routingMetricName);
+    if (routingMetric == LeoSimRoutingCalculator::LEOSIM_METRIC_LOAD &&
+        !enableSyntheticIslLoad)
+    {
+        enableSyntheticIslLoad = true;
+        std::cout << "routingMetric=load: automatically enabling deterministic synthetic ISL load"
+                  << std::endl;
+    }
 
     Time::SetResolution(Time::NS);
 
@@ -707,6 +743,7 @@ main(int argc, char* argv[])
     timer.Log("access device installation");
 
     NetDeviceContainer islDevices;
+    Ptr<LeoSimIslLoadModel> syntheticIslLoadModel;
     LeoSimDeviceInstaller islInstaller;
     if (enableIsl && islChannel)
     {
@@ -723,6 +760,55 @@ main(int argc, char* argv[])
         islDevices = islInstaller.Install(satelliteNodes, NodeContainer());
         islInstaller.ApplySharingRates(islDevices);
         islInstaller.EnableLinkStateCallbacks(islChannel);
+
+        if (enableSyntheticIslLoad)
+        {
+            syntheticIslLoadModel = CreateObject<LeoSimIslLoadModel>();
+            syntheticIslLoadModel->SetSeed(syntheticLoadSeed);
+            syntheticIslLoadModel->SetLoadRange(syntheticLoadMin, syntheticLoadMax);
+            syntheticIslLoadModel->SetDistribution(syntheticLoadDistribution);
+
+            const uint64_t satelliteCapacityBps = DataRate(satelliteIslCapacity).GetBitRate();
+            const uint64_t linkCapacityBps = DataRate(islDataRate).GetBitRate();
+            std::map<uint32_t, uint32_t> nodeIdToSatelliteId;
+            for (uint32_t i = 0; i < satelliteNodes.GetN(); ++i)
+            {
+                const uint32_t nodeId = satelliteNodes.Get(i)->GetId();
+                nodeIdToSatelliteId[nodeId] = nodeId;
+                syntheticIslLoadModel->RegisterSatellite(nodeId, satelliteCapacityBps);
+            }
+
+            for (uint32_t i = 0; i + 1 < islDevices.GetN(); i += 2)
+            {
+                Ptr<Node> nodeA = islDevices.Get(i)->GetNode();
+                Ptr<Node> nodeB = islDevices.Get(i + 1)->GetNode();
+                if (!nodeA || !nodeB)
+                {
+                    continue;
+                }
+                const auto satA = nodeIdToSatelliteId.find(nodeA->GetId());
+                const auto satB = nodeIdToSatelliteId.find(nodeB->GetId());
+                if (satA == nodeIdToSatelliteId.end() || satB == nodeIdToSatelliteId.end())
+                {
+                    continue;
+                }
+                syntheticIslLoadModel->RegisterDirectedIsl(satA->second,
+                                                            satB->second,
+                                                            linkCapacityBps);
+                syntheticIslLoadModel->RegisterDirectedIsl(satB->second,
+                                                            satA->second,
+                                                            linkCapacityBps);
+            }
+            syntheticIslLoadModel->AttachChannelModel(islChannel, islDevices);
+            syntheticIslLoadModel->Generate(0);
+            syntheticIslLoadModel->ApplyToIslDevices(islDevices);
+            const std::string syntheticLoadCsvFile = outputPrefix + "-isl-load.csv";
+            syntheticIslLoadModel->EnableCsvOutput(syntheticLoadCsvFile);
+            std::cout << "Generated deterministic synthetic load for "
+                      << syntheticIslLoadModel->GetAllIslLoads().size()
+                      << " directed ISLs (seed=" << syntheticLoadSeed << ")\n"
+                      << "Synthetic ISL load data: " << syntheticLoadCsvFile << std::endl;
+        }
         timer.Log("ISL device installation");
     }
 
@@ -804,6 +890,7 @@ main(int argc, char* argv[])
     Ptr<LeoSimRoutingCalculator> routingCalculator =
         routingHelper.CreateUnifiedRoutingCalculator(accessChannel, islChannel, verbose);
     routingCalculator->SetOperatorModel(operatorModel);
+    routingCalculator->SetIslLoadModel(syntheticIslLoadModel);
     timer.Log("routing calculator construction");
 
     // === Beam Management & Handover (3GPP NTN CHO) ===
@@ -911,6 +998,9 @@ main(int argc, char* argv[])
         case LeoSimRoutingCalculator::LEOSIM_METRIC_REMAINING_LIFETIME:
             treeMetric =
                 LeoSimExternalRoutingHelper::LEOSIM_EXTERNAL_WEIGHT_REMAINING_LIFETIME;
+            break;
+        case LeoSimRoutingCalculator::LEOSIM_METRIC_LOAD:
+            treeMetric = LeoSimExternalRoutingHelper::LEOSIM_EXTERNAL_WEIGHT_LOAD;
             break;
         case LeoSimRoutingCalculator::LEOSIM_METRIC_HOP_COUNT:
             break;
@@ -1042,6 +1132,7 @@ main(int argc, char* argv[])
         statistics = CreateObject<LeoSimStatisticsHelper>();
         statistics->SetFlowMonitor(flowMonitor, classifier);
         statistics->SetBeamManager(beamManager);
+        statistics->SetIslLoadModel(syntheticIslLoadModel);
         if (!statistics->AttachChannelModel(accessChannel))
         {
             std::cerr << "Warning: failed to attach statistics to access channel traces"

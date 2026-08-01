@@ -2,9 +2,9 @@
 #SBATCH --job-name=leosim-routing
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=9
+#SBATCH --cpus-per-task=6
 #SBATCH --time=24:00:00
-#SBATCH --array=0-5%5
+#SBATCH --array=0-6%7
 #SBATCH --output=logs/%x-%A_%a.out
 #SBATCH --error=logs/%x-%A_%a.err
 
@@ -25,8 +25,10 @@ if command -v module >/dev/null 2>&1; then
   module load "${APPTAINER_MODULE:-apptainer/1.3.4-gcc-11.5.0-ojp6nts}"
 fi
 
-# Matrix: 6 metrics x 1 constellation size x 1 duration x 1 update interval.
-METRICS=(hop distance path-loss snr signal-strength lifetime)
+# Matrix: 7 metrics x 1 constellation size x 1 duration x 1 update interval.
+# Every metric experiences the same synthetic ISL load; only its routing edge
+# criterion changes. The load experiment routes on residual capacity.
+METRICS=(hop distance path-loss snr signal-strength lifetime load)
 SATELLITE_COUNTS=(1000)
 SIM_TIMES=(1200)
 UPDATE_INTERVALS=(30)
@@ -72,9 +74,22 @@ tle_timestep="${TLE_TIMESTEP:-5}"
 allocated_cpus="${SLURM_CPUS_PER_TASK:-1}"
 tle_workers="${TLE_WORKERS:-${allocated_cpus}}"
 use_route_tree_cache="${USE_ROUTE_TREE_CACHE:-1}"
-route_tree_workers="${ROUTE_TREE_WORKERS:-${allocated_cpus}}"
+# Reserve one CPU for ns-3/orchestration. With seven concurrent array tasks,
+# the default six-CPU allocation uses 42 of the server's 47 CPUs; each routing
+# engine therefore gets five workers.
+if (( allocated_cpus > 1 )); then
+  default_route_tree_workers=$((allocated_cpus - 1))
+else
+  default_route_tree_workers=1
+fi
+route_tree_workers="${ROUTE_TREE_WORKERS:-${default_route_tree_workers}}"
 route_tree_max_entries="${ROUTE_TREE_MAX_ENTRIES:-10000000}"
 container_route_tree_engine="${CONTAINER_NS3_ROOT}/contrib/leosim/utils/rengine/leosim-rengine"
+enable_synthetic_isl_load="${ENABLE_SYNTHETIC_ISL_LOAD:-1}"
+synthetic_load_seed="${SYNTHETIC_LOAD_SEED:-12345}"
+synthetic_load_min="${SYNTHETIC_LOAD_MIN:-0.1}"
+synthetic_load_max="${SYNTHETIC_LOAD_MAX:-0.9}"
+satellite_isl_capacity="${SATELLITE_ISL_CAPACITY:-30Gbps}"
 
 for worker_setting in allocated_cpus tle_workers route_tree_workers; do
   worker_value="${!worker_setting}"
@@ -161,6 +176,11 @@ scenario+=" --routeTreeMaxEntries=${route_tree_max_entries}"
 scenario+=" --enableDynamicRouting=1"
 scenario+=" --routingUpdateInterval=${interval}"
 scenario+=" --maxIslNeighbors=${max_isl_neighbors}"
+scenario+=" --enableSyntheticIslLoad=${enable_synthetic_isl_load}"
+scenario+=" --syntheticLoadSeed=${synthetic_load_seed}"
+scenario+=" --syntheticLoadMin=${synthetic_load_min}"
+scenario+=" --syntheticLoadMax=${synthetic_load_max}"
+scenario+=" --satelliteIslCapacity=${satellite_isl_capacity}"
 scenario+=" --simTime=${sim_time}"
 scenario+=" --appStart=${app_start}"
 scenario+=" --appStop=${app_stop}"
@@ -195,9 +215,15 @@ command=(srun
   echo "external_route_tree_cache=${use_route_tree_cache}"
   echo "route_tree_engine=${container_route_tree_engine}"
   echo "route_tree_workers=${route_tree_workers}"
+  echo "ns3_reserved_cpus=$((allocated_cpus - route_tree_workers))"
   echo "route_tree_max_entries=${route_tree_max_entries}"
   echo "route_tree_work_dir=${run_dir}/route-trees"
   echo "routing_update_interval_s=${interval}"
+  echo "synthetic_isl_load=${enable_synthetic_isl_load}"
+  echo "synthetic_load_seed=${synthetic_load_seed}"
+  echo "synthetic_load_min=${synthetic_load_min}"
+  echo "synthetic_load_max=${synthetic_load_max}"
+  echo "satellite_isl_capacity=${satellite_isl_capacity}"
   echo "num_ues=${num_ues}"
   echo "num_servers=${num_servers}"
   echo "all_to_all_traffic=${all_to_all}"
