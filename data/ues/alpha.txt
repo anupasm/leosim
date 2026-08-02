@@ -1,1 +1,2 @@
-alpha_ue_SriLanka,6.9271,79.8612,10.0
+alpha_ue_Los_Angeles,34.0522,-118.2437,89.0
+alpha_ue_Mexico_City,19.4326,-99.1332,2240.0

@@ -1,1 +1,2 @@
-gamma_Frankfurt,50.1109,8.6821,112.0
+gamma_Cape_Town,-33.9249,18.4241,25.0
+gamma_Toronto,43.6532,-79.3832,76.0

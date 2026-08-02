@@ -1,1 +1,2 @@
-gamma_ue_Vancouver,49.2827,-123.1207,70.0
+gamma_ue_Buenos_Aires,-34.6037,-58.3816,25.0
+gamma_ue_Lagos,6.5244,3.3792,41.0

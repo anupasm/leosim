@@ -1,1 +1,2 @@
-beta_ue_Sao_Paulo,-23.5505,-46.6333,760.0
+beta_ue_Singapore,1.3521,103.8198,15.0
+beta_ue_Jakarta,-6.2088,106.8456,8.0
