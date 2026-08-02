@@ -367,6 +367,7 @@ main(int argc, char* argv[])
     std::string islDataRate = "10Gbps";
     std::string islDelay = "100us";
     bool enableSyntheticIslLoad = true;
+    bool enableIslLoadLogging = true;
     uint64_t syntheticLoadSeed = 12345;
     double syntheticLoadMin = 0.1;
     double syntheticLoadMax = 0.9;
@@ -440,6 +441,9 @@ main(int argc, char* argv[])
     cmd.AddValue("enableSyntheticIslLoad",
                  "Generate deterministic synthetic utilization records for directed ISLs",
                  enableSyntheticIslLoad);
+    cmd.AddValue("enableIslLoadLogging",
+                 "Write synthetic ISL utilization records to <outputPrefix>-isl-load.csv",
+                 enableIslLoadLogging);
     cmd.AddValue("syntheticLoadSeed",
                  "Seed used to deterministically generate directed-ISL load",
                  syntheticLoadSeed);
@@ -802,12 +806,15 @@ main(int argc, char* argv[])
             syntheticIslLoadModel->AttachChannelModel(islChannel, islDevices);
             syntheticIslLoadModel->Generate(0);
             syntheticIslLoadModel->ApplyToIslDevices(islDevices);
-            const std::string syntheticLoadCsvFile = outputPrefix + "-isl-load.csv";
-            syntheticIslLoadModel->EnableCsvOutput(syntheticLoadCsvFile);
             std::cout << "Generated deterministic synthetic load for "
                       << syntheticIslLoadModel->GetAllIslLoads().size()
-                      << " directed ISLs (seed=" << syntheticLoadSeed << ")\n"
-                      << "Synthetic ISL load data: " << syntheticLoadCsvFile << std::endl;
+                      << " directed ISLs (seed=" << syntheticLoadSeed << ")" << std::endl;
+            if (enableIslLoadLogging)
+            {
+                const std::string syntheticLoadCsvFile = outputPrefix + "-isl-load.csv";
+                syntheticIslLoadModel->EnableCsvOutput(syntheticLoadCsvFile);
+                std::cout << "Synthetic ISL load data: " << syntheticLoadCsvFile << std::endl;
+            }
         }
         timer.Log("ISL device installation");
     }
