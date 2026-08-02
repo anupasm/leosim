@@ -133,10 +133,20 @@ if ! apptainer exec --cleanenv "$SIF" /opt/venv/bin/python -c 'import numpy, sky
   echo "The container does not provide the required LeoSim Python environment: ${SIF}" >&2
   exit 2
 fi
+# Older container images use fixed /tmp filenames during the engine self-test.
+# Serialize tests on each node so concurrent array tasks cannot truncate one
+# another's binary fixtures. FD 8 is kept separate from the preprocessing lock.
+exec 8>/tmp/leosim-rengine-selftest.lock
+if ! flock -w 300 8; then
+  echo "Timed out waiting for the routing-engine self-test lock on $(hostname)." >&2
+  exit 2
+fi
 if ! apptainer exec --cleanenv "$SIF" "$container_route_tree_engine" --self-test; then
+  flock -u 8
   echo "The container routing engine is missing or failed its threaded self-test: ${SIF}" >&2
   exit 2
 fi
+flock -u 8
 
 # All array elements share one generated position file. The lock prevents
 # simultaneous conversions; the first task generates it and the rest reuse it.

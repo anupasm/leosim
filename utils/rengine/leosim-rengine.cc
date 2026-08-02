@@ -917,7 +917,11 @@ WriteSelfTestGraph(const std::string& graphPath,
 int
 RunSelfTest(const Options& options)
 {
-    const std::string prefix = "/tmp/leosim-rengine-selftest";
+    // Multiple Slurm array tasks can invoke the self-test concurrently on the
+    // same node. Use a per-process prefix so their binary fixtures cannot
+    // truncate or overwrite one another.
+    const std::string prefix =
+        "/tmp/leosim-rengine-selftest-" + std::to_string(static_cast<long long>(getpid()));
     const std::string graphPath = prefix + ".graph";
     const std::string requestPath = prefix + ".requests";
     auto run = [&](RoutingMetric metric, uint32_t workers, const std::string& suffix) {
