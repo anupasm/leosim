@@ -24,22 +24,34 @@ import pandas as pd
 from matplotlib.ticker import PercentFormatter
 
 
-METRIC_ORDER = ("hop", "distance", "path-loss", "snr", "signal-strength")
+METRIC_ORDER = (
+    "hop",
+    "distance",
+    "path-loss",
+    "snr",
+    "signal-strength",
+    "lifetime",
+    "load",
+)
 LABELS = {
     "hop": "Hop count",
     "distance": "Distance",
     "path-loss": "Path loss",
     "snr": "SNR",
     "signal-strength": "Signal strength",
+    "lifetime": "Lifetime",
+    "load": "Load-aware",
 }
 COLORS = {
     "hop": "#0072B2",
-    "distance": "#D55E00",
+    "distance": "#D50000",
     "path-loss": "#009E73",
     "snr": "#CC79A7",
     "signal-strength": "#E69F00",
+    "lifetime": "#52D30D",
+    "load": "#56B4E9",
 }
-MARKERS = dict(zip(METRIC_ORDER, ("o", "s", "^", "D", "P")))
+MARKERS = dict(zip(METRIC_ORDER, ("o", "s", "^", "D", "P", "X", "v")))
 RUN_PATTERN = re.compile(
     r"^metric-(.+)_sats-(\d+)_(static|dynamic)_duration-(\d+)s"
     r"(?:-interval-(\d+)s)?$"
@@ -67,6 +79,16 @@ def parse_args() -> argparse.Namespace:
         default=("pdf", "png"),
         choices=("pdf", "png", "svg"),
         help="output formats (default: pdf png)",
+    )
+    parser.add_argument(
+        "--metrics",
+        nargs="+",
+        choices=METRIC_ORDER,
+        metavar="METRIC",
+        help=(
+            "routing metrics to visualize (default: all discovered metrics); "
+            "choices: %(choices)s"
+        ),
     )
     parser.add_argument("--dpi", type=int, default=300, help="raster DPI")
     parser.add_argument(
@@ -98,6 +120,7 @@ def discover_runs(results_dir: Path) -> dict[str, dict]:
             "pdr",
             "throughput_mbps",
             "delay_ms",
+            "jitter_ms",
             "hop_count",
         }
         missing = required.difference(frame.columns)
@@ -247,6 +270,26 @@ def ordered_metrics(runs: dict[str, dict]) -> list[str]:
     return known + sorted(set(runs).difference(known))
 
 
+def select_metrics(runs: dict[str, dict], requested: list[str] | None) -> dict[str, dict]:
+    """Return only requested routing metrics, preserving canonical plot order."""
+    if requested is None:
+        return runs
+
+    missing = sorted(set(requested).difference(runs))
+    if missing:
+        available = ", ".join(ordered_metrics(runs))
+        raise ValueError(
+            f"Requested metric(s) not found: {', '.join(missing)}. "
+            f"Available metrics: {available}"
+        )
+    requested_set = set(requested)
+    return {
+        metric: runs[metric]
+        for metric in ordered_metrics(runs)
+        if metric in requested_set
+    }
+
+
 def add_grid(axis: plt.Axes) -> None:
     axis.grid(True, color="#D7D7D7", alpha=0.8)
     axis.set_axisbelow(True)
@@ -257,10 +300,11 @@ def plot_timeseries(runs: dict[str, dict], smooth: int) -> plt.Figure:
     fields = (
         ("throughput_mbps", "Cumulative throughput (Mbit/s)"),
         ("delay_ms", "Mean delay (ms)"),
+        ("jitter_ms", "Mean jitter (ms)"),
         ("hop_count", "Mean hop count"),
         ("pdr", "Packet delivery ratio"),
     )
-    figure, axes = plt.subplots(2, 2, figsize=(7.15, 4.65), sharex=True)
+    figure, axes = plt.subplots(3, 2, figsize=(7.15, 6.4), sharex=True)
     for axis, (field, ylabel) in zip(axes.flat, fields):
         for metric in ordered_metrics(runs):
             data = runs[metric]["data"]
@@ -275,15 +319,18 @@ def plot_timeseries(runs: dict[str, dict], smooth: int) -> plt.Figure:
             )
         axis.set_ylabel(ylabel)
         add_grid(axis)
-    axes[1, 0].set_xlabel("Simulation time (min)")
-    axes[1, 1].set_xlabel("Simulation time (min)")
-    axes[1, 1].legend(
-        loc="upper center",
-        bbox_to_anchor=(-0.08, -0.30),
+    axes[2, 1].set_visible(False)
+    axes[2, 0].set_xlabel("Simulation time (min)")
+    handles, legend_labels = axes[0, 0].get_legend_handles_labels()
+    figure.legend(
+        handles,
+        legend_labels,
+        loc="lower center",
+        bbox_to_anchor=(0.5, 0.01),
         ncol=min(5, len(runs)),
         frameon=False,
     )
-    figure.subplots_adjust(bottom=0.22, hspace=0.13, wspace=0.24)
+    figure.subplots_adjust(bottom=0.13, hspace=0.18, wspace=0.24)
     return figure
 
 
@@ -292,9 +339,10 @@ def plot_steady_state(runs: dict[str, dict], warmup: float) -> plt.Figure:
     fields = (
         ("throughput_mbps", "Cumulative throughput (Mbit/s)"),
         ("delay_ms", "Mean delay (ms)"),
+        ("jitter_ms", "Mean jitter (ms)"),
         ("hop_count", "Mean hop count"),
     )
-    figure, axes = plt.subplots(1, 3, figsize=(7.15, 2.65))
+    figure, axes = plt.subplots(1, 4, figsize=(9.2, 2.65))
     positions = np.arange(1, len(metrics) + 1)
     for axis, (field, ylabel) in zip(axes, fields):
         samples = []
@@ -411,17 +459,10 @@ def compact_pair_label(pair: tuple[str, str]) -> str:
 
 
 def plot_pair_traffic(runs: dict[str, dict]) -> plt.Figure:
-    """Plot final bidirectional traffic statistics for every ground-node pair."""
+    """Plot all observed ground-node pairs, leaving missing values as gaps."""
     metrics = ordered_metrics(runs)
     pair_sets = [set(runs[metric]["traffic_pairs"].index) for metric in metrics]
-    common_pairs = set.intersection(*pair_sets)
     all_pairs = set.union(*pair_sets)
-    if common_pairs != all_pairs:
-        missing = {
-            metric: sorted(all_pairs.difference(runs[metric]["traffic_pairs"].index))
-            for metric in metrics
-        }
-        raise ValueError(f"Ground-node pairs differ between runs: {missing}")
     if not all_pairs:
         raise ValueError("No ground-node traffic pairs were found")
 
@@ -443,7 +484,9 @@ def plot_pair_traffic(runs: dict[str, dict]) -> plt.Figure:
     for axis, (field, ylabel) in zip(axes.flat, fields):
         for metric in metrics:
             pair_data = runs[metric]["traffic_pairs"]
-            values = [pair_data.loc[pair, field] for pair in pairs]
+            # Reindex against the union so every observed pair is retained.
+            # Matplotlib renders pairs absent from a particular run as gaps.
+            values = pair_data[field].reindex(pairs).to_numpy()
             axis.plot(
                 x,
                 values,
@@ -513,7 +556,7 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
     configure_style()
 
-    runs = discover_runs(results_dir)
+    runs = select_metrics(discover_runs(results_dir), args.metrics)
     metrics = ordered_metrics(runs)
     summary = read_summary(results_dir, runs)
     outputs: list[Path] = []

@@ -14,7 +14,7 @@ from statistics import mean
 
 
 METRIC_ORDER = {name: index for index, name in enumerate(
-    ("hop", "distance", "path-loss", "snr", "signal-strength"))}
+    ("hop", "distance", "path-loss", "snr", "signal-strength", "lifetime", "load"))}
 
 
 def number(value, default=0.0):
