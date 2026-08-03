@@ -2,9 +2,9 @@
 #SBATCH --job-name=leosim-routing
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=6
+#SBATCH --cpus-per-task=2
 #SBATCH --time=24:00:00
-#SBATCH --array=0-6%7
+#SBATCH --array=0-6%3
 #SBATCH --output=logs/%x-%A_%a.out
 #SBATCH --error=logs/%x-%A_%a.err
 
@@ -29,7 +29,7 @@ fi
 # Every metric experiences the same synthetic ISL load; only its routing edge
 # criterion changes. The load experiment routes on residual capacity.
 METRICS=(hop distance path-loss snr signal-strength lifetime load)
-SATELLITE_COUNTS=(1000)
+SATELLITE_COUNTS=(11514)
 SIM_TIMES=(1200)
 UPDATE_INTERVALS=(30)
 
@@ -74,14 +74,10 @@ tle_timestep="${TLE_TIMESTEP:-5}"
 allocated_cpus="${SLURM_CPUS_PER_TASK:-1}"
 tle_workers="${TLE_WORKERS:-${allocated_cpus}}"
 use_route_tree_cache="${USE_ROUTE_TREE_CACHE:-1}"
-# Reserve one CPU for ns-3/orchestration. With seven concurrent array tasks,
-# the default six-CPU allocation uses 42 of the server's 47 CPUs; each routing
-# engine therefore gets five workers.
-if (( allocated_cpus > 1 )); then
-  default_route_tree_workers=$((allocated_cpus - 1))
-else
-  default_route_tree_workers=1
-fi
+# ns-3 invokes the external routing engine synchronously and waits for it to
+# finish, so the engine may use the full task allocation. The simulator itself
+# remains single-threaded outside these short routing-engine bursts.
+default_route_tree_workers="${allocated_cpus}"
 route_tree_workers="${ROUTE_TREE_WORKERS:-${default_route_tree_workers}}"
 route_tree_max_entries="${ROUTE_TREE_MAX_ENTRIES:-10000000}"
 container_route_tree_engine="${CONTAINER_NS3_ROOT}/contrib/leosim/utils/rengine/leosim-rengine"
