@@ -473,7 +473,8 @@ class LeoSimRoutingCalculator : public Object
                                     Ptr<Node> destination,
                                     RoutingMetric metric,
                                     PathType pathType,
-                                    double snrConstraint = -1.0);
+                                    double snrConstraint = -1.0,
+                                    const std::map<Ptr<Node>, std::set<Ptr<Node>>>* topology = nullptr);
 
     /**
      * \brief Get metric value for a link based on routing metric

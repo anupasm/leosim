@@ -94,7 +94,8 @@ LeoSimDijkstraRoutingModel::ComputeRoute(const LeoSimRoutingRequest& request,
                                                   request.destination,
                                                   request.metric,
                                                   request.pathType,
-                                                  request.minSnr);
+                                                  request.minSnr,
+                                                  &context.topology);
 }
 
 TypeId
@@ -583,6 +584,10 @@ LeoSimRoutingCalculator::GetTopology(PathType pathType)
     }
 
     std::vector<std::pair<Ptr<Node>, Ptr<Node>>> activeLinks = m_channelModel->GetActiveLinks();
+    // Access authority can inspect several satellite links for the same ground
+    // node. Rank its beam candidates once for this immutable topology snapshot
+    // instead of repeating a constellation-wide visibility/SINR scan per link.
+    std::map<uint32_t, std::vector<LeoSimTopsisCandidate>> rankedCandidatesCache;
 
     for (const auto& link : activeLinks)
     {
@@ -610,7 +615,7 @@ LeoSimRoutingCalculator::GetTopology(PathType pathType)
 
         if (quality.linkType == LEOSIM_LINK_SATELLITE_TO_GROUND)
         {
-            if (!IsAccessLinkAllowed(node1, node2))
+            if (!IsAccessLinkAllowed(node1, node2, &rankedCandidatesCache))
             {
                 continue;
             }
@@ -1203,17 +1208,22 @@ LeoSimRoutingCalculator::DijkstrasAlgorithm(Ptr<Node> source,
                                              Ptr<Node> destination,
                                              RoutingMetric metric,
                                              PathType pathType,
-                                             double snrConstraint)
+                                             double snrConstraint,
+                                             const std::map<Ptr<Node>, std::set<Ptr<Node>>>*
+                                                 suppliedTopology)
 {
     NS_LOG_FUNCTION(this << source << destination << metric << pathType << snrConstraint);
     LeoSimTaskProfiler::ScopedEvent profile(
         "run_simulation.routing_calculator.dijkstra");
 
-    std::map<Ptr<Node>, std::set<Ptr<Node>>> topology;
+    std::map<Ptr<Node>, std::set<Ptr<Node>>> ownedTopology;
+    const std::map<Ptr<Node>, std::set<Ptr<Node>>>* topology = suppliedTopology;
+    if (!topology)
     {
         LeoSimTaskProfiler::ScopedEvent phase(
             "run_simulation.routing_calculator.dijkstra.copy_topology");
-        topology = GetTopology(pathType);
+        ownedTopology = GetTopology(pathType);
+        topology = &ownedTopology;
     }
     LeoSimTaskProfiler::ScopedEvent searchPhase(
         "run_simulation.routing_calculator.dijkstra.shortest_path_and_route_build");
@@ -1226,7 +1236,7 @@ LeoSimRoutingCalculator::DijkstrasAlgorithm(Ptr<Node> source,
     std::priority_queue<QueueEntry, std::vector<QueueEntry>, std::greater<QueueEntry>> queue;
 
     // Initialize distances
-    for (const auto& node : topology)
+    for (const auto& node : *topology)
     {
         distances[node.first] = std::numeric_limits<double>::max();
     }
@@ -1273,9 +1283,10 @@ LeoSimRoutingCalculator::DijkstrasAlgorithm(Ptr<Node> source,
         settled.insert(current);
 
         // Check neighbors
-        if (topology.find(current) != topology.end())
+        auto neighborsIt = topology->find(current);
+        if (neighborsIt != topology->end())
         {
-            for (const auto& neighbor : topology[current])
+            for (const auto& neighbor : neighborsIt->second)
             {
                 if (settled.find(neighbor) != settled.end())
                 {

@@ -15,8 +15,12 @@
 #include "ns3/leosim-routing-calculator.h"
 #include "ns3/leosim-task-profiler.h"
 #include "ns3/log.h"
+#include "ns3/net-device.h"
+#include "ns3/net-device-queue-interface.h"
 #include "ns3/node.h"
+#include "ns3/queue-disc.h"
 #include "ns3/simulator.h"
+#include "ns3/traffic-control-layer.h"
 
 #include "../utils/rengine/rengine-format.h"
 
@@ -475,6 +479,17 @@ LeoSimExternalRoutingHelper::RequestRouteRefresh()
         return;
     }
 
+    // A topology/access callback can be emitted while a periodic update at the
+    // same simulation timestamp is being applied. That update already observes
+    // the current state, so scheduling another full snapshot is redundant.
+    if (m_routeUpdateInProgress ||
+        (m_hasCompletedRouteUpdate && m_lastRouteUpdateTime == Simulator::Now()))
+    {
+        LeoSimTaskProfiler::ScopedEvent coalesced(
+            "run_simulation.external_routing.coalesced_reactive_update");
+        return;
+    }
+
     if (m_pendingReactiveUpdate.IsPending())
     {
         m_pendingReactiveUpdate.Cancel();
@@ -495,8 +510,25 @@ LeoSimExternalRoutingHelper::UpdateRoutesAndReschedule(Ptr<LeoSimRoutingCalculat
                                                        bool verbose)
 {
     const double now = Simulator::Now().GetSeconds();
+    // Prefer the periodic update when a zero-delay reactive refresh is queued
+    // for this same timestamp. This also prevents the reactive callback from
+    // running immediately after this (potentially long) wall-clock operation.
+    if (m_pendingReactiveUpdate.IsPending() &&
+        m_pendingReactiveUpdate.GetTs() ==
+            static_cast<uint64_t>(Simulator::Now().GetTimeStep()))
+    {
+        m_pendingReactiveUpdate.Cancel();
+        m_pendingReactiveUpdate = EventId();
+        LeoSimTaskProfiler::ScopedEvent coalesced(
+            "run_simulation.external_routing.coalesced_reactive_update");
+    }
+
     const auto wallStart = std::chrono::steady_clock::now();
+    m_routeUpdateInProgress = true;
     const bool succeeded = SetStaticRoutes(calculator, sources, destinations, verbose);
+    m_routeUpdateInProgress = false;
+    m_lastRouteUpdateTime = Simulator::Now();
+    m_hasCompletedRouteUpdate = true;
     const double wallSeconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - wallStart).count();
     std::cout << "[timing] dynamic routing update completed; sim=" << std::fixed
@@ -525,15 +557,34 @@ LeoSimExternalRoutingHelper::UpdateRoutesAndReschedule(Ptr<LeoSimRoutingCalculat
 void
 LeoSimExternalRoutingHelper::DoReactiveUpdate()
 {
+    m_pendingReactiveUpdate = EventId();
     if (!m_reactiveCalculator)
+    {
+        LeoSimTaskProfiler::ScopedEvent coalesced(
+            "run_simulation.external_routing.coalesced_reactive_update");
+        return;
+    }
+
+
+    // If a periodic callback is queued for now, let it own this timestamp. If
+    // an update already completed now, the requested state is already covered.
+    if ((m_dynamicRoutingUpdate.IsPending() &&
+         m_dynamicRoutingUpdate.GetTs() ==
+             static_cast<uint64_t>(Simulator::Now().GetTimeStep())) ||
+        m_routeUpdateInProgress ||
+        (m_hasCompletedRouteUpdate && m_lastRouteUpdateTime == Simulator::Now()))
     {
         return;
     }
 
+    m_routeUpdateInProgress = true;
     SetStaticRoutes(m_reactiveCalculator,
                     m_reactiveSources,
                     m_reactiveDestinations,
                     m_reactiveVerbose);
+    m_routeUpdateInProgress = false;
+    m_lastRouteUpdateTime = Simulator::Now();
+    m_hasCompletedRouteUpdate = true;
 }
 
 void
@@ -1053,18 +1104,104 @@ LeoSimExternalRoutingHelper::ApplyResults(const GraphExport& exportInfo,
                                           bool verbose)
 {
     LeoSimTaskProfiler::ScopedEvent profile("run_simulation.external_routing.apply_results");
-    std::set<uint32_t> cleanedSourceNodeIds;
+    using RouteMap = std::map<uint32_t, uint32_t>;
+    std::map<uint32_t, RouteMap> desiredBySource;
+    std::map<uint32_t, std::vector<const RouteResultRecord*>> resultsBySource;
+    std::map<uint32_t, uint32_t> routingIdByNodeId;
     uint32_t installed = 0;
     uint32_t skipped = 0;
+    uint32_t unchangedSources = 0;
+
+    // Convert routing IDs to stable ns-3 node IDs before comparing snapshots.
+    // Routing IDs are rebuilt for every exported graph and are not a safe cache key.
+    for (uint32_t routingId = 0; routingId < exportInfo.routingIdToNode.size(); ++routingId)
+    {
+        Ptr<Node> node = exportInfo.routingIdToNode[routingId];
+        if (node)
+        {
+            routingIdByNodeId[node->GetId()] = routingId;
+        }
+    }
+    for (const auto& result : results)
+    {
+        if (result.src >= exportInfo.routingIdToNode.size())
+        {
+            ++skipped;
+            continue;
+        }
+        Ptr<Node> srcNode = exportInfo.routingIdToNode[result.src];
+        if (!srcNode)
+        {
+            ++skipped;
+            continue;
+        }
+        const uint32_t srcNodeId = srcNode->GetId();
+        desiredBySource[srcNodeId];
+        resultsBySource[srcNodeId].push_back(&result);
+        if (result.valid && result.dst < exportInfo.routingIdToNode.size() &&
+            result.nextHop < exportInfo.routingIdToNode.size())
+        {
+            Ptr<Node> dstNode = exportInfo.routingIdToNode[result.dst];
+            Ptr<Node> nextHopNode = exportInfo.routingIdToNode[result.nextHop];
+            if (dstNode && nextHopNode)
+            {
+                desiredBySource[srcNodeId][dstNode->GetId()] = nextHopNode->GetId();
+            }
+        }
+    }
+
+    std::set<uint32_t> changedSources;
+    for (const auto& [sourceId, desired] : desiredBySource)
+    {
+        const auto previous = m_installedNextHopsBySource.find(sourceId);
+        if (previous == m_installedNextHopsBySource.end() || previous->second != desired)
+        {
+            changedSources.insert(sourceId);
+        }
+        else
+        {
+            ++unchangedSources;
+        }
+    }
+    // A source omitted from a later result set must have its old computed routes removed.
+    for (const auto& [sourceId, previous] : m_installedNextHopsBySource)
+    {
+        if (desiredBySource.find(sourceId) == desiredBySource.end() && !previous.empty())
+        {
+            changedSources.insert(sourceId);
+        }
+    }
+
+    if (verbose)
+    {
+        std::cout << "[routing-debug] apply begin"
+                  << "; sim_s=" << std::fixed << std::setprecision(6)
+                  << Simulator::Now().GetSeconds()
+                  << "; snapshot=" << exportInfo.snapshotId
+                  << "; results=" << results.size()
+                  << "; desired_sources=" << desiredBySource.size()
+                  << "; changed_sources=" << changedSources.size()
+                  << "; unchanged_sources=" << unchangedSources
+                  << "; previously_tracked_sources="
+                  << m_installedNextHopsBySource.size() << std::endl;
+    }
+
+    uint64_t resolvedNextHops = 0;
+    uint64_t missingOutputDevices = 0;
+    uint64_t outputDevicesWithRootQueueDisc = 0;
+    uint64_t outputDevicesWithoutQueueInterface = 0;
+    uint64_t outputDevicesWithZeroTxQueues = 0;
+    uint64_t routeFingerprint = 1469598103934665603ULL;
 
     {
         LeoSimTaskProfiler::ScopedEvent phase(
             "run_simulation.external_routing.apply_results.remove_old_routes");
-        for (Ptr<Node> node : exportInfo.routingIdToNode)
+        for (uint32_t sourceId : changedSources)
         {
-            if (node && cleanedSourceNodeIds.insert(node->GetId()).second)
+            const auto routingId = routingIdByNodeId.find(sourceId);
+            if (routingId != routingIdByNodeId.end())
             {
-                RemoveComputedHostRoutes(node, verbose);
+                RemoveComputedHostRoutes(exportInfo.routingIdToNode[routingId->second], verbose);
             }
         }
     }
@@ -1072,72 +1209,179 @@ LeoSimExternalRoutingHelper::ApplyResults(const GraphExport& exportInfo,
     {
         LeoSimTaskProfiler::ScopedEvent phase(
             "run_simulation.external_routing.apply_results.validate_and_install_routes");
-        for (const auto& result : results)
+        std::map<uint32_t, std::vector<std::string>> destinationAddressCache;
+        struct ResolvedNextHop
         {
-            if (!result.valid ||
-                result.src >= exportInfo.routingIdToNode.size() ||
-                result.dst >= exportInfo.routingIdToNode.size() ||
-                result.nextHop >= exportInfo.routingIdToNode.size())
+            bool valid{false};
+            uint32_t sourceInterface{0};
+            Ipv4Address address;
+        };
+        std::map<std::pair<uint32_t, uint32_t>, ResolvedNextHop> nextHopCache;
+        std::map<uint32_t, RouteMap> successfullyInstalled;
+
+        for (uint32_t sourceId : changedSources)
+        {
+            const auto sourceResults = resultsBySource.find(sourceId);
+            if (sourceResults == resultsBySource.end())
             {
-                ++skipped;
                 continue;
             }
-
-            Ptr<Node> srcNode = exportInfo.routingIdToNode[result.src];
-            Ptr<Node> dstNode = exportInfo.routingIdToNode[result.dst];
-            Ptr<Node> nextHopNode = exportInfo.routingIdToNode[result.nextHop];
-            if (!srcNode || !dstNode || !nextHopNode)
-            {
-                ++skipped;
-                continue;
-            }
-
-            Ptr<Ipv4> srcIpv4 = srcNode->GetObject<Ipv4>();
-            if (!srcIpv4)
-            {
-                ++skipped;
-                continue;
-            }
-
+            Ptr<Node> srcNode = exportInfo.routingIdToNode[sourceResults->second.front()->src];
+            Ptr<Ipv4> srcIpv4 = srcNode ? srcNode->GetObject<Ipv4>() : nullptr;
             Ptr<Ipv4StaticRouting> staticRouting =
-                Ipv4RoutingHelper::GetRouting<Ipv4StaticRouting>(srcIpv4->GetRoutingProtocol());
+                srcIpv4 ? Ipv4RoutingHelper::GetRouting<Ipv4StaticRouting>(
+                              srcIpv4->GetRoutingProtocol())
+                        : nullptr;
             if (!staticRouting)
             {
-                ++skipped;
+                skipped += sourceResults->second.size();
                 continue;
             }
 
-            uint32_t sourceInterface = 0;
-            std::string nextHopAddressString;
-            if (!FindNextHopAddress(srcNode,
-                                    nextHopNode,
-                                    sourceInterface,
-                                    nextHopAddressString))
+            for (const RouteResultRecord* resultPtr : sourceResults->second)
             {
-                ++skipped;
-                continue;
-            }
+                const auto& result = *resultPtr;
+                if (!result.valid || result.dst >= exportInfo.routingIdToNode.size() ||
+                    result.nextHop >= exportInfo.routingIdToNode.size())
+                {
+                    ++skipped;
+                    continue;
+                }
+                Ptr<Node> dstNode = exportInfo.routingIdToNode[result.dst];
+                Ptr<Node> nextHopNode = exportInfo.routingIdToNode[result.nextHop];
+                if (!dstNode || !nextHopNode)
+                {
+                    ++skipped;
+                    continue;
+                }
 
-            Ipv4Address nextHopAddress(nextHopAddressString.c_str());
-            Ipv4Mask hostMask("255.255.255.255");
-            for (const auto& dstAddressString : GetDestinationAddresses(dstNode))
-            {
-                Ipv4Address dstAddress(dstAddressString.c_str());
-                staticRouting->AddNetworkRouteTo(dstAddress,
-                                                 hostMask,
-                                                 nextHopAddress,
-                                                 sourceInterface,
-                                                 100);
-                ++installed;
+                const auto hopKey = std::make_pair(sourceId, nextHopNode->GetId());
+                auto [hopIt, insertedHop] = nextHopCache.try_emplace(hopKey);
+                if (insertedHop)
+                {
+                    std::string addressString;
+                    hopIt->second.valid = FindNextHopAddress(srcNode,
+                                                              nextHopNode,
+                                                              hopIt->second.sourceInterface,
+                                                              addressString);
+                    if (hopIt->second.valid)
+                    {
+                        hopIt->second.address = Ipv4Address(addressString.c_str());
+                        ++resolvedNextHops;
+
+                        Ptr<NetDevice> outputDevice =
+                            hopIt->second.sourceInterface < srcIpv4->GetNInterfaces()
+                                ? srcIpv4->GetNetDevice(hopIt->second.sourceInterface)
+                                : nullptr;
+                        if (!outputDevice)
+                        {
+                            ++missingOutputDevices;
+                            std::cerr << "[routing-debug] missing output device"
+                                      << "; sim_s=" << std::fixed << std::setprecision(6)
+                                      << Simulator::Now().GetSeconds()
+                                      << "; snapshot=" << exportInfo.snapshotId
+                                      << "; source_node=" << sourceId
+                                      << "; next_hop_node=" << nextHopNode->GetId()
+                                      << "; source_interface="
+                                      << hopIt->second.sourceInterface << std::endl;
+                        }
+                        else
+                        {
+                            Ptr<TrafficControlLayer> trafficControl =
+                                srcNode->GetObject<TrafficControlLayer>();
+                            if (trafficControl &&
+                                trafficControl->GetRootQueueDiscOnDevice(outputDevice))
+                            {
+                                ++outputDevicesWithRootQueueDisc;
+                            }
+
+                            Ptr<NetDeviceQueueInterface> queueInterface =
+                                outputDevice->GetObject<NetDeviceQueueInterface>();
+                            if (!queueInterface)
+                            {
+                                ++outputDevicesWithoutQueueInterface;
+                            }
+                            else if (queueInterface->GetNTxQueues() == 0)
+                            {
+                                ++outputDevicesWithZeroTxQueues;
+                            }
+                        }
+                    }
+                }
+                if (!hopIt->second.valid)
+                {
+                    ++skipped;
+                    continue;
+                }
+
+                auto [addressesIt, insertedAddresses] =
+                    destinationAddressCache.try_emplace(dstNode->GetId());
+                if (insertedAddresses)
+                {
+                    addressesIt->second = GetDestinationAddresses(dstNode);
+                }
+                const Ipv4Mask hostMask("255.255.255.255");
+                for (const auto& dstAddressString : addressesIt->second)
+                {
+                    staticRouting->AddNetworkRouteTo(Ipv4Address(dstAddressString.c_str()),
+                                                     hostMask,
+                                                     hopIt->second.address,
+                                                     hopIt->second.sourceInterface,
+                                                     100);
+                    ++installed;
+                }
+                successfullyInstalled[sourceId][dstNode->GetId()] = nextHopNode->GetId();
+                // Stable, compact identity for the installed route set.  This
+                // makes a failing snapshot comparable across reruns without
+                // emitting millions of per-route log lines.
+                for (uint64_t value : {static_cast<uint64_t>(sourceId),
+                                       static_cast<uint64_t>(dstNode->GetId()),
+                                       static_cast<uint64_t>(nextHopNode->GetId()),
+                                       static_cast<uint64_t>(hopIt->second.sourceInterface)})
+                {
+                    routeFingerprint ^= value;
+                    routeFingerprint *= 1099511628211ULL;
+                }
             }
+        }
+
+        for (uint32_t sourceId : changedSources)
+        {
+            m_installedNextHopsBySource[sourceId] = successfullyInstalled[sourceId];
         }
     }
 
     if (verbose)
     {
+        uint64_t trackedDestinations = 0;
+        for (const auto& [sourceId, destinations] : m_installedNextHopsBySource)
+        {
+            (void)sourceId;
+            trackedDestinations += destinations.size();
+        }
+        std::cout << "[routing-debug] apply complete"
+                  << "; sim_s=" << std::fixed << std::setprecision(6)
+                  << Simulator::Now().GetSeconds()
+                  << "; snapshot=" << exportInfo.snapshotId
+                  << "; installed_host_routes=" << installed
+                  << "; skipped_results=" << skipped
+                  << "; tracked_sources=" << m_installedNextHopsBySource.size()
+                  << "; tracked_destinations=" << trackedDestinations
+                  << "; resolved_next_hops=" << resolvedNextHops
+                  << "; missing_output_devices=" << missingOutputDevices
+                  << "; root_qdisc_devices=" << outputDevicesWithRootQueueDisc
+                  << "; missing_queue_interfaces=" << outputDevicesWithoutQueueInterface
+                  << "; zero_tx_queue_devices=" << outputDevicesWithZeroTxQueues
+                  << "; route_fingerprint=0x" << std::hex << routeFingerprint << std::dec
+                  << std::endl;
+    }
+
+    if (verbose)
+    {
         NS_LOG_DEBUG("External routing installed " << installed
-                                                    << " routes, skipped "
-                                                    << skipped << " results");
+                                                    << " routes, skipped " << skipped
+                                                    << " results; " << unchangedSources
+                                                    << " source tables unchanged");
     }
 
     return true;

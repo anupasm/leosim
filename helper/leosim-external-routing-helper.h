@@ -207,9 +207,18 @@ class LeoSimExternalRoutingHelper
     std::set<std::vector<uint32_t>> m_uniquePaths;
     std::ofstream m_routeLog;
     std::map<std::pair<uint32_t, uint32_t>, std::string> m_previousLoggedPaths;
+    // Last successfully installed destination->next-hop map for each source.
+    // Dynamic updates use this to avoid deleting and rebuilding unchanged
+    // static host-route tables.
+    std::map<uint32_t, std::map<uint32_t, uint32_t>> m_installedNextHopsBySource;
     uint64_t m_nextSnapshotId;
     EventId m_dynamicRoutingUpdate;
     EventId m_pendingReactiveUpdate;
+    // Periodic and reactive triggers may land at the same simulator timestamp.
+    // Remember the last completed update so those triggers share one snapshot.
+    Time m_lastRouteUpdateTime;
+    bool m_hasCompletedRouteUpdate{false};
+    bool m_routeUpdateInProgress{false};
     Ptr<LeoSimRoutingCalculator> m_reactiveCalculator;
     NodeContainer m_reactiveSources;
     NodeContainer m_reactiveDestinations;
