@@ -167,7 +167,7 @@ if [[ ! -s "$satellite_positions" ]]; then
 fi
 flock -u 9
 
-scenario="leosim-param-scenario"
+scenario="leosim-experiments"
 scenario+=" --satellites=${container_satellite_positions}"
 scenario+=" --useTrace=0"
 scenario+=" --numSatellites=${satellites}"

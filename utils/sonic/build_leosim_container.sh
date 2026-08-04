@@ -33,7 +33,7 @@ apptainer exec --cleanenv --pwd /opt/leosim/ns3 "$SIF" \
 apptainer exec --cleanenv --pwd /opt/leosim/ns3 "$SIF" \
   contrib/leosim/utils/rengine/leosim-rengine --self-test
 scenario_help="$(apptainer exec --cleanenv --pwd /opt/leosim/ns3 "$SIF" \
-  ./ns3 run "leosim-param-scenario --PrintHelp" --no-build)"
+  ./ns3 run "leosim-experiments --PrintHelp" --no-build)"
 grep -q -- "--useRouteTreeCache" <<<"$scenario_help"
 grep -q -- "--routeTreeEngine" <<<"$scenario_help"
 grep -q -- "--routeTreeWorkers" <<<"$scenario_help"

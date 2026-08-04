@@ -21,7 +21,7 @@ python3 -m venv "$PYTHON_ENV"
 
 cd "$NS3_ROOT"
 ./ns3 configure --enable-examples --disable-tests --build-profile=optimized
-./ns3 build leosim-param-scenario
+./ns3 build leosim-experiments
 
 # Verify both the build and the command-line interface.
-./ns3 run "leosim-param-scenario --PrintHelp" --no-build
+./ns3 run "leosim-experiments --PrintHelp" --no-build

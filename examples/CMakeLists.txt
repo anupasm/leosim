@@ -1,22 +1,6 @@
 build_lib_example(
-  NAME leosim-example
-  SOURCE_FILES leosim-example.cc
-  LIBRARIES_TO_LINK
-    ${libleosim}
-    ${libcore}
-)
-
-build_lib_example(
-  NAME leosim-routing-research-example
-  SOURCE_FILES leosim-routing-research-example.cc
-  LIBRARIES_TO_LINK
-    ${libleosim}
-    ${libcore}
-)
-
-build_lib_example(
-  NAME leosim-param-scenario
-  SOURCE_FILES leosim-param-scenario.cc
+  NAME leosim-experiments
+  SOURCE_FILES leosim-experiments.cc
   LIBRARIES_TO_LINK
     ${libleosim}
     ${libapplications}

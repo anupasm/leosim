@@ -43,7 +43,7 @@ From: ubuntu:24.04
     cd /opt/leosim/ns3
     if [ -x ./ns3 ]; then
         ./ns3 configure --enable-examples --disable-tests --build-profile=optimized
-        ./ns3 build leosim-param-scenario
+        ./ns3 build leosim-experiments
     elif [ -x ./waf ]; then
         ./waf configure --enable-examples --disable-tests --build-profile=optimized
         ./waf build
@@ -79,9 +79,9 @@ From: ubuntu:24.04
     fi
     test -x contrib/leosim/utils/rengine/leosim-rengine
     contrib/leosim/utils/rengine/leosim-rengine --self-test
-    ./ns3 run "leosim-param-scenario --PrintHelp" --no-build |
+    ./ns3 run "leosim-experiments --PrintHelp" --no-build |
         grep -q -- "--useRouteTreeCache"
-    ./ns3 run "leosim-param-scenario --PrintHelp" --no-build |
+    ./ns3 run "leosim-experiments --PrintHelp" --no-build |
         grep -q -- "--routeTreeEngine"
-    ./ns3 run "leosim-param-scenario --PrintHelp" --no-build |
+    ./ns3 run "leosim-experiments --PrintHelp" --no-build |
         grep -q -- "--routeTreeWorkers"

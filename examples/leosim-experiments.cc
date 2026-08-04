@@ -340,7 +340,7 @@ main(int argc, char* argv[])
     std::string leosimDataDir = "contrib/leosim/data";
     std::string satelliteFile = leosimDataDir + "/prepro/satellite_mobility.tcl";
     std::string groundDeviceFile;
-    std::string outputPrefix = "leosim-param-scenario";
+    std::string outputPrefix = "leosim-experiments";
     double simTime = 200.0;
     bool useTrace = true;
     bool verbose = false;
@@ -379,7 +379,7 @@ main(int argc, char* argv[])
     std::string routingMetricName = "hop";
     bool useRouteTreeCache = true;
     std::string routeTreeEngine = "contrib/leosim/utils/rengine/leosim-rengine";
-    std::string routeTreeWorkDir = "/tmp/leosim-param-route-trees";
+    std::string routeTreeWorkDir = "/tmp/leosim-experiments-route-trees";
     uint32_t routeTreeWorkers = 8;
     uint64_t routeTreeMaxEntries = 10000000ULL;
     uint32_t beamNumRings = 2;
@@ -402,6 +402,20 @@ main(int argc, char* argv[])
     bool enableRouteLogging = false;
     bool enableHandoverLogging = true;
     double progressLogInterval = 5.0;
+    std::string hoModeName = "CHO";
+    uint32_t maxCandidates = 3;
+    bool enableHoBuffering = true;
+    bool enableLoadBalancing = true;
+    double ttt = 1.0;
+    double t310 = 1.0;
+    uint32_t n310 = 3;
+    uint32_t n311 = 3;
+    double a3Offset = 3.0;
+    double a4Threshold = -110.0;
+    double tteTrigger = 30.0;
+    double choPrepMs = 100.0;
+    double choExecMs = 150.0;
+    double beamUpdateIntervalMs = 1000.0;
 
     CommandLine cmd;
     cmd.AddValue("satellites", "Path to satellite mobility trace or position CSV", satelliteFile);
@@ -515,6 +529,20 @@ main(int argc, char* argv[])
     cmd.AddValue("progressLogInterval",
                  "Simulation-time interval for wall-clock progress logs; 0 disables",
                  progressLogInterval);
+    cmd.AddValue("hoMode", "Handover policy: BHO or CHO", hoModeName);
+    cmd.AddValue("maxCandidates", "Maximum prepared CHO candidates", maxCandidates);
+    cmd.AddValue("enableHoBuffering", "Buffer packets during handover execution", enableHoBuffering);
+    cmd.AddValue("enableLoadBalancing", "Include satellite load in handover selection", enableLoadBalancing);
+    cmd.AddValue("ttt", "Handover time-to-trigger in seconds", ttt);
+    cmd.AddValue("t310", "Radio-link failure timer in seconds", t310);
+    cmd.AddValue("n310", "Consecutive out-of-sync indications before T310", n310);
+    cmd.AddValue("n311", "Consecutive in-sync indications for recovery", n311);
+    cmd.AddValue("a3Offset", "A3 neighbour-better offset in dB", a3Offset);
+    cmd.AddValue("a4Threshold", "A4 absolute RSRP threshold in dBm", a4Threshold);
+    cmd.AddValue("tteTrigger", "Predictive time-to-exit trigger in seconds", tteTrigger);
+    cmd.AddValue("choPrep", "CHO preparation delay in milliseconds", choPrepMs);
+    cmd.AddValue("choExec", "CHO execution delay in milliseconds", choExecMs);
+    cmd.AddValue("beamUpdateIntervalMs", "Beam manager update interval in milliseconds", beamUpdateIntervalMs);
     cmd.Parse(argc, argv);
 
     DebugTimer timer;
@@ -527,6 +555,15 @@ main(int argc, char* argv[])
     if (enableStatistics && statisticsInterval <= 0.0)
     {
         NS_FATAL_ERROR("statisticsInterval must be greater than zero");
+    }
+    if (hoModeName != "BHO" && hoModeName != "CHO")
+    {
+        NS_FATAL_ERROR("hoMode must be BHO or CHO");
+    }
+    if (maxCandidates == 0 || ttt < 0.0 || t310 < 0.0 || tteTrigger < 0.0 ||
+        choPrepMs < 0.0 || choExecMs < 0.0 || beamUpdateIntervalMs <= 0.0)
+    {
+        NS_FATAL_ERROR("Invalid handover timer or candidate configuration");
     }
     const auto routingMetric = ParseRoutingMetric(routingMetricName);
     if (routingMetric == LeoSimRoutingCalculator::LEOSIM_METRIC_LOAD &&
@@ -910,22 +947,22 @@ main(int argc, char* argv[])
     }
     beamHelper.SetRoutingCalculator(routingCalculator);
     beamHelper.SetLoader(loader);
-    beamHelper.SetHandoverMode(LEOSIM_HO_MODE_CHO);
-    beamHelper.SetTtt(Seconds(1.0));
-    beamHelper.SetT310(Seconds(1.0));
-    beamHelper.SetN310(3);
-    beamHelper.SetN311(3);
-    beamHelper.SetA3Offset(3.0);
-    beamHelper.SetA4Threshold(-110.0);
-    beamHelper.SetTteThreshold(Seconds(30.0));
+    beamHelper.SetHandoverMode(hoModeName == "BHO" ? LEOSIM_HO_MODE_BHO : LEOSIM_HO_MODE_CHO);
+    beamHelper.SetTtt(Seconds(ttt));
+    beamHelper.SetT310(Seconds(t310));
+    beamHelper.SetN310(n310);
+    beamHelper.SetN311(n311);
+    beamHelper.SetA3Offset(a3Offset);
+    beamHelper.SetA4Threshold(a4Threshold);
+    beamHelper.SetTteThreshold(Seconds(tteTrigger));
     beamHelper.SetSinrThreshold(-10.0);
-    beamHelper.SetChoPreparationDelay(Seconds(0.1));
-    beamHelper.SetChoExecutionDelay(Seconds(0.15));
+    beamHelper.SetChoPreparationDelay(MilliSeconds(choPrepMs));
+    beamHelper.SetChoExecutionDelay(MilliSeconds(choExecMs));
     beamHelper.SetTopsisWeights(0.30, 0.25, 0.20, 0.15, 0.10, 0.05, 0.05);
-    beamHelper.SetMaxCandidates(3);
-    beamHelper.SetUpdateInterval(MilliSeconds(1000.0));
-    beamHelper.EnableLoadBalancing(true);
-    beamHelper.EnableHandoverBuffering(true);
+    beamHelper.SetMaxCandidates(maxCandidates);
+    beamHelper.SetUpdateInterval(MilliSeconds(beamUpdateIntervalMs));
+    beamHelper.EnableLoadBalancing(enableLoadBalancing);
+    beamHelper.EnableHandoverBuffering(enableHoBuffering);
 
     // The beam manager's visibility scan requires a populated multi-beam model.
     // Without it no serving access link can be selected, so the routing calculator

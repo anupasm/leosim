@@ -1,6 +1,6 @@
 # Running the LeoSim routing sweep on Sonic
 
-This directory runs `leosim-param-scenario` as a 5-task Slurm array (indices
+This directory runs `leosim-experiments` as a 7-task Slurm array (indices
 0..4):
 
 - metrics: hop distance, path-loss, SNR, signal-strength;
@@ -53,7 +53,7 @@ your account and repository.
 
 Build the image on a login/build node where Apptainer fakeroot and network
 access are available. The definition copies the current repository into the
-image and builds `leosim-param-scenario` there:
+image and builds `leosim-experiments` there:
 
 ```bash
 cd ~/LeoSim
