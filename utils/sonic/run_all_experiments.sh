@@ -5,26 +5,83 @@ set -euo pipefail
 # Previous outputs are archived only when --rerun is requested.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DETECTED_NS3_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
+
+is_allowed_storage_path() {
+  local path="${1}"
+  [[ -z "${path}" ]] && return 1
+  if [[ "${path}" == "${HOME}" || "${path}" == "${HOME}/"* ]]; then
+    return 0
+  fi
+  if [[ "${path}" == "/scratch/adesilva" || "${path}" == "/scratch/adesilva/"* ]]; then
+    return 0
+  fi
+  return 1
+}
+
+find_repo_root() {
+  local current="${1}"
+  while [[ "${current}" != "/" ]]; do
+    if [[ -d "${current}/contrib/leosim" ]]; then
+      printf '%s\n' "${current}"
+      return 0
+    fi
+    if [[ -d "${current}/ns3/contrib/leosim" ]]; then
+      printf '%s\n' "${current}/ns3"
+      return 0
+    fi
+    current="$(dirname "${current}")"
+  done
+  printf '%s\n' "$(cd "${1}/../.." 2>/dev/null || pwd)"
+}
+DETECTED_REPO_ROOT="$(find_repo_root "${SCRIPT_DIR}")"
 
 # LEOSIM_REPO_ROOT historically referred to either the checkout containing
 # ns3/ or to ns3 itself. Accept both layouts and avoid producing ns3/ns3.
-configured_root="${LEOSIM_REPO_ROOT:-${DETECTED_NS3_ROOT}}"
-if [[ -x "${configured_root}/ns3" && -d "${configured_root}/contrib/leosim" ]]; then
-  NS3_ROOT="${LEOSIM_NS3_ROOT:-${configured_root}}"
+configured_root="${LEOSIM_REPO_ROOT:-${DETECTED_REPO_ROOT}}"
+if [[ -d "${configured_root}/contrib/leosim" ]]; then
   REPO_ROOT="${configured_root}"
-elif [[ -x "${configured_root}/ns3/ns3" ]]; then
-  REPO_ROOT="${configured_root}"
-  NS3_ROOT="${LEOSIM_NS3_ROOT:-${REPO_ROOT}/ns3}"
+elif [[ -d "${configured_root}/ns3/contrib/leosim" ]]; then
+  REPO_ROOT="${configured_root}/ns3"
 else
   REPO_ROOT="${configured_root}"
-  NS3_ROOT="${LEOSIM_NS3_ROOT:-${DETECTED_NS3_ROOT}}"
+fi
+candidate_ns3_root="${LEOSIM_NS3_ROOT:-}"
+if [[ -n "${candidate_ns3_root}" ]]; then
+  if [[ -x "${candidate_ns3_root}/ns3" && -d "${candidate_ns3_root}/contrib/leosim" ]]; then
+    NS3_ROOT="${candidate_ns3_root}"
+  elif [[ -d "${candidate_ns3_root}/ns3" && -x "${candidate_ns3_root}/ns3/ns3" && -d "${candidate_ns3_root}/ns3/contrib/leosim" ]]; then
+    NS3_ROOT="${candidate_ns3_root}/ns3"
+  else
+    echo "Ignoring invalid LEOSIM_NS3_ROOT=${candidate_ns3_root}; resolving from the repo instead." >&2
+    NS3_ROOT="${REPO_ROOT}"
+  fi
+else
+  NS3_ROOT="${REPO_ROOT}"
 fi
 ROUTING_SBATCH="${SCRIPT_DIR}/run_leosim_routing.sbatch"
 HANDOVER_SBATCH="${SCRIPT_DIR}/sonic-handover-paper.sbatch"
 BUILD_HOST="${SCRIPT_DIR}/build_leosim.sh"
 BUILD_CONTAINER="${SCRIPT_DIR}/build_leosim_container.sh"
-SIF="${SIF:-${REPO_ROOT}/leosim.sif}"
+if [[ -z "${SIF:-}" ]]; then
+  if [[ -d "/scratch/adesilva" && -w "/scratch/adesilva" ]]; then
+    SIF="/scratch/adesilva/leosim.sif"
+  elif [[ -d "${HOME}" && -w "${HOME}" ]]; then
+    SIF="${HOME}/leosim.sif"
+  else
+    SIF="${REPO_ROOT}/leosim.sif"
+  fi
+fi
+if [[ "${SIF}" == "/" || "${SIF}" == "/leosim.sif" ]]; then
+  SIF="/scratch/adesilva/leosim.sif"
+fi
+
+for opt_path in "${SIF}" "${RESULTS_ROOT:-}" "${LEOSIM_RESULTS_ROOT:-}"; do
+  if [[ -n "${opt_path}" ]] && ! is_allowed_storage_path "${opt_path}"; then
+    echo "Path is outside the allowed storage roots: ${opt_path}" >&2
+    echo "Use a path under ${HOME} or /scratch/adesilva." >&2
+    exit 2
+  fi
+done
 
 action="all"
 rebuild_container=0
@@ -35,7 +92,9 @@ usage() {
 Usage: run_all_experiments.sh [ACTION] [OPTIONS]
 
 Actions:
-  build       Build the host executable and routing container.
+  build       Build the routing container and any available host helper.
+  routing     Submit only the routing array campaign.
+  handover    Submit only the handover array campaign.
   submit      Submit both existing builds with sbatch.
   all         Build and submit both campaigns (default).
   rerun       Archive previous outputs, build, and submit both campaigns.
@@ -70,23 +129,29 @@ while (($# > 0)); do
 done
 
 case "$action" in
-  build|submit|all|rerun|clean) ;;
+  build|routing|handover|submit|all|rerun|clean) ;;
   *) echo "Unknown action: $action" >&2; usage >&2; exit 2 ;;
 esac
 
-for required in "$NS3_ROOT/ns3" "$ROUTING_SBATCH" "$HANDOVER_SBATCH"; do
+for required in "$ROUTING_SBATCH" "$HANDOVER_SBATCH"; do
   if [[ ! -e "$required" ]]; then
     echo "Required file is missing: $required" >&2
     exit 2
   fi
 done
+# Host ns-3 is intentionally not required. LeoSim runs inside the Apptainer
+# image, which embeds the ns-3 checkout and the LeoSim module.
 
 archive_outputs() {
   local stamp archive_root routing_results handover_results
   stamp="$(date -u +%Y%m%dT%H%M%SZ)"
-  archive_root="${REPO_ROOT}/rerun-archive/${stamp}"
-  routing_results="${RESULTS_ROOT:-${REPO_ROOT}/results/leosim-routing}"
-  handover_results="${LEOSIM_RESULTS_ROOT:-${REPO_ROOT}/experiments/handover/results}"
+  local scratch_root="/scratch/adesilva"
+  if [[ ! -d "$scratch_root" ]]; then
+    mkdir -p "$scratch_root"
+  fi
+  archive_root="${RESULTS_ROOT:-${scratch_root}/rerun-archive}/${stamp}"
+  routing_results="${RESULTS_ROOT:-${scratch_root}/results/leosim-routing}"
+  handover_results="${LEOSIM_RESULTS_ROOT:-${scratch_root}/handover/results}"
   mkdir -p "$archive_root"
 
   if [[ -d "$routing_results" ]]; then
@@ -111,7 +176,7 @@ archive_outputs() {
 }
 
 build_experiments() {
-  "$BUILD_HOST" "$REPO_ROOT"
+  mkdir -p "$(dirname "$SIF")"
   if ((skip_container)); then
     echo "Skipping routing container build as requested."
   elif ((rebuild_container)) || [[ ! -s "$SIF" ]]; then
@@ -122,7 +187,7 @@ build_experiments() {
   fi
 }
 
-submit_experiments() {
+submit_routing_experiments() {
   if ! command -v sbatch >/dev/null 2>&1; then
     echo "sbatch is unavailable; run this script on a Slurm login node." >&2
     exit 2
@@ -133,21 +198,45 @@ submit_experiments() {
     exit 2
   fi
 
-  mkdir -p "$REPO_ROOT/logs"
+  mkdir -p "/scratch/adesilva/logs"
   cd "$REPO_ROOT"
-  routing_job="$(sbatch --parsable --export="ALL,SIF=${SIF}" "$ROUTING_SBATCH")"
-  handover_job="$(sbatch --parsable \
-    --export="ALL,LEOSIM_REPO_ROOT=${REPO_ROOT},LEOSIM_NS3_ROOT=${NS3_ROOT}" \
-    "$HANDOVER_SBATCH")"
+  routing_job="$(sbatch --parsable --export="ALL,SIF=${SIF},RESULTS_ROOT=/scratch/adesilva/results/leosim-routing" "$ROUTING_SBATCH")"
   echo "Submitted routing array:  $routing_job"
+  echo "Monitor with: squeue -j ${routing_job%%;*}"
+}
+
+submit_handover_experiments() {
+  if ! command -v sbatch >/dev/null 2>&1; then
+    echo "sbatch is unavailable; run this script on a Slurm login node." >&2
+    exit 2
+  fi
+  if [[ ! -s "$SIF" ]]; then
+    echo "Routing container is missing: $SIF" >&2
+    echo "Run the build action without --skip-container first." >&2
+    exit 2
+  fi
+
+  mkdir -p "/scratch/adesilva/logs"
+  mkdir -p "handover_logs"
+  cd "$REPO_ROOT"
+  handover_job="$(sbatch --parsable --cpus-per-task="${LEOSIM_HO_CPUS:-2}" \
+    --export="ALL,LEOSIM_REPO_ROOT=${REPO_ROOT},LEOSIM_NS3_ROOT=${NS3_ROOT},LEOSIM_RESULTS_ROOT=/scratch/adesilva/handover/results" \
+    "$HANDOVER_SBATCH")"
   echo "Submitted handover array: $handover_job"
-  echo "Monitor with: squeue -j ${routing_job%%;*},${handover_job%%;*}"
+  echo "Monitor with: squeue -j ${handover_job%%;*}"
+}
+
+submit_experiments() {
+  submit_routing_experiments
+  submit_handover_experiments
 }
 
 case "$action" in
   clean) archive_outputs ;;
   rerun) archive_outputs; build_experiments; submit_experiments ;;
   build) build_experiments ;;
+  routing) build_experiments; submit_routing_experiments ;;
+  handover) build_experiments; submit_handover_experiments ;;
   submit) submit_experiments ;;
   all) build_experiments; submit_experiments ;;
 esac

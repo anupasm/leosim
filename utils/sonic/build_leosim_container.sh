@@ -2,11 +2,50 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="${1:-$(cd "${SCRIPT_DIR}/../../../.." && pwd)}"
-SIF="${2:-${REPO_ROOT}/leosim.sif}"
+find_repo_root() {
+  local current="${1}"
+  while [[ "${current}" != "/" ]]; do
+    if [[ -d "${current}/contrib/leosim" ]]; then
+      printf '%s\n' "${current}"
+      return 0
+    fi
+    if [[ -d "${current}/ns3/contrib/leosim" ]]; then
+      printf '%s\n' "${current}/ns3"
+      return 0
+    fi
+    if [[ -f "${current}/CMakeLists.txt" && -d "${current}/model" && -d "${current}/helper" ]]; then
+      printf '%s\n' "${current}"
+      return 0
+    fi
+    current="$(dirname "${current}")"
+  done
+  printf '%s\n' "$(cd "${1}/../.." 2>/dev/null || pwd)"
+}
+REPO_ROOT="${1:-$(find_repo_root "${SCRIPT_DIR}")}"
+if [[ -n "${2:-}" ]]; then
+  SIF="${2}"
+elif [[ -d "/scratch/adesilva" && -w "/scratch/adesilva" ]]; then
+  SIF="/scratch/adesilva/leosim.sif"
+elif [[ -d "${HOME}" && -w "${HOME}" ]]; then
+  SIF="${HOME}/leosim.sif"
+else
+  SIF="${REPO_ROOT}/leosim.sif"
+fi
+if [[ "${SIF}" == "/" || "${SIF}" == "/leosim.sif" ]]; then
+  SIF="/scratch/adesilva/leosim.sif"
+fi
 DEFINITION="${SCRIPT_DIR}/leosim.def"
-RENGINE_SOURCE="${REPO_ROOT}/ns3/contrib/leosim/utils/rengine/leosim-rengine.cc"
-RENGINE_MAKEFILE="${REPO_ROOT}/ns3/contrib/leosim/utils/rengine/Makefile"
+if [[ -d "${REPO_ROOT}/contrib/leosim" ]]; then
+  LEO_MODULE_ROOT="${REPO_ROOT}/contrib/leosim"
+elif [[ -d "${REPO_ROOT}/ns3/contrib/leosim" ]]; then
+  LEO_MODULE_ROOT="${REPO_ROOT}/ns3/contrib/leosim"
+elif [[ -d "${REPO_ROOT}/model" && -d "${REPO_ROOT}/helper" ]]; then
+  LEO_MODULE_ROOT="${REPO_ROOT}"
+else
+  LEO_MODULE_ROOT="${REPO_ROOT}"
+fi
+RENGINE_SOURCE="${LEO_MODULE_ROOT}/utils/rengine/leosim-rengine.cc"
+RENGINE_MAKEFILE="${LEO_MODULE_ROOT}/utils/rengine/Makefile"
 
 if command -v module >/dev/null 2>&1; then
   module purge
@@ -22,7 +61,7 @@ if [[ ! -f "$DEFINITION" || ! -f "$RENGINE_SOURCE" || ! -f "$RENGINE_MAKEFILE" ]
   echo "Expected ${DEFINITION}, ${RENGINE_SOURCE}, and ${RENGINE_MAKEFILE}." >&2
   exit 2
 fi
-
+mkdir -p "$(dirname "$SIF")"
 # leosim.def copies '.', so the build context must be the repository root.
 cd "$REPO_ROOT"
 apptainer build --fakeroot "$SIF" "$DEFINITION"
