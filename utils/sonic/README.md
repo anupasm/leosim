@@ -1,12 +1,41 @@
 # Running the LeoSim routing sweep on Sonic
 
-This directory runs `leosim-experiments` as a 7-task Slurm array (indices
-0..4):
+## Build and submit both campaigns
 
-- metrics: hop distance, path-loss, SNR, signal-strength;
+The orchestration script builds the host executable used by the handover array,
+builds the Apptainer image used by the routing array when it is missing, and
+submits both batch scripts:
+
+```bash
+cd ~/LeoSim
+ns3/contrib/leosim/utils/sonic/run_all_experiments.sh all
+```
+
+After changing code that must be copied into the routing image, force an image
+rebuild:
+
+```bash
+ns3/contrib/leosim/utils/sonic/run_all_experiments.sh all --rebuild-container
+```
+
+For a clean rerun, archive prior results and Slurm logs before rebuilding and
+submitting:
+
+```bash
+ns3/contrib/leosim/utils/sonic/run_all_experiments.sh rerun --rebuild-container
+```
+
+Archived outputs remain recoverable under `rerun-archive/<UTC timestamp>/`.
+Use the `build`, `submit`, or `clean` action to perform only that stage. Run
+`run_all_experiments.sh --help` for environment overrides.
+
+This directory runs `leosim-experiments` as a 7-task Slurm array (indices
+0..6):
+
+- metrics: hop, distance, path-loss, SNR, signal-strength, lifetime, and load;
 - satellites: all 11,514 catalog satellites;
 - duration: 1200 seconds by default (see `SIM_TIMES` in the job script);
-- dynamic-routing intervals: 5 seconds (see `UPDATE_INTERVALS` in the job script).
+- dynamic-routing intervals: 30 seconds (see `UPDATE_INTERVALS` in the job script).
 
 The compute job runs from `leosim.sif`; ns-3, LeoSim, the compiled scenario,
 Python, NumPy, Skyfield, the converter, and TLE inputs are embedded in that

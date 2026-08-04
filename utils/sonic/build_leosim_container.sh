@@ -1,11 +1,12 @@
 #!/bin/bash -l
 set -euo pipefail
 
-REPO_ROOT="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="${1:-$(cd "${SCRIPT_DIR}/../../../../.." && pwd)}"
 SIF="${2:-${REPO_ROOT}/leosim.sif}"
-DEFINITION="${REPO_ROOT}/utils/sonic/leosim.def"
-RENGINE_SOURCE="${REPO_ROOT}/utils/rengine/leosim-rengine.cc"
-RENGINE_MAKEFILE="${REPO_ROOT}/utils/rengine/Makefile"
+DEFINITION="${SCRIPT_DIR}/leosim.def"
+RENGINE_SOURCE="${REPO_ROOT}/ns3/contrib/leosim/utils/rengine/leosim-rengine.cc"
+RENGINE_MAKEFILE="${REPO_ROOT}/ns3/contrib/leosim/utils/rengine/Makefile"
 
 if command -v module >/dev/null 2>&1; then
   module purge
