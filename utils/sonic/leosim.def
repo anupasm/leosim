@@ -21,6 +21,16 @@ From: ubuntu:24.04
     /opt/venv/bin/pip install --no-cache-dir numpy skyfield
     mkdir -p /results
 
+    # A Sonic checkout may be flat: ~/leosim itself is ns-3 and contains the
+    # `ns3` launcher plus contrib/. Normalize that copied layout to the runtime
+    # path /opt/leosim/ns3 expected by the batch job.
+    if [ -f /opt/leosim/ns3 ] && [ -d /opt/leosim/contrib/leosim ]; then
+        mkdir -p /opt/leosim-flat-ns3
+        find /opt/leosim -mindepth 1 -maxdepth 1 \
+            -exec mv -t /opt/leosim-flat-ns3 -- {} +
+        mv /opt/leosim-flat-ns3 /opt/leosim/ns3
+    fi
+
     # Prefer a local ns-3 checkout in the user's home (if available), otherwise
     # fall back to /opt/leosim/ns3 or clone upstream.
     HOST_NS3="/home/people/adesilva/leosim/ns3"

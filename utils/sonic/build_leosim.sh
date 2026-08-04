@@ -3,8 +3,12 @@ set -euo pipefail
 
 # Run this once on Sonic (preferably in an interactive Slurm allocation), not
 # concurrently in every array task.
-REPO_ROOT="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)}"
-NS3_ROOT="${REPO_ROOT}/ns3"
+REPO_ROOT="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+if [[ -x "${REPO_ROOT}/ns3" && -d "${REPO_ROOT}/contrib/leosim" ]]; then
+  NS3_ROOT="${REPO_ROOT}"
+else
+  NS3_ROOT="${REPO_ROOT}/ns3"
+fi
 PYTHON_ENV="${LEOSIM_PYTHON_ENV:-${REPO_ROOT}/.venv-leosim-sonic}"
 
 if command -v module >/dev/null 2>&1; then

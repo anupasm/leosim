@@ -28,6 +28,9 @@ ns3/contrib/leosim/utils/sonic/run_all_experiments.sh rerun --rebuild-container
 Archived outputs remain recoverable under `rerun-archive/<UTC timestamp>/`.
 Use the `build`, `submit`, or `clean` action to perform only that stage. Run
 `run_all_experiments.sh --help` for environment overrides.
+On Sonic, `LEOSIM_REPO_ROOT` can point directly to the flat ns-3 checkout (for
+example, `~/leosim`, containing the `ns3` launcher and `contrib/`). A checkout
+that contains a nested `ns3/` directory is also detected.
 
 This directory runs `leosim-experiments` as a 7-task Slurm array (indices
 0..6):

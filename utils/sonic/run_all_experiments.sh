@@ -5,8 +5,21 @@ set -euo pipefail
 # Previous outputs are archived only when --rerun is requested.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="${LEOSIM_REPO_ROOT:-$(cd "${SCRIPT_DIR}/../../../../.." && pwd)}"
-NS3_ROOT="${LEOSIM_NS3_ROOT:-${REPO_ROOT}/ns3}"
+DETECTED_NS3_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
+
+# LEOSIM_REPO_ROOT historically referred to either the checkout containing
+# ns3/ or to ns3 itself. Accept both layouts and avoid producing ns3/ns3.
+configured_root="${LEOSIM_REPO_ROOT:-${DETECTED_NS3_ROOT}}"
+if [[ -x "${configured_root}/ns3" && -d "${configured_root}/contrib/leosim" ]]; then
+  NS3_ROOT="${LEOSIM_NS3_ROOT:-${configured_root}}"
+  REPO_ROOT="${configured_root}"
+elif [[ -x "${configured_root}/ns3/ns3" ]]; then
+  REPO_ROOT="${configured_root}"
+  NS3_ROOT="${LEOSIM_NS3_ROOT:-${REPO_ROOT}/ns3}"
+else
+  REPO_ROOT="${configured_root}"
+  NS3_ROOT="${LEOSIM_NS3_ROOT:-${DETECTED_NS3_ROOT}}"
+fi
 ROUTING_SBATCH="${SCRIPT_DIR}/run_leosim_routing.sbatch"
 HANDOVER_SBATCH="${SCRIPT_DIR}/sonic-handover-paper.sbatch"
 BUILD_HOST="${SCRIPT_DIR}/build_leosim.sh"
@@ -34,8 +47,8 @@ Options:
   -h, --help           Show this help.
 
 Environment:
-  LEOSIM_REPO_ROOT     LeoSim repository root.
-  LEOSIM_NS3_ROOT      ns-3 directory (default: $LEOSIM_REPO_ROOT/ns3).
+  LEOSIM_REPO_ROOT     LeoSim/ns-3 checkout root (for example, $HOME/leosim).
+  LEOSIM_NS3_ROOT      Optional separate ns-3 directory for a nested checkout.
   SIF                  Routing container image path.
   RESULTS_ROOT         Optional routing-results root passed through to sbatch.
   LEOSIM_RESULTS_ROOT  Optional handover-results root passed through to sbatch.

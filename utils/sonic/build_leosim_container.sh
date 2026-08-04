@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="${1:-$(cd "${SCRIPT_DIR}/../../../../.." && pwd)}"
+REPO_ROOT="${1:-$(cd "${SCRIPT_DIR}/../../../.." && pwd)}"
 SIF="${2:-${REPO_ROOT}/leosim.sif}"
 DEFINITION="${SCRIPT_DIR}/leosim.def"
 RENGINE_SOURCE="${REPO_ROOT}/ns3/contrib/leosim/utils/rengine/leosim-rengine.cc"

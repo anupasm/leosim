@@ -26,7 +26,7 @@ UPDATE_INTERVAL=30
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ns3_dir="${LEOSIM_NS3_ROOT:-$(cd "${script_dir}/../../../.." && pwd)}"
-repo_root="${LEOSIM_REPO_ROOT:-$(cd "${ns3_dir}/.." && pwd)}"
+repo_root="${LEOSIM_REPO_ROOT:-${ns3_dir}}"
 results_root="${LEOSIM_RESULTS_ROOT:-${repo_root}/experiments/handover/results}"
 
 # Decode the complete factorial array. Adjacent IDs vary the random run first,
