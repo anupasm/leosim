@@ -71,7 +71,7 @@ def read_route_metrics(filename: Path | None,
     if filename is None or not filename.is_file():
         return empty
 
-    # leosim-param-scenario creates all server nodes first, followed by UE nodes.
+    # The routing paper experiment creates all server nodes first, followed by UE nodes.
     # Aggregate every UE -> server pair instead of assuming one server and one UE.
     server_nodes = set(range(satellites, satellites + servers))
     ue_nodes = set(range(satellites + servers, satellites + servers + ues))

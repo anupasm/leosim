@@ -13,6 +13,7 @@ import csv
 import ipaddress
 import json
 import re
+import warnings
 from pathlib import Path
 
 import matplotlib
@@ -143,12 +144,15 @@ def discover_runs(results_dir: Path) -> dict[str, dict]:
     return runs
 
 
-def read_traffic_pairs(statistics_file: Path) -> pd.DataFrame:
+def read_traffic_pairs(statistics_file: Path) -> pd.DataFrame | None:
     """Aggregate FlowMonitor statistics by bidirectional ground-node pair."""
     if not statistics_file.is_file():
-        raise FileNotFoundError(
-            f"{statistics_file} is required for per-ground-node-pair traffic plots"
+        warnings.warn(
+            f"{statistics_file} is missing; omitting this run from "
+            "per-ground-node-pair traffic plots",
+            stacklevel=2,
         )
+        return None
 
     with statistics_file.open() as stream:
         statistics = json.load(stream)
@@ -460,7 +464,15 @@ def compact_pair_label(pair: tuple[str, str]) -> str:
 
 def plot_pair_traffic(runs: dict[str, dict]) -> plt.Figure:
     """Plot all observed ground-node pairs, leaving missing values as gaps."""
-    metrics = ordered_metrics(runs)
+    metrics = [
+        metric
+        for metric in ordered_metrics(runs)
+        if runs[metric]["traffic_pairs"] is not None
+    ]
+    if not metrics:
+        raise ValueError(
+            "No result-statistics.json files with ground-node traffic pairs were found"
+        )
     pair_sets = [set(runs[metric]["traffic_pairs"].index) for metric in metrics]
     all_pairs = set.union(*pair_sets)
     if not all_pairs:
