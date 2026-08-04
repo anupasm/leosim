@@ -31,6 +31,7 @@
 #include "ns3/mobility-module.h"
 #include "ns3/network-module.h"
 #include "ns3/point-to-point-module.h"
+#include "ns3/rng-seed-manager.h"
 
 #include <algorithm>
 #include <chrono>
@@ -162,10 +163,12 @@ ParseRoutingMetric(const std::string& value)
         return LeoSimRoutingCalculator::LEOSIM_METRIC_REMAINING_LIFETIME;
     if (value == "load")
         return LeoSimRoutingCalculator::LEOSIM_METRIC_LOAD;
+    if (value == "combined" || value == "aldsr")
+        return LeoSimRoutingCalculator::LEOSIM_METRIC_COMBINED;
 
     NS_FATAL_ERROR("Unknown routingMetric '" << value
                                               << "'; use hop, distance, path-loss, snr, "
-                                                 "signal-strength, lifetime, or load");
+                                                 "signal-strength, lifetime, load, or combined");
     return LeoSimRoutingCalculator::LEOSIM_METRIC_HOP_COUNT;
 }
 
@@ -377,6 +380,17 @@ main(int argc, char* argv[])
     bool enableDynamicRouting = true;
     double routingUpdateInterval = 30.0;
     std::string routingMetricName = "hop";
+    double combinedLoadWeight = 0.50;
+    double combinedDistanceWeight = 0.30;
+    double combinedLifetimeWeight = 0.15;
+    double combinedSnrWeight = 0.0;
+    double combinedHopWeight = 0.05;
+    double combinedMaxDistance = 5000000.0;
+    double combinedTargetLifetime = 120.0;
+    double combinedMinLifetime = 60.0;
+    double combinedMinSnr = 10.0;
+    double combinedGoodSnr = 20.0;
+    double combinedCriticalUtilization = 0.90;
     bool useRouteTreeCache = true;
     std::string routeTreeEngine = "contrib/leosim/utils/rengine/leosim-rengine";
     std::string routeTreeWorkDir = "/tmp/leosim-experiments-route-trees";
@@ -416,9 +430,13 @@ main(int argc, char* argv[])
     double choPrepMs = 100.0;
     double choExecMs = 150.0;
     double beamUpdateIntervalMs = 1000.0;
+    uint32_t rngSeed = 1;
+    uint64_t rngRun = 1;
 
     CommandLine cmd;
     cmd.AddValue("satellites", "Path to satellite mobility trace or position CSV", satelliteFile);
+    cmd.AddValue("rngSeed", "ns-3 random-number seed", rngSeed);
+    cmd.AddValue("rngRun", "ns-3 independent run number", rngRun);
     cmd.AddValue("dataDir", "Path to LeoSim data directory with gss/ and ues/ folders", leosimDataDir);
     cmd.AddValue("groundDevices", "Optional legacy ground device CSV; overrides dataDir when set", groundDeviceFile);
     cmd.AddValue("useTrace", "Load satellites from ns-2 trace format", useTrace);
@@ -476,8 +494,19 @@ main(int argc, char* argv[])
     cmd.AddValue("enableDynamicRouting", "Recompute routes periodically during the run", enableDynamicRouting);
     cmd.AddValue("routingUpdateInterval", "Dynamic routing update interval in seconds", routingUpdateInterval);
     cmd.AddValue("routingMetric",
-                 "Dijkstra metric: hop, distance, path-loss, snr, signal-strength, lifetime, or load",
+                 "Dijkstra metric: hop, distance, path-loss, snr, signal-strength, lifetime, load, or combined",
                  routingMetricName);
+    cmd.AddValue("combinedLoadWeight", "ALDSR load weight", combinedLoadWeight);
+    cmd.AddValue("combinedDistanceWeight", "ALDSR distance weight", combinedDistanceWeight);
+    cmd.AddValue("combinedLifetimeWeight", "ALDSR remaining-lifetime weight", combinedLifetimeWeight);
+    cmd.AddValue("combinedSnrWeight", "ALDSR SNR-margin weight", combinedSnrWeight);
+    cmd.AddValue("combinedHopWeight", "ALDSR per-hop weight", combinedHopWeight);
+    cmd.AddValue("combinedMaxDistance", "ALDSR distance normalization bound in metres", combinedMaxDistance);
+    cmd.AddValue("combinedTargetLifetime", "ALDSR lifetime normalization target in seconds", combinedTargetLifetime);
+    cmd.AddValue("combinedMinLifetime", "ALDSR minimum predicted ISL lifetime in seconds", combinedMinLifetime);
+    cmd.AddValue("combinedMinSnr", "ALDSR minimum usable SNR in dB", combinedMinSnr);
+    cmd.AddValue("combinedGoodSnr", "ALDSR zero-penalty SNR in dB", combinedGoodSnr);
+    cmd.AddValue("combinedCriticalUtilization", "ALDSR utilization saturation point in (0,1]", combinedCriticalUtilization);
     cmd.AddValue("useRouteTreeCache",
                  "Use one cached reverse shortest-path tree per traffic destination "
                  "for all supported routing metrics",
@@ -545,6 +574,9 @@ main(int argc, char* argv[])
     cmd.AddValue("beamUpdateIntervalMs", "Beam manager update interval in milliseconds", beamUpdateIntervalMs);
     cmd.Parse(argc, argv);
 
+    RngSeedManager::SetSeed(rngSeed);
+    RngSeedManager::SetRun(rngRun);
+
     DebugTimer timer;
     timer.Log("command-line parsing");
 
@@ -566,11 +598,12 @@ main(int argc, char* argv[])
         NS_FATAL_ERROR("Invalid handover timer or candidate configuration");
     }
     const auto routingMetric = ParseRoutingMetric(routingMetricName);
-    if (routingMetric == LeoSimRoutingCalculator::LEOSIM_METRIC_LOAD &&
+    if ((routingMetric == LeoSimRoutingCalculator::LEOSIM_METRIC_LOAD ||
+         routingMetric == LeoSimRoutingCalculator::LEOSIM_METRIC_COMBINED) &&
         !enableSyntheticIslLoad)
     {
         enableSyntheticIslLoad = true;
-        std::cout << "routingMetric=load: automatically enabling deterministic synthetic ISL load"
+        std::cout << "load-aware routing: automatically enabling deterministic synthetic ISL load"
                   << std::endl;
     }
 
@@ -935,6 +968,17 @@ main(int argc, char* argv[])
         routingHelper.CreateUnifiedRoutingCalculator(accessChannel, islChannel, verbose);
     routingCalculator->SetOperatorModel(operatorModel);
     routingCalculator->SetIslLoadModel(syntheticIslLoadModel);
+    routingCalculator->SetCombinedMetricWeights(combinedLoadWeight,
+                                                combinedDistanceWeight,
+                                                combinedLifetimeWeight,
+                                                combinedSnrWeight,
+                                                combinedHopWeight);
+    routingCalculator->SetCombinedMetricBounds(combinedMaxDistance,
+                                               combinedTargetLifetime,
+                                               combinedMinLifetime,
+                                               combinedMinSnr,
+                                               combinedGoodSnr,
+                                               combinedCriticalUtilization);
     timer.Log("routing calculator construction");
 
     // === Beam Management & Handover (3GPP NTN CHO) ===
@@ -1045,6 +1089,9 @@ main(int argc, char* argv[])
             break;
         case LeoSimRoutingCalculator::LEOSIM_METRIC_LOAD:
             treeMetric = LeoSimExternalRoutingHelper::LEOSIM_EXTERNAL_WEIGHT_LOAD;
+            break;
+        case LeoSimRoutingCalculator::LEOSIM_METRIC_COMBINED:
+            treeMetric = LeoSimExternalRoutingHelper::LEOSIM_EXTERNAL_WEIGHT_COMBINED;
             break;
         case LeoSimRoutingCalculator::LEOSIM_METRIC_HOP_COUNT:
             break;

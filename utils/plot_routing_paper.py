@@ -43,6 +43,15 @@ LABELS = {
     "lifetime": "Lifetime",
     "load": "Load-aware",
 }
+X_AXIS_LABELS = {
+    "hop": "HC",
+    "distance": "DIST",
+    "path-loss": "PL",
+    "snr": "SNR",
+    "signal-strength": "RSS",
+    "lifetime": "LT",
+    "load": "LA",
+}
 COLORS = {
     "hop": "#0072B2",
     "distance": "#D50000",
@@ -374,7 +383,7 @@ def plot_steady_state(runs: dict[str, dict], warmup: float) -> plt.Figure:
             body.set_linewidth(0.45)
         parts["cmedians"].set_color("black")
         parts["cmedians"].set_linewidth(1.1)
-        axis.set_xticks(positions, [LABELS.get(m, m) for m in metrics])
+        axis.set_xticks(positions, [X_AXIS_LABELS.get(m, m) for m in metrics])
         axis.tick_params(axis="x", rotation=35)
         axis.set_ylabel(ylabel)
         add_grid(axis)
@@ -441,7 +450,7 @@ def plot_tradeoffs(summary: pd.DataFrame, metrics: list[str]) -> plt.Figure:
             linewidth=1.0,
         )
     right.axhline(0, color="black", linewidth=0.7)
-    right.set_xticks(x, [LABELS.get(m, m) for m in metrics])
+    right.set_xticks(x, [X_AXIS_LABELS.get(m, m) for m in metrics])
     right.tick_params(axis="x", rotation=35)
     right.set_ylabel("Relative change vs. hop routing")
     right.yaxis.set_major_formatter(PercentFormatter())

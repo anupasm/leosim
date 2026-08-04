@@ -100,7 +100,8 @@ class LeoSimRoutingCalculator : public Object
         LEOSIM_METRIC_DISTANCE,       //!< Minimize distance
         LEOSIM_METRIC_SIGNAL_STRENGTH, //!< Maximize signal strength
         LEOSIM_METRIC_REMAINING_LIFETIME, //!< Prefer links with more connection time left
-        LEOSIM_METRIC_LOAD //!< Prefer links with more residual synthetic-load capacity
+        LEOSIM_METRIC_LOAD, //!< Prefer links with more residual synthetic-load capacity
+        LEOSIM_METRIC_COMBINED //!< Normalized load-distance-stability (ALDSR) cost
     };
 
     /**
@@ -193,6 +194,18 @@ class LeoSimRoutingCalculator : public Object
 
     /** Return the load-metric cost for a directed ISL, or neutral cost for non-ISLs. */
     double GetIslLoadCost(Ptr<Node> source, Ptr<Node> destination) const;
+
+    /** Configure the normalized Adaptive Load-Distance-Stability Routing cost. */
+    void SetCombinedMetricWeights(double load, double distance, double lifetime, double snr,
+                                  double hop);
+    void SetCombinedMetricBounds(double maximumDistanceMeters,
+                                 double targetLifetimeSeconds,
+                                 double minimumLifetimeSeconds,
+                                 double minimumSnrDb,
+                                 double goodSnrDb,
+                                 double criticalUtilization);
+    /** Return the ALDSR edge cost. A prohibitive cost denotes a failed constraint. */
+    double GetCombinedLinkCost(Ptr<Node> source, Ptr<Node> destination) const;
 
     /**
      * \brief Set beam manager used as the access-link authority.
@@ -560,6 +573,18 @@ class LeoSimRoutingCalculator : public Object
 
     // Synthetic directed-ISL utilization used by LEOSIM_METRIC_LOAD.
     Ptr<LeoSimIslLoadModel> m_islLoadModel;
+
+    double m_combinedLoadWeight{0.50};
+    double m_combinedDistanceWeight{0.30};
+    double m_combinedLifetimeWeight{0.15};
+    double m_combinedSnrWeight{0.0};
+    double m_combinedHopWeight{0.05};
+    double m_combinedMaximumDistanceMeters{5000000.0};
+    double m_combinedTargetLifetimeSeconds{120.0};
+    double m_combinedMinimumLifetimeSeconds{60.0};
+    double m_combinedMinimumSnrDb{10.0};
+    double m_combinedGoodSnrDb{20.0};
+    double m_combinedCriticalUtilization{0.90};
 
     // Beam manager authority for satellite-ground access links
     Ptr<LeoSimBeamManager> m_beamManager;

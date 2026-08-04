@@ -59,6 +59,7 @@ else
   NS3_ROOT="${REPO_ROOT}"
 fi
 ROUTING_SBATCH="${SCRIPT_DIR}/run_leosim_routing.sbatch"
+ALDSR_SBATCH="${SCRIPT_DIR}/run_aldsr_weight_search.sbatch"
 HANDOVER_SBATCH="${SCRIPT_DIR}/sonic-handover-paper.sbatch"
 BUILD_HOST="${SCRIPT_DIR}/build_leosim.sh"
 BUILD_CONTAINER="${SCRIPT_DIR}/build_leosim_container.sh"
@@ -75,7 +76,7 @@ if [[ "${SIF}" == "/" || "${SIF}" == "/leosim.sif" ]]; then
   SIF="/scratch/adesilva/leosim.sif"
 fi
 
-for opt_path in "${SIF}" "${RESULTS_ROOT:-}" "${LEOSIM_RESULTS_ROOT:-}"; do
+for opt_path in "${SIF}" "${RESULTS_ROOT:-}" "${ALDSR_RESULTS_ROOT:-}" "${LEOSIM_RESULTS_ROOT:-}"; do
   if [[ -n "${opt_path}" ]] && ! is_allowed_storage_path "${opt_path}"; then
     echo "Path is outside the allowed storage roots: ${opt_path}" >&2
     echo "Use a path under ${HOME} or /scratch/adesilva." >&2
@@ -94,6 +95,7 @@ Usage: run_all_experiments.sh [ACTION] [OPTIONS]
 Actions:
   build       Build the routing container and any available host helper.
   routing     Submit only the routing array campaign.
+  aldsr       Build and submit only the ALDSR weight-search campaign.
   handover    Submit only the handover array campaign.
   submit      Submit both existing builds with sbatch.
   all         Build and submit both campaigns (default).
@@ -110,6 +112,7 @@ Environment:
   LEOSIM_NS3_ROOT      Optional separate ns-3 directory for a nested checkout.
   SIF                  Routing container image path.
   RESULTS_ROOT         Optional routing-results root passed through to sbatch.
+  ALDSR_RESULTS_ROOT   Optional ALDSR-results root passed through to sbatch.
   LEOSIM_RESULTS_ROOT  Optional handover-results root passed through to sbatch.
 EOF
 }
@@ -129,11 +132,11 @@ while (($# > 0)); do
 done
 
 case "$action" in
-  build|routing|handover|submit|all|rerun|clean) ;;
+  build|routing|aldsr|handover|submit|all|rerun|clean) ;;
   *) echo "Unknown action: $action" >&2; usage >&2; exit 2 ;;
 esac
 
-for required in "$ROUTING_SBATCH" "$HANDOVER_SBATCH"; do
+for required in "$ROUTING_SBATCH" "$ALDSR_SBATCH" "$HANDOVER_SBATCH"; do
   if [[ ! -e "$required" ]]; then
     echo "Required file is missing: $required" >&2
     exit 2
@@ -226,6 +229,24 @@ submit_handover_experiments() {
   echo "Monitor with: squeue -j ${handover_job%%;*}"
 }
 
+submit_aldsr_experiments() {
+  if ! command -v sbatch >/dev/null 2>&1; then
+    echo "sbatch is unavailable; run this script on a Slurm login node." >&2
+    exit 2
+  fi
+  if [[ ! -s "$SIF" ]]; then
+    echo "Routing container is missing: $SIF" >&2
+    exit 2
+  fi
+  local results_root="${ALDSR_RESULTS_ROOT:-/scratch/adesilva/results/leosim-aldsr}"
+  mkdir -p "/scratch/adesilva/logs" "$results_root"
+  cd "$REPO_ROOT"
+  aldsr_job="$(sbatch --parsable \
+    --export="ALL,SIF=${SIF},ALDSR_RESULTS_ROOT=${results_root}" "$ALDSR_SBATCH")"
+  echo "Submitted ALDSR array: $aldsr_job"
+  echo "Monitor with: squeue -j ${aldsr_job%%;*}"
+}
+
 submit_experiments() {
   submit_routing_experiments
   submit_handover_experiments
@@ -236,6 +257,7 @@ case "$action" in
   rerun) archive_outputs; build_experiments; submit_experiments ;;
   build) build_experiments ;;
   routing) build_experiments; submit_routing_experiments ;;
+  aldsr) build_experiments; submit_aldsr_experiments ;;
   handover) build_experiments; submit_handover_experiments ;;
   submit) submit_experiments ;;
   all) build_experiments; submit_experiments ;;

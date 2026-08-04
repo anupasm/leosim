@@ -207,6 +207,7 @@ LeoSimExternalRoutingHelper::LogStatisticsRoute(
     case LEOSIM_EXTERNAL_WEIGHT_SIGNAL_STRENGTH: metricName = "signal-strength"; break;
     case LEOSIM_EXTERNAL_WEIGHT_REMAINING_LIFETIME: metricName = "lifetime"; break;
     case LEOSIM_EXTERNAL_WEIGHT_LOAD: metricName = "load"; break;
+    case LEOSIM_EXTERNAL_WEIGHT_COMBINED: metricName = "combined"; break;
     default: break;
     }
 
@@ -657,6 +658,9 @@ LeoSimExternalRoutingHelper::GetExportedWeight(Ptr<LeoSimRoutingCalculator> calc
     case LEOSIM_EXTERNAL_WEIGHT_LOAD:
         weight = calculator->GetIslLoadCost(source, destination);
         break;
+    case LEOSIM_EXTERNAL_WEIGHT_COMBINED:
+        weight = calculator->GetCombinedLinkCost(source, destination);
+        break;
     case LEOSIM_EXTERNAL_HOP_COUNT:
         weight = 1.0;
         break;
@@ -666,6 +670,10 @@ LeoSimExternalRoutingHelper::GetExportedWeight(Ptr<LeoSimRoutingCalculator> calc
     // Use the same neutral fallback historically used for missing distance.
     if (!std::isfinite(weight) || weight < 0.0)
     {
+        if (m_metric == LEOSIM_EXTERNAL_WEIGHT_COMBINED)
+        {
+            return std::numeric_limits<float>::infinity();
+        }
         return 1.0f;
     }
     return static_cast<float>(weight);
@@ -757,10 +765,16 @@ LeoSimExternalRoutingHelper::ExportSnapshot(Ptr<LeoSimRoutingCalculator> calcula
 
             const uint32_t u = srcIt->second;
             const uint32_t v = dstIt->second;
-            adjacency[u].push_back(
-                std::make_pair(v, GetExportedWeight(calculator, link.first, link.second)));
-            adjacency[v].push_back(
-                std::make_pair(u, GetExportedWeight(calculator, link.second, link.first)));
+            const float forward = GetExportedWeight(calculator, link.first, link.second);
+            const float reverse = GetExportedWeight(calculator, link.second, link.first);
+            if (std::isfinite(forward))
+            {
+                adjacency[u].push_back(std::make_pair(v, forward));
+            }
+            if (std::isfinite(reverse))
+            {
+                adjacency[v].push_back(std::make_pair(u, reverse));
+            }
         }
     }
 

@@ -3325,6 +3325,54 @@ class LeoSimTestInactiveIslsDoNotConsumeCapacity : public TestCase
     }
 };
 
+class LeoSimTestCombinedMetricDistanceReduction : public TestCase
+{
+  public:
+    LeoSimTestCombinedMetricDistanceReduction()
+        : TestCase("ALDSR with only distance weight reduces to distance routing")
+    {
+    }
+
+  private:
+    void DoRun() override
+    {
+        NodeContainer sats;
+        sats.Create(4);
+        Ptr<Node> src = sats.Get(0);
+        Ptr<Node> far = sats.Get(1);
+        Ptr<Node> near = sats.Get(2);
+        Ptr<Node> dst = sats.Get(3);
+        SetTestPosition(src, Vector(0.0, 0.0, 550000.0));
+        SetTestPosition(far, Vector(900000.0, 0.0, 550000.0));
+        SetTestPosition(near, Vector(100000.0, 0.0, 550000.0));
+        SetTestPosition(dst, Vector(200000.0, 0.0, 550000.0));
+
+        Ptr<LeoSimChannelModel> ground = CreateObject<LeoSimChannelModel>();
+        Ptr<LeoSimChannelModel> isl = CreateObject<LeoSimChannelModel>();
+        isl->SetIslMaxDistance(2000000.0);
+        isl->AddIslLink(src, far);
+        isl->AddIslLink(far, dst);
+        isl->AddIslLink(src, near);
+        isl->AddIslLink(near, dst);
+        isl->UpdateAllLinks();
+
+        Ptr<LeoSimRoutingCalculator> calc = CreateObject<LeoSimRoutingCalculator>();
+        calc->SetChannelModel(ground);
+        calc->SetIslChannelModel(isl);
+        calc->SetCombinedMetricWeights(0.0, 10.0, 0.0, 0.0, 0.0);
+        calc->SetCombinedMetricBounds(2000000.0, 120.0, 0.0, -1000.0, 20.0, 0.9);
+        LeoSimRoute route = calc->ComputeRoute(
+            src,
+            dst,
+            LeoSimRoutingCalculator::LEOSIM_METRIC_COMBINED,
+            LeoSimRoutingCalculator::LEOSIM_PATH_ISL_ONLY);
+
+        NS_TEST_ASSERT_MSG_EQ(route.valid, true, "Combined route should be valid");
+        NS_TEST_ASSERT_MSG_EQ(route.path[1], near, "Distance-only ALDSR must choose short path");
+        Simulator::Destroy();
+    }
+};
+
 class LeoSimTestSuite : public TestSuite
 {
 // marker - will be replaced by real class body below
@@ -3465,6 +3513,7 @@ LeoSimTestSuite::LeoSimTestSuite()
     AddTestCase(new LeoSimTestStaticRoutingNoPeriodicRefresh, TestCase::Duration::QUICK);
     AddTestCase(new LeoSimTestRoutingChoosesLowestDistancePath, TestCase::Duration::QUICK);
     AddTestCase(new LeoSimTestRoutingChoosesLowestLoadPath, TestCase::Duration::QUICK);
+    AddTestCase(new LeoSimTestCombinedMetricDistanceReduction, TestCase::Duration::QUICK);
     AddTestCase(new LeoSimTestIslRouteMetricsUseIslQuality, TestCase::Duration::QUICK);
     AddTestCase(new LeoSimTestIslRemainingConnectionTime, TestCase::Duration::QUICK);
     // Phase 9 Weather Model Tests (Tests 10–18)

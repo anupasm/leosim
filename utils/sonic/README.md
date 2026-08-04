@@ -55,6 +55,30 @@ handover log is named `result-handovers.csv`. Set
 scenario loads all UEs and ground stations and creates every UE-to-GSS TCP flow
 at 1 Mbps per flow.
 
+## ALDSR weight-search campaign
+
+The ALDSR experiment is a separate 45-task array: three single-metric controls
+and six combined-weight candidates, each evaluated with five paired seeds. After
+changing the routing implementation, rebuild the container and submit only this
+campaign with:
+
+```bash
+ns3/contrib/leosim/utils/sonic/run_all_experiments.sh aldsr --rebuild-container
+```
+
+Override the pilot scale or output location through the environment:
+
+```bash
+ALDSR_RESULTS_ROOT=/scratch/adesilva/results/aldsr-pilot \
+ALDSR_SATELLITES=1000 ALDSR_DURATION=300 \
+  ns3/contrib/leosim/utils/sonic/run_all_experiments.sh aldsr
+```
+
+The batch file is `run_aldsr_weight_search.sbatch`. It verifies that the image
+contains the combined-metric CLI before consuming compute time, shares locked
+trajectory preprocessing across tasks, writes complete run metadata, and skips
+runs that already contain statistics and a PASS marker.
+
 ## Put LeoSim on Sonic
 
 You do **not** need to install ns-3 or LeoSim directly on the compute nodes.

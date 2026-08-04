@@ -177,6 +177,104 @@ LeoSimRoutingCalculator::GetIslLoadCost(Ptr<Node> source, Ptr<Node> destination)
 }
 
 void
+LeoSimRoutingCalculator::SetCombinedMetricWeights(double load,
+                                                   double distance,
+                                                   double lifetime,
+                                                   double snr,
+                                                   double hop)
+{
+    const double sum = load + distance + lifetime + snr + hop;
+    NS_ABORT_MSG_IF(!std::isfinite(sum) || load < 0.0 || distance < 0.0 ||
+                        lifetime < 0.0 || snr < 0.0 || hop < 0.0 || sum <= 0.0,
+                    "Combined routing weights must be finite, non-negative, and have positive sum");
+    // Normalize here so CLI experiments may use either fractions or percentages.
+    m_combinedLoadWeight = load / sum;
+    m_combinedDistanceWeight = distance / sum;
+    m_combinedLifetimeWeight = lifetime / sum;
+    m_combinedSnrWeight = snr / sum;
+    m_combinedHopWeight = hop / sum;
+}
+
+void
+LeoSimRoutingCalculator::SetCombinedMetricBounds(double maximumDistanceMeters,
+                                                  double targetLifetimeSeconds,
+                                                  double minimumLifetimeSeconds,
+                                                  double minimumSnrDb,
+                                                  double goodSnrDb,
+                                                  double criticalUtilization)
+{
+    NS_ABORT_MSG_IF(maximumDistanceMeters <= 0.0 || targetLifetimeSeconds <= 0.0 ||
+                        minimumLifetimeSeconds < 0.0 ||
+                        !std::isfinite(maximumDistanceMeters) ||
+                        !std::isfinite(targetLifetimeSeconds) ||
+                        !std::isfinite(minimumLifetimeSeconds) || !std::isfinite(minimumSnrDb) ||
+                        !std::isfinite(goodSnrDb) || goodSnrDb <= minimumSnrDb ||
+                        criticalUtilization <= 0.0 || criticalUtilization > 1.0,
+                    "Invalid combined routing normalization bounds");
+    m_combinedMaximumDistanceMeters = maximumDistanceMeters;
+    m_combinedTargetLifetimeSeconds = targetLifetimeSeconds;
+    m_combinedMinimumLifetimeSeconds = minimumLifetimeSeconds;
+    m_combinedMinimumSnrDb = minimumSnrDb;
+    m_combinedGoodSnrDb = goodSnrDb;
+    m_combinedCriticalUtilization = criticalUtilization;
+}
+
+double
+LeoSimRoutingCalculator::GetCombinedLinkCost(Ptr<Node> source, Ptr<Node> destination) const
+{
+    constexpr double prohibited = std::numeric_limits<double>::infinity();
+    if (!source || !destination)
+    {
+        return prohibited;
+    }
+    LeoSimChannelQuality quality = const_cast<LeoSimRoutingCalculator*>(this)->GetLinkQuality(
+        source, destination);
+    if (!std::isfinite(quality.snr) || quality.snr < m_combinedMinimumSnrDb)
+    {
+        return prohibited;
+    }
+    const double lifetime = quality.remainingConnectionTimeSeconds;
+    if (lifetime >= 0.0 && lifetime < m_combinedMinimumLifetimeSeconds)
+    {
+        return prohibited;
+    }
+
+    double utilization = 0.0;
+    if (m_islLoadModel)
+    {
+        LeoSimIslLoadRecord record;
+        if (m_islLoadModel->GetIslLoad(source->GetId(), destination->GetId(), record))
+        {
+            utilization = std::clamp(record.effectiveUtilization, 0.0, 1.0);
+        }
+    }
+    const double loadCost = std::min(1.0,
+                                     (utilization * utilization) /
+                                         (m_combinedCriticalUtilization *
+                                          m_combinedCriticalUtilization));
+    const double distanceCost = std::clamp(quality.distance /
+                                               m_combinedMaximumDistanceMeters,
+                                           0.0,
+                                           1.0);
+    // Negative lifetime denotes an access link without an expiry prediction;
+    // infinite lifetime is maximally stable.
+    const double lifetimeCost = lifetime < 0.0 || std::isinf(lifetime)
+                                    ? 0.0
+                                    : std::min(1.0,
+                                               m_combinedTargetLifetimeSeconds /
+                                                   std::max(lifetime, 1.0e-9));
+    const double snrCost = 1.0 - std::clamp((quality.snr - m_combinedMinimumSnrDb) /
+                                                (m_combinedGoodSnrDb -
+                                                 m_combinedMinimumSnrDb),
+                                            0.0,
+                                            1.0);
+    return m_combinedLoadWeight * loadCost +
+           m_combinedDistanceWeight * distanceCost +
+           m_combinedLifetimeWeight * lifetimeCost + m_combinedSnrWeight * snrCost +
+           m_combinedHopWeight;
+}
+
+void
 LeoSimRoutingCalculator::SetBeamManager(Ptr<LeoSimBeamManager> beamManager)
 {
     NS_LOG_FUNCTION(this << beamManager);
@@ -1111,6 +1209,8 @@ LeoSimRoutingCalculator::GetLinkMetricValue(Ptr<Node> source,
         return 1.0 / quality.remainingConnectionTimeSeconds;
     case LEOSIM_METRIC_LOAD:
         return GetIslLoadCost(source, destination);
+    case LEOSIM_METRIC_COMBINED:
+        return GetCombinedLinkCost(source, destination);
     default:
         return 1.0;
     }
