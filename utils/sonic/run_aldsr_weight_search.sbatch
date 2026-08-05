@@ -123,10 +123,11 @@ flock -u 9
 weight_id="l-${load_weight}_d-${distance_weight}_t-${lifetime_weight}_s-${snr_weight}_h-${hop_weight}"
 run_id="aldsr-${policy}_${weight_id}_seed-${seed}_sats-${satellites}_duration-${sim_time}s-interval-${interval}s"
 run_dir="${RESULTS_ROOT}/${run_id}"
-container_prefix="${CONTAINER_RESULTS_ROOT}/${run_id}/result"
+output_stem="result-job${SLURM_ARRAY_JOB_ID}-task${task_id}-restart${SLURM_RESTART_COUNT:-0}-pid$$"
+container_prefix="${CONTAINER_RESULTS_ROOT}/${run_id}/${output_stem}"
 container_route_tree_dir="${CONTAINER_RESULTS_ROOT}/${run_id}/route-trees"
 mkdir -p "$run_dir"
-if [[ -s "${run_dir}/result-statistics.json" && -s "${run_dir}/status.txt" ]]; then
+if [[ -s "${run_dir}/${output_stem}-statistics.json" && -s "${run_dir}/status.txt" ]]; then
   echo "Completed run already exists: $run_id"
   exit 0
 fi
@@ -155,7 +156,7 @@ scenario+=" --tcpRate=${TCP_RATE:-1Mbps} --enableStatistics=1 --statisticsInterv
 scenario+=" --enableRouteLogging=${ENABLE_ROUTE_LOGGING:-1}"
 scenario+=" --enableHandoverLogging=${ENABLE_HANDOVER_LOGGING:-1}"
 scenario+=" --verbose=${VERBOSE:-1} --enableVisualization=0 --writeFlowMonitor=1"
-scenario+=" --outputPrefix=${container_prefix}"
+scenario+=" --outputPrefix=${container_prefix} --uniqueOutputPrefix=0"
 
 command=(srun --ntasks=1 --cpus-per-task="$allocated_cpus" --cpu-bind=cores
   apptainer exec --cleanenv --bind "${RESULTS_ROOT}:${CONTAINER_RESULTS_ROOT}"
@@ -164,6 +165,7 @@ command=(srun --ntasks=1 --cpus-per-task="$allocated_cpus" --cpu-bind=cores
 {
   echo "job_id=${SLURM_ARRAY_JOB_ID}_${task_id}"
   echo "run_id=${run_id}"
+  echo "output_prefix=${run_dir}/${output_stem}"
   echo "metric=${policy}"
   echo "rng_seed=1"
   echo "rng_run=${seed}"

@@ -114,6 +114,8 @@ esac
 
 run_id="policy-${policy}_load-${load}_buffer-${buffering}_run-${rng_run}"
 run_dir="${results_root}/${run_id}"
+output_stem="result-job${SLURM_ARRAY_JOB_ID}-task${SLURM_ARRAY_TASK_ID}-restart${SLURM_RESTART_COUNT:-0}-pid$$"
+output_prefix="${run_dir}/${output_stem}"
 route_tree_dir="${TMPDIR:-/tmp}/leosim-route-trees-${SLURM_JOB_ID}-${SLURM_ARRAY_TASK_ID}"
 if [[ -d "${repo_root}/data" ]]; then
     data_root="${repo_root}/data"
@@ -215,10 +217,11 @@ command_line="leosim-experiments \
 --enableStatistics=1 --statisticsInterval=1 \
 --enableHandoverLogging=1 --writeFlowMonitor=1 \
 --enableTaskProfiler=1 --progressLogInterval=30 \
---outputPrefix=${run_dir}/result"
+--outputPrefix=${output_prefix} --uniqueOutputPrefix=0"
 
 {
     echo "run_id=${run_id}"
+    echo "output_prefix=${output_prefix}"
     echo "job_id=${SLURM_JOB_ID}"
     echo "array_task_id=${SLURM_ARRAY_TASK_ID}"
     echo "hostname=$(hostname)"
@@ -257,10 +260,10 @@ if [[ ${status} -ne 0 ]]; then
 fi
 
 required=(
-    "${run_dir}/result-statistics.csv"
-    "${run_dir}/result-statistics.json"
-    "${run_dir}/result-handovers.csv"
-    "${run_dir}/result-flowmon.xml"
+    "${output_prefix}-statistics.csv"
+    "${output_prefix}-statistics.json"
+    "${output_prefix}-handovers.csv"
+    "${output_prefix}-flowmon.xml"
 )
 for output in "${required[@]}"; do
     if [[ ! -s "${output}" ]]; then

@@ -113,7 +113,8 @@ prepro_lock="${satellite_positions}.lock"
 
 run_id="metric-${metric}_sats-${satellites}_dynamic_duration-${sim_time}s-interval-${interval}s"
 run_dir="${RESULTS_ROOT}/${run_id}"
-container_prefix="${CONTAINER_RESULTS_ROOT}/${run_id}/result"
+output_stem="result-job${SLURM_ARRAY_JOB_ID}-task${task_id}-restart${SLURM_RESTART_COUNT:-0}-pid$$"
+container_prefix="${CONTAINER_RESULTS_ROOT}/${run_id}/${output_stem}"
 container_route_tree_dir="${CONTAINER_RESULTS_ROOT}/${run_id}/route-trees"
 mkdir -p "${REPO_ROOT}/logs" "$run_dir"
 
@@ -200,7 +201,7 @@ scenario+=" --enableHandoverLogging=${enable_handover_logging}"
 scenario+=" --verbose=${verbose}"
 scenario+=" --enableVisualization=0"
 scenario+=" --writeFlowMonitor=1"
-scenario+=" --outputPrefix=${container_prefix}"
+scenario+=" --outputPrefix=${container_prefix} --uniqueOutputPrefix=0"
 command=(srun
   --ntasks=1
   --cpus-per-task="${allocated_cpus}"
@@ -214,6 +215,7 @@ command=(srun
 {
   echo "job_id=${SLURM_ARRAY_JOB_ID}_${task_id}"
   echo "run_id=${run_id}"
+  echo "output_prefix=${run_dir}/${output_stem}"
   echo "metric=${metric}"
   echo "satellites=${satellites}"
   echo "sim_time_s=${sim_time}"
@@ -238,7 +240,7 @@ command=(srun
   echo "all_to_all_traffic=${all_to_all}"
   echo "tcp_rate_per_flow=${tcp_rate}"
   echo "handover_logging=${enable_handover_logging}"
-  echo "handover_log=${run_dir}/result-handovers.csv"
+  echo "handover_log=${run_dir}/${output_stem}-handovers.csv"
   echo "satellite_positions_host=${satellite_positions}"
   echo "satellite_positions_container=${container_satellite_positions}"
   echo "tle_sources=alpha.csv,beta.csv,gamma.csv"

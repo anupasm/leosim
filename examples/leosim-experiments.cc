@@ -34,14 +34,86 @@
 #include "ns3/rng-seed-manager.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
+#include <cstdlib>
+#include <cstring>
 #include <iomanip>
 #include <iostream>
 #include <map>
+#include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
+#include <fcntl.h>
+#include <sys/file.h>
+#include <unistd.h>
+
 using namespace ns3;
+
+namespace
+{
+
+std::string
+BuildRunSuffix(const std::string& handoverMode, uint32_t rngSeed, uint64_t rngRun)
+{
+    const auto now = std::chrono::system_clock::now();
+    const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(
+                            now.time_since_epoch())
+                            .count();
+    const char* schedulerJobId = std::getenv("SLURM_JOB_ID");
+
+    std::ostringstream suffix;
+    suffix << '-' << handoverMode << "-seed" << rngSeed << "-run" << rngRun;
+    if (schedulerJobId && schedulerJobId[0] != '\0')
+    {
+        suffix << "-job" << schedulerJobId;
+    }
+    suffix << "-t" << micros << "-pid" << getpid();
+    return suffix.str();
+}
+
+class OutputPrefixLock
+{
+  public:
+    explicit OutputPrefixLock(const std::string& outputPrefix)
+        : m_path(outputPrefix + ".lock"),
+          m_fd(open(m_path.c_str(), O_CREAT | O_RDWR, 0666))
+    {
+        if (m_fd < 0)
+        {
+            throw std::runtime_error("Cannot create output lock " + m_path + ": " +
+                                     std::strerror(errno));
+        }
+        if (flock(m_fd, LOCK_EX | LOCK_NB) != 0)
+        {
+            const std::string reason = std::strerror(errno);
+            close(m_fd);
+            m_fd = -1;
+            throw std::runtime_error("Output prefix is already in use: " + outputPrefix +
+                                     " (lock: " + m_path + "): " + reason);
+        }
+    }
+
+    ~OutputPrefixLock()
+    {
+        if (m_fd >= 0)
+        {
+            flock(m_fd, LOCK_UN);
+            close(m_fd);
+        }
+    }
+
+    OutputPrefixLock(const OutputPrefixLock&) = delete;
+    OutputPrefixLock& operator=(const OutputPrefixLock&) = delete;
+
+  private:
+    std::string m_path;
+    int m_fd;
+};
+
+} // namespace
 
 namespace
 {
@@ -344,6 +416,7 @@ main(int argc, char* argv[])
     std::string satelliteFile = leosimDataDir + "/prepro/satellite_mobility.tcl";
     std::string groundDeviceFile;
     std::string outputPrefix = "leosim-experiments";
+    bool uniqueOutputPrefix = true;
     double simTime = 200.0;
     bool useTrace = true;
     bool verbose = false;
@@ -536,7 +609,10 @@ main(int argc, char* argv[])
     cmd.AddValue("allToAllTraffic",
                  "Install one TCP flow from every UE to every server/GSS",
                  allToAllTraffic);
-    cmd.AddValue("outputPrefix", "Prefix used for FlowMonitor XML output", outputPrefix);
+    cmd.AddValue("outputPrefix", "Base prefix used for simulation output files", outputPrefix);
+    cmd.AddValue("uniqueOutputPrefix",
+                 "Append handover mode, RNG seed/run, job ID, timestamp, and PID to the output prefix",
+                 uniqueOutputPrefix);
     cmd.AddValue("writeFlowMonitor", "Write FlowMonitor XML output", writeFlowMonitor);
     cmd.AddValue("enableVisualization",
                  "Write CSV files for the LeoSim 3D visualizer",
@@ -597,6 +673,12 @@ main(int argc, char* argv[])
     {
         NS_FATAL_ERROR("Invalid handover timer or candidate configuration");
     }
+    if (uniqueOutputPrefix)
+    {
+        outputPrefix += BuildRunSuffix(hoModeName, rngSeed, rngRun);
+    }
+    OutputPrefixLock outputPrefixLock(outputPrefix);
+    std::cout << "Output prefix: " << outputPrefix << std::endl;
     const auto routingMetric = ParseRoutingMetric(routingMetricName);
     if ((routingMetric == LeoSimRoutingCalculator::LEOSIM_METRIC_LOAD ||
          routingMetric == LeoSimRoutingCalculator::LEOSIM_METRIC_COMBINED) &&
