@@ -60,9 +60,11 @@ LeoSimTcpTrafficApplication::StopApplication()
                                      MakeNullCallback<void, Ptr<Socket>>());
         m_socket->SetCloseCallbacks(MakeNullCallback<void, Ptr<Socket>>(),
                                     MakeNullCallback<void, Ptr<Socket>>());
+        m_socket->SetSendCallback(MakeNullCallback<void, Ptr<Socket>, uint32_t>());
         m_socket->Close();
         m_socket = nullptr;
     }
+    m_pendingPacket = nullptr;
 }
 
 void
@@ -80,6 +82,7 @@ LeoSimTcpTrafficApplication::Connect()
     m_socket->SetCloseCallbacks(
         MakeCallback(&LeoSimTcpTrafficApplication::ConnectionClosed, this),
         MakeCallback(&LeoSimTcpTrafficApplication::ConnectionClosed, this));
+    m_socket->SetSendCallback(MakeCallback(&LeoSimTcpTrafficApplication::SendReady, this));
     m_socket->Connect(m_remote);
     m_socket->ShutdownRecv();
 }
@@ -103,6 +106,7 @@ LeoSimTcpTrafficApplication::ConnectionFailed(Ptr<Socket> socket)
                                              << "s; scheduling LeoSim retry");
     if (socket == m_socket)
     {
+        socket->SetSendCallback(MakeNullCallback<void, Ptr<Socket>, uint32_t>());
         socket->Close();
         m_socket = nullptr;
     }
@@ -116,6 +120,7 @@ LeoSimTcpTrafficApplication::ConnectionClosed(Ptr<Socket> socket)
 {
     if (socket == m_socket)
     {
+        socket->SetSendCallback(MakeNullCallback<void, Ptr<Socket>, uint32_t>());
         m_socket = nullptr;
     }
     m_connected = false;
@@ -130,7 +135,56 @@ LeoSimTcpTrafficApplication::SendPacket()
     {
         return;
     }
-    m_socket->Send(Create<Packet>(m_packetSize));
+    if (!m_pendingPacket)
+    {
+        m_pendingPacket = Create<Packet>(m_packetSize);
+    }
+    SendPendingPacket();
+}
+
+void
+LeoSimTcpTrafficApplication::SendPendingPacket()
+{
+    if (!m_running || !m_connected || !m_socket || !m_pendingPacket)
+    {
+        return;
+    }
+
+    const int sent = m_socket->Send(m_pendingPacket);
+    if (sent < 0)
+    {
+        // TCP has no send-buffer space.  Keep the packet and wait for SendReady().
+        return;
+    }
+
+    const uint32_t bytesSent = static_cast<uint32_t>(sent);
+    if (bytesSent < m_pendingPacket->GetSize())
+    {
+        m_pendingPacket = m_pendingPacket->CreateFragment(bytesSent,
+                                                          m_pendingPacket->GetSize() - bytesSent);
+        return;
+    }
+
+    m_pendingPacket = nullptr;
+    ScheduleNextPacket();
+}
+
+void
+LeoSimTcpTrafficApplication::SendReady(Ptr<Socket> socket, uint32_t availableBytes)
+{
+    if (socket == m_socket && availableBytes > 0)
+    {
+        SendPendingPacket();
+    }
+}
+
+void
+LeoSimTcpTrafficApplication::ScheduleNextPacket()
+{
+    if (!m_running || m_sendEvent.IsPending())
+    {
+        return;
+    }
     const Time interval = Seconds(static_cast<double>(m_packetSize) * 8.0 /
                                   static_cast<double>(m_dataRate.GetBitRate()));
     m_sendEvent = Simulator::Schedule(interval,

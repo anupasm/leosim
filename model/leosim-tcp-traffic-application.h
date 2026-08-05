@@ -12,6 +12,7 @@ namespace ns3
 {
 
 class Socket;
+class Packet;
 
 /**
  * Rate-controlled LeoSim TCP source that treats transient no-route connection
@@ -37,6 +38,9 @@ class LeoSimTcpTrafficApplication : public Application
     void ConnectionFailed(Ptr<Socket> socket);
     void ConnectionClosed(Ptr<Socket> socket);
     void SendPacket();
+    void SendPendingPacket();
+    void SendReady(Ptr<Socket> socket, uint32_t availableBytes);
+    void ScheduleNextPacket();
     void ScheduleRetry();
 
     Address m_remote;
@@ -44,6 +48,7 @@ class LeoSimTcpTrafficApplication : public Application
     uint32_t m_packetSize{1024};
     Time m_retryInterval{Seconds(1)};
     Ptr<Socket> m_socket;
+    Ptr<Packet> m_pendingPacket;
     EventId m_sendEvent;
     EventId m_retryEvent;
     bool m_running{false};
