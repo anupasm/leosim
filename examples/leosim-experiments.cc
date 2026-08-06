@@ -1287,7 +1287,6 @@ main(int argc, char* argv[])
                                            tcpRate,
                                            tcpPacketSize);
     }
-    (void)trafficApps;
     timer.Log("traffic application installation");
 
     timer.Begin("FlowMonitor installation");
@@ -1306,6 +1305,15 @@ main(int argc, char* argv[])
         statistics->SetFlowMonitor(flowMonitor, classifier);
         statistics->SetBeamManager(beamManager);
         statistics->SetIslLoadModel(syntheticIslLoadModel);
+        statistics->SetApplicationMeasurementWindow(Seconds(appStart), Seconds(appStop));
+        for (uint32_t i = 0; i < trafficApps.GetN(); ++i)
+        {
+            Ptr<PacketSink> sink = DynamicCast<PacketSink>(trafficApps.Get(i));
+            if (sink)
+            {
+                statistics->AddApplicationSink(sink);
+            }
+        }
         if (!statistics->AttachChannelModel(accessChannel))
         {
             std::cerr << "Warning: failed to attach statistics to access channel traces"

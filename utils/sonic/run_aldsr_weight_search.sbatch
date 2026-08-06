@@ -4,7 +4,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=6
 #SBATCH --time=24:00:00
-#SBATCH --array=0-44%10
+#SBATCH --array=0-26%20
 #SBATCH --output=logs/%x-%A_%a.out
 #SBATCH --error=logs/%x-%A_%a.err
 
@@ -22,7 +22,7 @@ DISTANCE_WEIGHTS=(0 1 0 0.20 0.20 0.30 0.40 0.30 0.40)
 LIFETIME_WEIGHTS=(0 0 0 0.05 0.15 0.15 0.15 0.25 0.25)
 SNR_WEIGHTS=(0 0 0 0.00 0.00 0.00 0.00 0.00 0.00)
 HOP_WEIGHTS=(0 0 1 0.05 0.05 0.05 0.05 0.05 0.05)
-SEEDS=(1 2 3 4 5)
+SEEDS=(1 2 3)
 
 SATELLITE_COUNTS=(11514)
 SIM_TIMES=(1200)

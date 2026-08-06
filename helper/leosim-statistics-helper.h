@@ -25,6 +25,7 @@ class LeoSimIslLoadModel;
 class NetDevice;
 class Node;
 class Packet;
+class PacketSink;
 
 /** Numerically stable descriptive statistics used by LeoSim KPI collectors. */
 struct LeoSimRunningStatistics
@@ -87,6 +88,15 @@ struct LeoSimStatisticsSnapshot
     uint64_t rxBytes{0};
     double throughputMbps{0.0};
     double offeredLoadMbps{0.0};
+    uint64_t applicationRxBytes{0};
+    double applicationGoodputMbps{0.0};
+    double applicationMeasurementSeconds{0.0};
+    uint32_t applicationSinkCount{0};
+    uint32_t applicationSinksWithRx{0};
+    double meanSinkGoodputMbps{0.0};
+    double minimumSinkGoodputMbps{0.0};
+    double maximumSinkGoodputMbps{0.0};
+    double sinkGoodputJainFairness{0.0};
     double packetDeliveryRatio{0.0};
     double meanDelayMs{0.0};
     double meanJitterMs{0.0};
@@ -125,6 +135,11 @@ class LeoSimStatisticsHelper : public Object
     void SetBeamManager(Ptr<LeoSimBeamManager> beamManager);
     void SetRouteStatistics(const LeoSimRouteStatistics& statistics);
     void SetIslLoadModel(Ptr<LeoSimIslLoadModel> loadModel);
+    /** Register an application PacketSink for exact payload-byte goodput accounting. */
+    void AddApplicationSink(Ptr<PacketSink> sink);
+    void ClearApplicationSinks();
+    /** Set the interval over which application goodput is normalized. */
+    void SetApplicationMeasurementWindow(Time start, Time stop);
 
     void StartPeriodicSampling(Time interval, const std::string& csvFilename);
     void StopPeriodicSampling();
@@ -157,6 +172,10 @@ class LeoSimStatisticsHelper : public Object
     Ptr<Ipv4FlowClassifier> m_classifier;
     Ptr<LeoSimBeamManager> m_beamManager;
     Ptr<LeoSimIslLoadModel> m_islLoadModel;
+    std::vector<Ptr<PacketSink>> m_applicationSinks;
+    Time m_applicationWindowStart;
+    Time m_applicationWindowStop;
+    bool m_hasApplicationMeasurementWindow{false};
     LeoSimRouteStatistics m_routeStatistics;
     LeoSimRunningStatistics m_snr;
     LeoSimRunningStatistics m_doppler;
@@ -169,6 +188,7 @@ class LeoSimStatisticsHelper : public Object
     EventId m_sampleEvent;
     bool m_sampling{false};
     double m_lastCsvSampleSeconds{-1.0};
+    uint64_t m_lastCsvApplicationRxBytes{0};
 };
 
 } // namespace ns3

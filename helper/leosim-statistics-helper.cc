@@ -10,6 +10,7 @@
 #include "ns3/net-device.h"
 #include "ns3/node.h"
 #include "ns3/packet.h"
+#include "ns3/packet-sink.h"
 #include "ns3/simulator.h"
 
 #include <algorithm>
@@ -76,6 +77,34 @@ LeoSimStatisticsHelper::SetFlowMonitor(Ptr<FlowMonitor> monitor,
 {
     m_monitor = monitor;
     m_classifier = classifier;
+}
+
+void
+LeoSimStatisticsHelper::AddApplicationSink(Ptr<PacketSink> sink)
+{
+    if (!sink)
+    {
+        throw std::invalid_argument("application PacketSink must not be null");
+    }
+    m_applicationSinks.push_back(sink);
+}
+
+void
+LeoSimStatisticsHelper::ClearApplicationSinks()
+{
+    m_applicationSinks.clear();
+}
+
+void
+LeoSimStatisticsHelper::SetApplicationMeasurementWindow(Time start, Time stop)
+{
+    if (start.IsNegative() || stop <= start)
+    {
+        throw std::invalid_argument("application measurement stop must be after non-negative start");
+    }
+    m_applicationWindowStart = start;
+    m_applicationWindowStop = stop;
+    m_hasApplicationMeasurementWindow = true;
 }
 
 bool
@@ -185,6 +214,63 @@ LeoSimStatisticsHelper::GetSnapshot(bool checkLostPackets) const
         out.throughputMbps = 8.0 * out.rxBytes / elapsed / 1e6;
         out.offeredLoadMbps = 8.0 * out.txBytes / elapsed / 1e6;
     }
+    const Time now = Simulator::Now();
+    if (m_hasApplicationMeasurementWindow)
+    {
+        const Time measurementEnd = std::min(now, m_applicationWindowStop);
+        if (measurementEnd > m_applicationWindowStart)
+        {
+            out.applicationMeasurementSeconds =
+                (measurementEnd - m_applicationWindowStart).GetSeconds();
+        }
+    }
+    else
+    {
+        out.applicationMeasurementSeconds = elapsed;
+    }
+    out.applicationSinkCount = static_cast<uint32_t>(m_applicationSinks.size());
+    long double squaredApplicationBytes = 0.0;
+    uint64_t minimumApplicationBytes = 0;
+    uint64_t maximumApplicationBytes = 0;
+    bool firstApplicationSink = true;
+    for (const auto& sink : m_applicationSinks)
+    {
+        const uint64_t bytes = sink ? sink->GetTotalRx() : 0;
+        out.applicationRxBytes += bytes;
+        squaredApplicationBytes += static_cast<long double>(bytes) * bytes;
+        if (bytes > 0)
+        {
+            ++out.applicationSinksWithRx;
+        }
+        if (firstApplicationSink)
+        {
+            minimumApplicationBytes = maximumApplicationBytes = bytes;
+            firstApplicationSink = false;
+        }
+        else
+        {
+            minimumApplicationBytes = std::min(minimumApplicationBytes, bytes);
+            maximumApplicationBytes = std::max(maximumApplicationBytes, bytes);
+        }
+    }
+    if (out.applicationMeasurementSeconds > 0.0)
+    {
+        const double bytesToMbps = 8.0 / out.applicationMeasurementSeconds / 1e6;
+        out.applicationGoodputMbps = out.applicationRxBytes * bytesToMbps;
+        if (out.applicationSinkCount > 0)
+        {
+            out.meanSinkGoodputMbps = out.applicationGoodputMbps / out.applicationSinkCount;
+            out.minimumSinkGoodputMbps = minimumApplicationBytes * bytesToMbps;
+            out.maximumSinkGoodputMbps = maximumApplicationBytes * bytesToMbps;
+        }
+    }
+    if (out.applicationSinkCount > 0 && squaredApplicationBytes > 0.0)
+    {
+        const long double total = out.applicationRxBytes;
+        out.sinkGoodputJainFairness = static_cast<double>(
+            total * total / (static_cast<long double>(out.applicationSinkCount) *
+                             squaredApplicationBytes));
+    }
     if (m_beamManager)
     {
         auto events = m_beamManager->GetHandoverHistory();
@@ -214,6 +300,7 @@ LeoSimStatisticsHelper::StartPeriodicSampling(Time interval, const std::string& 
     StopPeriodicSampling();
     m_sampleInterval = interval; m_csvFilename = filename; m_sampling = true;
     m_lastCsvSampleSeconds = -1.0;
+    m_lastCsvApplicationRxBytes = 0;
     WriteCsvHeader();
     m_sampleEvent = Simulator::Schedule(interval, &LeoSimStatisticsHelper::Sample, this);
 }
@@ -236,7 +323,7 @@ LeoSimStatisticsHelper::WriteCsvHeader()
 {
     std::ofstream out(m_csvFilename, std::ios::trunc);
     if (!out) throw std::runtime_error("cannot open statistics CSV: " + m_csvFilename);
-    out << "time_s,tx_packets,rx_packets,lost_packets,pdr,throughput_mbps,offered_mbps,delay_ms,jitter_ms,hop_count,snr_mean_db,snr_min_db,snr_max_db,doppler_mean_hz,path_loss_mean_db,link_up,link_down,link_degraded,handovers,ho_success_ratio,ho_latency_mean_ms,ho_latency_p95_ms,ping_pongs\n";
+    out << "time_s,tx_packets,rx_packets,lost_packets,pdr,throughput_mbps,offered_mbps,app_rx_bytes,goodput_mbps,interval_goodput_mbps,app_measurement_s,app_sinks,app_sinks_with_rx,sink_goodput_jain_fairness,delay_ms,jitter_ms,hop_count,snr_mean_db,snr_min_db,snr_max_db,doppler_mean_hz,path_loss_mean_db,link_up,link_down,link_degraded,handovers,ho_success_ratio,ho_latency_mean_ms,ho_latency_p95_ms,ping_pongs\n";
 }
 
 void
@@ -266,14 +353,32 @@ LeoSimStatisticsHelper::AppendCsvSnapshot()
         return;
     }
     const auto s = GetSnapshot(false);
+    double intervalGoodputMbps = 0.0;
+    if (m_lastCsvSampleSeconds >= 0.0 && nowSeconds > m_lastCsvSampleSeconds &&
+        s.applicationRxBytes >= m_lastCsvApplicationRxBytes)
+    {
+        intervalGoodputMbps =
+            8.0 * (s.applicationRxBytes - m_lastCsvApplicationRxBytes) /
+            (nowSeconds - m_lastCsvSampleSeconds) / 1e6;
+    }
+    else if (s.applicationMeasurementSeconds > 0.0)
+    {
+        intervalGoodputMbps = s.applicationGoodputMbps;
+    }
     std::ofstream out(m_csvFilename, std::ios::app);
     if (!out) throw std::runtime_error("cannot append statistics CSV: " + m_csvFilename);
     out << std::setprecision(10) << s.timestamp.GetSeconds() << ',' << s.txPackets << ',' << s.rxPackets << ',' << s.lostPackets << ','
-        << s.packetDeliveryRatio << ',' << s.throughputMbps << ',' << s.offeredLoadMbps << ',' << s.meanDelayMs << ',' << s.meanJitterMs << ',' << s.meanHopCount << ','
+        << s.packetDeliveryRatio << ',' << s.throughputMbps << ',' << s.offeredLoadMbps << ','
+        << s.applicationRxBytes << ',' << s.applicationGoodputMbps << ','
+        << intervalGoodputMbps << ','
+        << s.applicationMeasurementSeconds << ',' << s.applicationSinkCount << ','
+        << s.applicationSinksWithRx << ',' << s.sinkGoodputJainFairness << ','
+        << s.meanDelayMs << ',' << s.meanJitterMs << ',' << s.meanHopCount << ','
         << s.snrDb.mean << ',' << s.snrDb.min << ',' << s.snrDb.max << ',' << s.dopplerHz.mean << ',' << s.pathLossDb.mean << ','
         << s.linkUpEvents << ',' << s.linkDownEvents << ',' << s.linkDegradedEvents << ',' << s.handovers << ',' << s.handoverSuccessRatio << ','
         << s.meanHandoverLatencyMs << ',' << s.p95HandoverLatencyMs << ',' << s.pingPongs << '\n';
     m_lastCsvSampleSeconds = nowSeconds;
+    m_lastCsvApplicationRxBytes = s.applicationRxBytes;
 }
 
 void
@@ -287,6 +392,15 @@ LeoSimStatisticsHelper::WriteSummary(const std::string& filename, bool includeFl
         << ", \"tx_bytes\": " << s.txBytes << ", \"rx_bytes\": " << s.rxBytes << ", \"pdr\": " << s.packetDeliveryRatio
         << ", \"throughput_mbps\": " << s.throughputMbps << ", \"offered_mbps\": " << s.offeredLoadMbps << ", \"delay_ms\": " << s.meanDelayMs
         << ", \"jitter_ms\": " << s.meanJitterMs << ", \"mean_hop_count\": " << s.meanHopCount << "},\n"
+        << "  \"application\": {\"rx_bytes\": " << s.applicationRxBytes
+        << ", \"goodput_mbps\": " << s.applicationGoodputMbps
+        << ", \"measurement_s\": " << s.applicationMeasurementSeconds
+        << ", \"sink_count\": " << s.applicationSinkCount
+        << ", \"sinks_with_rx\": " << s.applicationSinksWithRx
+        << ", \"sink_goodput_mbps\": {\"mean\": " << s.meanSinkGoodputMbps
+        << ", \"min\": " << s.minimumSinkGoodputMbps
+        << ", \"max\": " << s.maximumSinkGoodputMbps
+        << ", \"jain_fairness\": " << s.sinkGoodputJainFairness << "}},\n"
         << "  \"satellite_link\": {\"snr_db\": {\"samples\": " << s.snrDb.count << ", \"mean\": " << s.snrDb.mean << ", \"min\": " << s.snrDb.min << ", \"max\": " << s.snrDb.max << ", \"stddev\": " << s.snrDb.GetStandardDeviation()
         << "}, \"doppler_hz\": {\"samples\": " << s.dopplerHz.count << ", \"mean\": " << s.dopplerHz.mean << "}, \"path_loss_db\": {\"samples\": " << s.pathLossDb.count << ", \"mean\": " << s.pathLossDb.mean
         << "}, \"link_up_events\": " << s.linkUpEvents << ", \"link_down_events\": " << s.linkDownEvents << ", \"link_degraded_events\": " << s.linkDegradedEvents << "},\n"

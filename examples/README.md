@@ -82,6 +82,15 @@ With `--outputPrefix=DIR/result`, the experiment writes files including:
 - `DIR/result-flowmon.xml`
 - optional route, beam, visualization, and ISL-load traces when enabled
 
+The statistics outputs distinguish IP-layer throughput from exact application
+goodput. `throughput_mbps` uses aggregate FlowMonitor received bytes over elapsed
+simulation time, while `application.goodput_mbps` in JSON uses payload bytes from
+all registered `PacketSink` applications over `[appStart, appStop]`. The
+application section also records `rx_bytes`, the measurement duration, sink
+counts, per-sink minimum/mean/maximum goodput, and Jain fairness. Periodic CSV
+snapshots include cumulative `app_rx_bytes` and `goodput_mbps`, plus
+`interval_goodput_mbps` for direct stall/outage visualization.
+
 For reproducible replications, set the ns-3 seed and run number:
 
 ```bash

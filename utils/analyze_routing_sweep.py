@@ -175,6 +175,16 @@ def load_runs(results_dir: Path) -> list[dict]:
                         "rx_packets": int(float(last.get("rx_packets", 0))) if last.get("rx_packets") is not None else 0,
                         "lost_packets": int(float(last.get("lost_packets", 0))) if last.get("lost_packets") is not None else 0,
                     },
+                    "application": {
+                        "rx_bytes": int(float(last.get("app_rx_bytes", 0))) if last.get("app_rx_bytes") else 0,
+                        "goodput_mbps": number(last.get("goodput_mbps")),
+                        "measurement_s": number(last.get("app_measurement_s")),
+                        "sink_count": int(number(last.get("app_sinks"))),
+                        "sinks_with_rx": int(number(last.get("app_sinks_with_rx"))),
+                        "sink_goodput_mbps": {
+                            "jain_fairness": number(last.get("sink_goodput_jain_fairness")),
+                        },
+                    } if last.get("goodput_mbps") is not None else None,
                     "handover": {
                         "total": int(number(last.get("handovers"))),
                         # The periodic CSV does not contain the successful
@@ -189,6 +199,10 @@ def load_runs(results_dir: Path) -> list[dict]:
                 raise FileNotFoundError(f"Missing statistics file for run: {prefix}")
 
         network = stats["network"]
+        application = stats.get("application")
+        application_available = isinstance(application, dict)
+        application = application or {}
+        sink_goodput = application.get("sink_goodput_mbps") or {}
         satellites = int(item["satellites"])
         run = {
             "run_id": item["run_id"],
@@ -201,6 +215,13 @@ def load_runs(results_dir: Path) -> list[dict]:
             "wall_time_s": number(item["wall_time_s"]),
             "pdr": number(network["pdr"]),
             "throughput_mbps": number(network["throughput_mbps"]),
+            "application_data_available": application_available,
+            "goodput_mbps": number(application.get("goodput_mbps")),
+            "application_rx_bytes": int(number(application.get("rx_bytes"))),
+            "application_measurement_s": number(application.get("measurement_s")),
+            "application_sink_count": int(number(application.get("sink_count"))),
+            "application_sinks_with_rx": int(number(application.get("sinks_with_rx"))),
+            "sink_goodput_jain_fairness": number(sink_goodput.get("jain_fairness")),
             "delay_ms": number(network["delay_ms"]),
             "jitter_ms": number(network["jitter_ms"]),
             "flow_mean_hop_count": number(network["mean_hop_count"]),
@@ -270,7 +291,7 @@ def add_hop_deltas(runs: list[dict]) -> None:
         groups[key].append(run)
 
     delta_fields = (
-        "pdr", "throughput_mbps", "delay_ms", "flow_mean_hop_count",
+        "pdr", "throughput_mbps", "goodput_mbps", "delay_ms", "flow_mean_hop_count",
         "route_changes", "mean_route_distance_km", "mean_route_min_snr_db",
         "mean_route_path_loss_db", "handovers", "handover_success_ratio",
         "mean_handover_latency_ms", "p95_handover_latency_ms", "ping_pongs",
@@ -313,14 +334,16 @@ def write_markdown(filename: Path, runs: list[dict]) -> None:
             satellites, duration, interval = key
             group = sorted(groups[key], key=lambda run: METRIC_ORDER.get(run["metric"], 99))
             stream.write(f"## {satellites} satellites, {duration:g}s, update {interval:g}s\n\n")
-            stream.write("| Metric | PDR | Throughput Mbps | Delay ms | Flow hops | Route changes | "
+            stream.write("| Metric | PDR | Throughput Mbps | Goodput Mbps | Delay ms | Flow hops | Route changes | "
                          "Unique paths | Route km | Min SNR dB | Path loss dB | Handovers | "
                          "HO/min | HO success | HO latency mean/P95 ms | Ping-pongs |\n")
             stream.write(
-                "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
+                "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
                 "---:|---:|---:|---:|\n"
             )
             for run in group:
+                goodput = (fmt(run["goodput_mbps"], 6)
+                           if run["application_data_available"] else "—")
                 route_changes = str(run["route_changes"]) if run["route_data_available"] else "—"
                 unique_paths = str(run["unique_paths"]) if run["route_data_available"] else "—"
                 route_km = (fmt(run["mean_route_distance_km"])
@@ -343,7 +366,7 @@ def write_markdown(filename: Path, runs: list[dict]) -> None:
                     handover_latency = ping_pongs = "—"
                 stream.write(
                     f"| {run['metric']} | {fmt(run['pdr'], 4)} | {fmt(run['throughput_mbps'], 6)} | "
-                    f"{fmt(run['delay_ms'])} | {fmt(run['flow_mean_hop_count'])} | "
+                    f"{goodput} | {fmt(run['delay_ms'])} | {fmt(run['flow_mean_hop_count'])} | "
                     f"{route_changes} | {unique_paths} | {route_km} | {route_snr} | "
                     f"{route_loss} | {handovers} | {handover_rate} | "
                     f"{handover_success} | {handover_latency} | {ping_pongs} |\n"

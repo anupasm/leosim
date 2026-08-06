@@ -520,6 +520,18 @@ LeoSimTestSinrWithICI::DoRun()
     Ptr<LeoSimSinrEngine> engine = CreateObject<LeoSimSinrEngine>();
     const auto conventional = engine->ComputeSinr(1, 0, 0, beams, 30.0, -129.8);
     const auto wrapped = engine->ComputeSinr(1, 0, 0, beams, 30.0, 230.2);
+    NS_TEST_ASSERT_MSG_EQ(std::isfinite(conventional.sinr_dB),
+                          true,
+                          "A valid serving beam must produce a finite SINR for CSV logging");
+    NS_TEST_ASSERT_MSG_EQ(std::isfinite(conventional.signal_dBm),
+                          true,
+                          "A valid serving beam must produce finite received power");
+    NS_TEST_ASSERT_MSG_EQ(std::isfinite(conventional.thermalNoise_dBm),
+                          true,
+                          "A valid serving beam must produce finite thermal noise");
+    NS_TEST_ASSERT_MSG_EQ(std::isfinite(wrapped.sinr_dB),
+                          true,
+                          "Equivalent wrapped coordinates must produce a finite SINR");
     NS_TEST_ASSERT_MSG_EQ_TOL(conventional.sinr_dB,
                               wrapped.sinr_dB,
                               1e-9,
