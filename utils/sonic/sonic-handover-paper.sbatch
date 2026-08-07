@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=leosim-ho
-#SBATCH --array=0-179%12
+#SBATCH --array=0-89%12
 #SBATCH --time=48:00:00
 #SBATCH --cpus-per-task=4
-#SBATCH --output=handover_logs/leosim-ho-%A_%a.out
-#SBATCH --error=handover_logs/leosim-ho-%A_%a.err
+#SBATCH --output=logs/leosim-ho-%A_%a.out
+#SBATCH --error=logs/leosim-ho-%A_%a.err
 
-# SONIC Slurm array for the 3 policy x 3 load x 2 buffering x 10 run design.
+# SONIC Slurm array for the 3 policy x 3 load x 2 buffering x 5 run design.
 # Build leosim-experiments once on a SONIC login/build node before
 # submitting this script.  The array deliberately uses --no-build so concurrent
 # tasks never modify the shared ns-3 build tree.
@@ -25,7 +25,7 @@ fi
 
 SATELLITE_COUNT=5000
 SATELLITE_COUNTS=${SATELLITE_COUNT}
-SIM_TIME=3600
+SIM_TIME=1800
 UPDATE_INTERVAL=30
 
 
@@ -76,13 +76,14 @@ fi
 if [[ "${SIF}" == "/" || "${SIF}" == "/leosim.sif" ]]; then
     SIF="/scratch/adesilva/leosim.sif"
 fi
-results_root="${LEOSIM_RESULTS_ROOT:-${repo_root}/experiments/handover/results}"
+base_results_root="${LEOSIM_RESULTS_ROOT:-/scratch/adesilva/handover/results}"
+results_root="${base_results_root}/${SLURM_ARRAY_JOB_ID}"
 
 # Decode the complete factorial array. Adjacent IDs vary the random run first,
-# keeping every ten-task block a directly comparable treatment.
+# keeping every five-task block a directly comparable treatment.
 index=${SLURM_ARRAY_TASK_ID}
-rng_run=$((index % 10 + 1))
-index=$((index / 10))
+rng_run=$((index % 5 + 1))
+index=$((index / 5))
 buffering=$((index % 2))
 index=$((index / 2))
 load_index=$((index % 3))

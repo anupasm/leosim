@@ -30,10 +30,7 @@ UPDATE_INTERVALS=(30)
 
 REPO_ROOT="${REPO_ROOT:-${SLURM_SUBMIT_DIR}}"
 SIF="${SIF:-${REPO_ROOT}/leosim.sif}"
-RESULTS_ROOT="${ALDSR_RESULTS_ROOT:-${RESULTS_ROOT:-${REPO_ROOT}/results/leosim-aldsr/${SLURM_ARRAY_JOB_ID}}}"
-if [[ "$RESULTS_ROOT" != /* ]]; then
-  RESULTS_ROOT="${REPO_ROOT}/${RESULTS_ROOT}"
-fi
+RESULTS_ROOT="${ALDSR_RESULTS_ROOT:-${RESULTS_ROOT:-/scratch/adesilva/results/leosim-aldsr/${SLURM_ARRAY_JOB_ID}}}"
 CONTAINER_NS3_ROOT="/opt/leosim/ns3"
 CONTAINER_RESULTS_ROOT="/results"
 container_route_tree_engine="${CONTAINER_NS3_ROOT}/contrib/leosim/utils/rengine/leosim-rengine"
