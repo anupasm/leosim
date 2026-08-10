@@ -428,6 +428,7 @@ main(int argc, char* argv[])
     uint32_t numSatellites = 0;
     uint32_t numServers = 0;
     uint32_t numUes = 0;
+    uint32_t groundDevicesPerOperator = 0;
     double minElevation = 10.0;
     double accessMaxDistance = 2500000.0;
     std::string accessDataRate = "100Mbps";
@@ -523,6 +524,9 @@ main(int argc, char* argv[])
     cmd.AddValue("numSatellites", "Number of satellites to use; 0 means all loaded satellites", numSatellites);
     cmd.AddValue("numServers", "Number of servers/GSS to use; 0 means all loaded servers", numServers);
     cmd.AddValue("numUes", "Number of UEs to use; 0 means all loaded UEs", numUes);
+    cmd.AddValue("groundDevicesPerOperator",
+                 "Select at most this many servers and UEs from each operator; 0 disables balanced selection",
+                 groundDevicesPerOperator);
     cmd.AddValue("minElevation", "Minimum satellite access-link elevation angle in degrees", minElevation);
     cmd.AddValue("accessMaxDistance", "Maximum satellite-ground link distance in meters", accessMaxDistance);
     cmd.AddValue("accessDataRate", "Satellite-ground point-to-point data rate", accessDataRate);
@@ -723,6 +727,47 @@ main(int argc, char* argv[])
     Ptr<LeoSimLoader> loader = loaderHelper.GetLoader();
     auto serverDeviceIds = loader->GetGroundDeviceIdsByType("SERVER");
     auto ueDeviceIds = loader->GetGroundDeviceIdsByType("UE");
+    if (groundDevicesPerOperator > 0)
+    {
+        auto selectPerOperator = [&](const std::vector<uint32_t>& deviceIds,
+                                     const std::string& deviceType) {
+            std::map<LeoSimOperatorId, uint32_t> available;
+            std::map<LeoSimOperatorId, uint32_t> selected;
+            std::vector<uint32_t> balancedIds;
+            for (uint32_t id : deviceIds)
+            {
+                const LeoSimOperatorId opId = loader->GetGroundDeviceOperator(id);
+                ++available[opId];
+                if (selected[opId] < groundDevicesPerOperator)
+                {
+                    balancedIds.push_back(id);
+                    ++selected[opId];
+                }
+            }
+            for (const auto& [opId, count] : available)
+            {
+                if (count < groundDevicesPerOperator)
+                {
+                    std::ostringstream message;
+                    message << "requested " << groundDevicesPerOperator << " " << deviceType
+                            << " devices for operator " << opId << ", but only " << count
+                            << " were loaded";
+                    throw std::runtime_error(message.str());
+                }
+            }
+            return balancedIds;
+        };
+        try
+        {
+            serverDeviceIds = selectPerOperator(serverDeviceIds, "SERVER");
+            ueDeviceIds = selectPerOperator(ueDeviceIds, "UE");
+        }
+        catch (const std::runtime_error& error)
+        {
+            std::cerr << "Error: " << error.what() << std::endl;
+            return 1;
+        }
+    }
     if (loader->GetNumSatellites() == 0 || serverDeviceIds.empty() || ueDeviceIds.empty())
     {
         std::cerr << "Error: need at least 1 satellite, 1 server, and 1 UE." << std::endl;

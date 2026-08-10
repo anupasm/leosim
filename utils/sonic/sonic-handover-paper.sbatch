@@ -7,7 +7,8 @@
 #SBATCH --error=/scratch/adesilva/logs/leosim-ho-%A_%a.err
 
 # SONIC Slurm array for the 3 policy x 2 buffering x 3 RNG-run design. Each
-# policy/buffer treatment uses the same 5 Mbps per-flow traffic load, and each
+# policy/buffer treatment uses the same 5 Mbps per-flow traffic load and 12
+# ground nodes: two GSS and two UEs from each of alpha, beta, and gamma. Each
 # six-task block shares one RNG run for paired comparisons.
 # Build leosim-experiments once on a SONIC login/build node before
 # submitting this script.  The array deliberately uses --no-build so concurrent
@@ -35,6 +36,9 @@ SATELLITE_COUNT=5000
 SATELLITE_COUNTS=${SATELLITE_COUNT}
 SIM_TIME=1800
 UPDATE_INTERVAL=30
+GROUND_DEVICES_PER_OPERATOR=${LEOSIM_GROUND_DEVICES_PER_OPERATOR:-2}
+NUM_UES=${LEOSIM_NUM_UES:-$((3 * GROUND_DEVICES_PER_OPERATOR))}
+NUM_SERVERS=${LEOSIM_NUM_SERVERS:-$((3 * GROUND_DEVICES_PER_OPERATOR))}
 
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -276,8 +280,9 @@ command_line="leosim-experiments \
 --useTrace=1 \
 --simTime=${SIM_TIME} \
 --numSatellites=${SATELLITE_COUNTS} \
---numUes=${LEOSIM_NUM_UES:-20} \
---numServers=${LEOSIM_NUM_SERVERS:-4} \
+--numUes=${NUM_UES} \
+--numServers=${NUM_SERVERS} \
+--groundDevicesPerOperator=${GROUND_DEVICES_PER_OPERATOR} \
 --appStart=60 --appStop=3599 \
 --tcpRate=${load} --tcpPacketSize=512 --allToAllTraffic=1 \
 --enableIsl=1 --maxIslNeighbors=4 \
@@ -355,7 +360,7 @@ tx_packets=$(sed -n 's/.*"network": {"tx_packets": \([0-9][0-9]*\).*/\1/p' "${su
 sink_count=$(sed -n 's/.*"sink_count": \([0-9][0-9]*\).*/\1/p' "${summary_json}")
 sinks_with_rx=$(sed -n 's/.*"sinks_with_rx": \([0-9][0-9]*\).*/\1/p' "${summary_json}")
 valid_routes=$(sed -n 's/.*"routing": {"samples": [0-9][0-9]*, "valid_samples": \([0-9][0-9]*\).*/\1/p' "${summary_json}")
-expected_sinks=$(( ${LEOSIM_NUM_UES:-20} * ${LEOSIM_NUM_SERVERS:-4} ))
+expected_sinks=$(( NUM_UES * NUM_SERVERS ))
 if [[ -z "${tx_packets}" || -z "${sink_count}" || -z "${sinks_with_rx}" || -z "${valid_routes}" ]]; then
     echo "Could not validate statistics summary: ${summary_json}" >&2
     echo 4 > "${run_dir}/exit-status.txt"

@@ -140,6 +140,8 @@ Environment:
   LEOSIM_RESULTS_ROOT  Optional handover-results root passed through to sbatch.
   LEOSIM_ARCHIVE_ROOT  Archive destination root used by clean/rerun.
   LEOSIM_HO_CPUS       CPUs per handover task (default: 4).
+  LEOSIM_GROUND_DEVICES_PER_OPERATOR
+                       GSS and UEs selected per operator (default: 2 each).
   LEOSIM_HO_BUFFER_PACKETS
                        Per-ground-node handover buffer size (default: 1024).
   LEOSIM_PYTHON_ENV    Host-build Python environment; must be under /scratch/adesilva.
