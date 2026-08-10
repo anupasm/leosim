@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=leosim-ho
-#SBATCH --array=0-89%12
+#SBATCH --array=0-5%6
 #SBATCH --time=48:00:00
 #SBATCH --cpus-per-task=4
 #SBATCH --output=logs/leosim-ho-%A_%a.out
 #SBATCH --error=logs/leosim-ho-%A_%a.err
 
-# SONIC Slurm array for the 3 policy x 3 load x 2 buffering x 5 run design.
+# SONIC Slurm array for the 3 policy x 2 buffering design. Each treatment
+# uses the same traffic load and random seed/run for a paired comparison.
 # Build leosim-experiments once on a SONIC login/build node before
 # submitting this script.  The array deliberately uses --no-build so concurrent
 # tasks never modify the shared ns-3 build tree.
@@ -86,13 +87,12 @@ rng_run=$((index % 5 + 1))
 index=$((index / 5))
 buffering=$((index % 2))
 index=$((index / 2))
-load_index=$((index % 3))
-policy_index=$((index / 3))
+policy_index=${index}
 
-loads=(250Kbps 1Mbps 4Mbps)
 policies=(bho cho1 cho3)
-load=${loads[load_index]}
+load=1Mbps
 policy=${policies[policy_index]}
+rng_run=1
 
 case "${policy}" in
     bho)
