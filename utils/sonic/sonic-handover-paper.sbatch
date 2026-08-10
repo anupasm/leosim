@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=leosim-ho
-#SBATCH --array=0-5%6
+#SBATCH --array=0-17%6
 #SBATCH --time=48:00:00
 #SBATCH --cpus-per-task=4
 #SBATCH --output=/scratch/adesilva/logs/leosim-ho-%A_%a.out
 #SBATCH --error=/scratch/adesilva/logs/leosim-ho-%A_%a.err
 
-# SONIC Slurm array for the 3 policy x 2 buffering design. Each treatment
-# uses the same 5 Mbps per-flow traffic load and random seed/run for a paired comparison.
+# SONIC Slurm array for the 3 policy x 2 buffering x 3 RNG-run design. Each
+# policy/buffer treatment uses the same 5 Mbps per-flow traffic load, and each
+# six-task block shares one RNG run for paired comparisons.
 # Build leosim-experiments once on a SONIC login/build node before
 # submitting this script.  The array deliberately uses --no-build so concurrent
 # tasks never modify the shared ns-3 build tree.
@@ -88,17 +89,17 @@ case "${base_results_root}" in
 esac
 results_root="${base_results_root}/${SLURM_ARRAY_JOB_ID}"
 
-# Decode the six-task paired design. Adjacent IDs compare buffering off/on for
-# the same handover policy, with one common random run.
+# Decode each six-task paired block. Adjacent IDs compare buffering off/on for
+# the same handover policy, with one common random run per block.
 index=${SLURM_ARRAY_TASK_ID}
 buffering=$((index % 2))
 index=$((index / 2))
-policy_index=${index}
+policy_index=$((index % 3))
+rng_run=$((index / 3 + 1))
 
 policies=(bho cho1 cho3)
 load=5Mbps
 policy=${policies[policy_index]}
-rng_run=1
 
 case "${policy}" in
     bho)
@@ -136,7 +137,17 @@ mkdir -p "${run_dir}" "${route_tree_dir}" "${prepro_dir}"
 
 exec 9>"${prepro_dir}/.prepare.lock"
 flock 9
-if [[ ! -s "${prepro_dir}/satellite_mobility.tcl" ]]; then
+trace_file="${prepro_dir}/satellite_mobility.tcl"
+trace_names_file="${trace_file}.names.csv"
+trace_ready_file="${prepro_dir}/.satellite_mobility.ready"
+trace_is_ready=false
+if [[ -s "${trace_file}" && -s "${trace_names_file}" && -s "${trace_ready_file}" ]]; then
+    prepared_satellites=$(awk 'END { print NR > 0 ? NR - 1 : 0 }' "${trace_names_file}")
+    if [[ "${prepared_satellites}" -ge "${SATELLITE_COUNT}" ]]; then
+        trace_is_ready=true
+    fi
+fi
+if [[ "${trace_is_ready}" != true ]]; then
     if ! command -v apptainer >/dev/null 2>&1; then
         echo "Apptainer is unavailable; load the site Apptainer module or set APPTAINER_MODULE." >&2
         exit 2
@@ -156,6 +167,11 @@ if [[ ! -s "${prepro_dir}/satellite_mobility.tcl" ]]; then
         exit 2
     fi
 
+    staging_dir=$(mktemp -d "${prepro_dir}/.prepare-${SLURM_ARRAY_JOB_ID}-XXXXXX")
+    cleanup_staging() {
+        rm -rf -- "${staging_dir}"
+    }
+    trap cleanup_staging EXIT
     srun --ntasks=1 --cpus-per-task="${SLURM_CPUS_PER_TASK:-8}" --cpu-bind=cores \
         apptainer exec --cleanenv \
         --bind "${repo_root}:${repo_root}" \
@@ -164,17 +180,40 @@ if [[ ! -s "${prepro_dir}/satellite_mobility.tcl" ]]; then
         "${SIF}" \
         /opt/venv/bin/python "${CONTAINER_NS3_ROOT}/contrib/leosim/utils/tle_to_positions.py" \
         --input "${data_root}/tles" \
-        --output "${prepro_dir}" \
+        --output "${staging_dir}" \
         --duration "${SIM_TIME}" \
         --timestep "${UPDATE_INTERVAL}" \
         --workers "${SLURM_CPUS_PER_TASK:-8}" \
         --ns3-format >/dev/null
+    staged_trace="${staging_dir}/satellite_mobility.tcl"
+    staged_names="${staged_trace}.names.csv"
+    if [[ ! -s "${staged_trace}" || ! -s "${staged_names}" ]]; then
+        echo "Preprocessing did not produce a complete mobility trace." >&2
+        exit 3
+    fi
+    prepared_satellites=$(awk 'END { print NR > 0 ? NR - 1 : 0 }' "${staged_names}")
+    if [[ "${prepared_satellites}" -lt "${SATELLITE_COUNT}" ]]; then
+        echo "Mobility trace contains ${prepared_satellites} satellites; ${SATELLITE_COUNT} required." >&2
+        exit 3
+    fi
+    # Publish data first and the ready marker last. A task can therefore never
+    # mistake a partially written shared trace for completed preprocessing.
+    mv -f -- "${staged_trace}" "${trace_file}"
+    mv -f -- "${staged_names}" "${trace_names_file}"
+    if [[ -s "${staging_dir}/satellite_positions.csv" ]]; then
+        mv -f -- "${staging_dir}/satellite_positions.csv" "${prepro_dir}/satellite_positions.csv"
+    fi
+    printf 'satellites=%s\n' "${prepared_satellites}" > "${trace_ready_file}.tmp.$$"
+    mv -f -- "${trace_ready_file}.tmp.$$" "${trace_ready_file}"
+    trap - EXIT
+    cleanup_staging
 fi
 flock -u 9
 
 if [[ -x "${ns3_dir}/ns3" ]]; then
     cd "${ns3_dir}"
     ns3_cmd=("${ns3_dir}/ns3" run --no-build)
+    route_tree_engine="${ns3_dir}/contrib/leosim/utils/rengine/leosim-rengine"
     echo "Using host ns-3 at ${ns3_dir}/ns3"
 else
     if ! command -v apptainer >/dev/null 2>&1; then
@@ -190,13 +229,28 @@ else
     fi
     mkdir -p "${results_root}"
     ns3_cmd=(apptainer exec --cleanenv --bind "${results_root}:${results_root}" --pwd /opt/leosim/ns3 "${SIF}" ./ns3 run --no-build)
+    route_tree_engine="${CONTAINER_NS3_ROOT}/contrib/leosim/utils/rengine/leosim-rengine"
     echo "Using containerized ns-3 from ${SIF}"
+fi
+
+if [[ -x "${ns3_dir}/ns3" ]]; then
+    if [[ ! -x "${route_tree_engine}" ]] || ! "${route_tree_engine}" --self-test >/dev/null; then
+        echo "Missing or invalid routing engine: ${route_tree_engine}" >&2
+        echo "Run contrib/leosim/utils/sonic/build_leosim.sh before submitting the array." >&2
+        exit 2
+    fi
+else
+    if ! apptainer exec --cleanenv --pwd /opt/leosim/ns3 "${SIF}" \
+        "${route_tree_engine}" --self-test >/dev/null; then
+        echo "Container routing engine failed its self-test: ${route_tree_engine}" >&2
+        exit 2
+    fi
 fi
 
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-8}"
 export NS_GLOBAL_VALUE="RngSeed=${LEOSIM_RNG_SEED:-20260803};RngRun=${rng_run}"
 
-satellite_trace="${prepro_dir}/satellite_mobility.tcl"
+satellite_trace="${trace_file}"
 if [[ -d "${repo_root}/contrib/leosim/data" ]]; then
     data_dir="${repo_root}/contrib/leosim/data"
 elif [[ -d "${data_root}" ]]; then
@@ -218,6 +272,7 @@ command_line="leosim-experiments \
 --enableIsl=1 --maxIslNeighbors=4 \
 --enableDynamicRouting=1 --routingUpdateInterval=10 \
 --useRouteTreeCache=1 --routeTreeWorkers=${SLURM_CPUS_PER_TASK:-8} \
+--routeTreeEngine=${route_tree_engine} \
 --routeTreeWorkDir=${route_tree_dir} \
 --hoMode=${ho_mode} --maxCandidates=${max_candidates} \
 --enableHoBuffering=${buffering} --hoBufferSize=${LEOSIM_HO_BUFFER_PACKETS:-1024} \
@@ -279,8 +334,31 @@ required=(
 for output in "${required[@]}"; do
     if [[ ! -s "${output}" ]]; then
         echo "Required output missing or empty: ${output}" >&2
+        echo 3 > "${run_dir}/exit-status.txt"
         exit 3
     fi
 done
+
+summary_json="${output_prefix}-statistics.json"
+tx_packets=$(sed -n 's/.*"network": {"tx_packets": \([0-9][0-9]*\).*/\1/p' "${summary_json}")
+sink_count=$(sed -n 's/.*"sink_count": \([0-9][0-9]*\).*/\1/p' "${summary_json}")
+sinks_with_rx=$(sed -n 's/.*"sinks_with_rx": \([0-9][0-9]*\).*/\1/p' "${summary_json}")
+valid_routes=$(sed -n 's/.*"routing": {"samples": [0-9][0-9]*, "valid_samples": \([0-9][0-9]*\).*/\1/p' "${summary_json}")
+expected_sinks=$(( ${LEOSIM_NUM_UES:-20} * ${LEOSIM_NUM_SERVERS:-4} ))
+if [[ -z "${tx_packets}" || -z "${sink_count}" || -z "${sinks_with_rx}" || -z "${valid_routes}" ]]; then
+    echo "Could not validate statistics summary: ${summary_json}" >&2
+    echo 4 > "${run_dir}/exit-status.txt"
+    exit 4
+fi
+if [[ "${sink_count}" -ne "${expected_sinks}" ]]; then
+    echo "Expected ${expected_sinks} traffic sinks, observed ${sink_count}." >&2
+    echo 4 > "${run_dir}/exit-status.txt"
+    exit 4
+fi
+if [[ "${tx_packets}" -eq 0 || "${sinks_with_rx}" -eq 0 || "${valid_routes}" -eq 0 ]]; then
+    echo "Invalid completed run: tx_packets=${tx_packets}, sinks_with_rx=${sinks_with_rx}, valid_routes=${valid_routes}." >&2
+    echo 4 > "${run_dir}/exit-status.txt"
+    exit 4
+fi
 
 echo "Completed ${run_id}: ${run_dir}"

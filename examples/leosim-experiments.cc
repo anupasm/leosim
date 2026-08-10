@@ -729,17 +729,35 @@ main(int argc, char* argv[])
         return 1;
     }
 
-    if (numSatellites == 0 || numSatellites > loader->GetNumSatellites())
+    if (numSatellites == 0)
     {
         numSatellites = loader->GetNumSatellites();
     }
-    if (numServers == 0 || numServers > serverDeviceIds.size())
+    else if (numSatellites > loader->GetNumSatellites())
+    {
+        std::cerr << "Error: requested " << numSatellites << " satellites, but only "
+                  << loader->GetNumSatellites() << " were loaded." << std::endl;
+        return 1;
+    }
+    if (numServers == 0)
     {
         numServers = serverDeviceIds.size();
     }
-    if (numUes == 0 || numUes > ueDeviceIds.size())
+    else if (numServers > serverDeviceIds.size())
+    {
+        std::cerr << "Error: requested " << numServers << " servers, but only "
+                  << serverDeviceIds.size() << " were loaded." << std::endl;
+        return 1;
+    }
+    if (numUes == 0)
     {
         numUes = ueDeviceIds.size();
+    }
+    else if (numUes > ueDeviceIds.size())
+    {
+        std::cerr << "Error: requested " << numUes << " UEs, but only "
+                  << ueDeviceIds.size() << " were loaded." << std::endl;
+        return 1;
     }
     if (serverId >= numServers || ueId >= numUes)
     {

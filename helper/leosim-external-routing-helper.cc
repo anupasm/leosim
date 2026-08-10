@@ -932,6 +932,8 @@ LeoSimExternalRoutingHelper::RunEngine(const GraphExport& exportInfo, bool verbo
     const int rc = std::system(command.c_str());
     if (rc != 0)
     {
+        std::cerr << "External routing engine failed with status " << rc
+                  << "; command=" << command << std::endl;
         NS_LOG_ERROR("External routing engine failed with status " << rc);
         return false;
     }

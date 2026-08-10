@@ -1,2 +1,6 @@
 gamma_ue_Buenos_Aires,-34.6037,-58.3816,25.0
 gamma_ue_Lagos,6.5244,3.3792,41.0
+gamma_ue_Nairobi,-1.2921,36.8219,1795.0
+gamma_ue_Cairo,30.0444,31.2357,23.0
+gamma_ue_Johannesburg,-26.2041,28.0473,1753.0
+gamma_ue_Madrid,40.4168,-3.7038,667.0

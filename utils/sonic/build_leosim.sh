@@ -57,6 +57,8 @@ python3 -m venv "$PYTHON_ENV"
 cd "$NS3_ROOT"
 ./ns3 configure --enable-examples --disable-tests --build-profile=optimized
 ./ns3 build leosim-experiments
+make -C contrib/leosim/utils/rengine clean all
+make -C contrib/leosim/utils/rengine self-test
 
 # Verify both the build and the command-line interface.
 ./ns3 run "leosim-experiments --PrintHelp" --no-build

@@ -1,2 +1,7 @@
 alpha_ue_Los_Angeles,34.0522,-118.2437,89.0
 alpha_ue_Mexico_City,19.4326,-99.1332,2240.0
+alpha_ue_New_York,40.7128,-74.0060,10.0
+alpha_ue_Chicago,41.8781,-87.6298,181.0
+alpha_ue_Sao_Paulo,-23.5505,-46.6333,760.0
+alpha_ue_Lima,-12.0464,-77.0428,154.0
+alpha_ue_Vancouver,49.2827,-123.1207,70.0
