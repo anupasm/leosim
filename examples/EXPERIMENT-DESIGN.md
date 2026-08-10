@@ -170,7 +170,7 @@ NS_GLOBAL_VALUE="RngSeed=20260803;RngRun=<RUN>" ./ns3 run \
   --enablePeriodicRouting=1 --routingUpdateInterval=10 \
   --tcpRate=<250Kbps|1Mbps|4Mbps> --tcpPacketSize=512 --appStart=60 \
   --hoMode=<BHO|CHO> --maxCandidates=<1|3> \
-  --enableHoBuffering=<0|1> --enableLoadBalancing=0 \
+  --enableHoBuffering=<0|1> --hoBufferSize=1024 --enableLoadBalancing=0 \
   --ttt=1 --t310=1 --a3Offset=3 --a4Threshold=-110 --tteTrigger=30 \
   --choPrep=100 --choExec=150 --beamUpdateIntervalMs=100 \
   --logPackets=1 --logBeams=1 --flowMonitorScope=endpoints \

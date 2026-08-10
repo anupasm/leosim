@@ -2,7 +2,7 @@
 #SBATCH --job-name=leosim-routing
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=2
+#SBATCH --cpus-per-task=6
 #SBATCH --time=24:00:00
 #SBATCH --array=0-6%7
 #SBATCH --output=/scratch/adesilva/logs/%x-%A_%a.out
