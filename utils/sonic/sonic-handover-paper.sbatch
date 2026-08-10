@@ -142,7 +142,7 @@ trace_names_file="${trace_file}.names.csv"
 trace_ready_file="${prepro_dir}/.satellite_mobility.ready"
 trace_is_ready=false
 if [[ -s "${trace_file}" && -s "${trace_names_file}" && -s "${trace_ready_file}" ]]; then
-    prepared_satellites=$(awk 'END { print NR > 0 ? NR - 1 : 0 }' "${trace_names_file}")
+    prepared_satellites=$(awk 'END { print (NR > 0 ? NR - 1 : 0) }' "${trace_names_file}")
     if [[ "${prepared_satellites}" -ge "${SATELLITE_COUNT}" ]]; then
         trace_is_ready=true
     fi
@@ -191,7 +191,7 @@ if [[ "${trace_is_ready}" != true ]]; then
         echo "Preprocessing did not produce a complete mobility trace." >&2
         exit 3
     fi
-    prepared_satellites=$(awk 'END { print NR > 0 ? NR - 1 : 0 }' "${staged_names}")
+    prepared_satellites=$(awk 'END { print (NR > 0 ? NR - 1 : 0) }' "${staged_names}")
     if [[ "${prepared_satellites}" -lt "${SATELLITE_COUNT}" ]]; then
         echo "Mobility trace contains ${prepared_satellites} satellites; ${SATELLITE_COUNT} required." >&2
         exit 3
@@ -228,7 +228,10 @@ else
         exit 2
     fi
     mkdir -p "${results_root}"
-    ns3_cmd=(apptainer exec --cleanenv --bind "${results_root}:${results_root}" --pwd /opt/leosim/ns3 "${SIF}" ./ns3 run --no-build)
+    ns3_cmd=(apptainer exec --cleanenv \
+        --bind "${results_root}:${results_root}" \
+        --bind "${route_tree_dir}:${route_tree_dir}" \
+        --pwd /opt/leosim/ns3 "${SIF}" ./ns3 run --no-build)
     route_tree_engine="${CONTAINER_NS3_ROOT}/contrib/leosim/utils/rengine/leosim-rengine"
     echo "Using containerized ns-3 from ${SIF}"
 fi
@@ -240,9 +243,17 @@ if [[ -x "${ns3_dir}/ns3" ]]; then
         exit 2
     fi
 else
-    if ! apptainer exec --cleanenv --pwd /opt/leosim/ns3 "${SIF}" \
+    if ! apptainer exec --cleanenv \
+        --bind "${route_tree_dir}:${route_tree_dir}" \
+        --pwd /opt/leosim/ns3 "${SIF}" \
         "${route_tree_engine}" --self-test >/dev/null; then
         echo "Container routing engine failed its self-test: ${route_tree_engine}" >&2
+        exit 2
+    fi
+    if ! apptainer exec --cleanenv \
+        --bind "${route_tree_dir}:${route_tree_dir}" \
+        "${SIF}" test -d "${route_tree_dir}" -a -w "${route_tree_dir}"; then
+        echo "Container cannot write routing work directory: ${route_tree_dir}" >&2
         exit 2
     fi
 fi

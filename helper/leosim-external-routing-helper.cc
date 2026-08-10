@@ -803,6 +803,8 @@ LeoSimExternalRoutingHelper::ExportSnapshot(Ptr<LeoSimRoutingCalculator> calcula
         std::ofstream graphOut(exportInfo.graphPath, std::ios::binary | std::ios::trunc);
         if (!graphOut)
         {
+            std::cerr << "Unable to write external routing graph: " << exportInfo.graphPath
+                      << std::endl;
             NS_LOG_ERROR("Unable to write external routing graph: " << exportInfo.graphPath);
             return false;
         }
@@ -872,6 +874,8 @@ LeoSimExternalRoutingHelper::ExportSnapshot(Ptr<LeoSimRoutingCalculator> calcula
         std::ofstream requestOut(exportInfo.requestPath, std::ios::binary | std::ios::trunc);
         if (!requestOut)
         {
+            std::cerr << "Unable to write external routing requests: "
+                      << exportInfo.requestPath << std::endl;
             NS_LOG_ERROR("Unable to write external routing requests: " << exportInfo.requestPath);
             return false;
         }
