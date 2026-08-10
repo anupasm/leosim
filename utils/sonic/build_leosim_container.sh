@@ -26,14 +26,22 @@ if [[ -n "${2:-}" ]]; then
   SIF="${2}"
 elif [[ -d "/scratch/adesilva" && -w "/scratch/adesilva" ]]; then
   SIF="/scratch/adesilva/leosim.sif"
-elif [[ -d "${HOME}" && -w "${HOME}" ]]; then
-  SIF="${HOME}/leosim.sif"
 else
-  SIF="${REPO_ROOT}/leosim.sif"
+  echo "/scratch/adesilva is unavailable or not writable." >&2
+  exit 2
 fi
 if [[ "${SIF}" == "/" || "${SIF}" == "/leosim.sif" ]]; then
   SIF="/scratch/adesilva/leosim.sif"
 fi
+case "${SIF}" in
+  /scratch/adesilva/*) ;;
+  *) echo "Container output must be under /scratch/adesilva: ${SIF}" >&2; exit 2 ;;
+esac
+export TMPDIR="/scratch/adesilva/tmp/container-build-${SLURM_JOB_ID:-local}-$$"
+export APPTAINER_CACHEDIR="/scratch/adesilva/cache/apptainer"
+export APPTAINER_TMPDIR="${TMPDIR}/apptainer"
+export XDG_CACHE_HOME="/scratch/adesilva/cache"
+mkdir -p "$TMPDIR" "$APPTAINER_CACHEDIR" "$APPTAINER_TMPDIR" "$XDG_CACHE_HOME"
 DEFINITION="${SCRIPT_DIR}/leosim.def"
 if [[ -d "${REPO_ROOT}/contrib/leosim" ]]; then
   LEO_MODULE_ROOT="${REPO_ROOT}/contrib/leosim"

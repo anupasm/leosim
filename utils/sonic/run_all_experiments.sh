@@ -5,13 +5,15 @@ set -euo pipefail
 # Previous outputs are archived only when --rerun is requested.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export TMPDIR="/scratch/adesilva/tmp"
+export APPTAINER_CACHEDIR="/scratch/adesilva/cache/apptainer"
+export APPTAINER_TMPDIR="/scratch/adesilva/tmp/apptainer"
+export XDG_CACHE_HOME="/scratch/adesilva/cache"
+export CCACHE_DIR="/scratch/adesilva/cache/ccache"
 
 is_allowed_storage_path() {
   local path="${1}"
   [[ -z "${path}" ]] && return 1
-  if [[ "${path}" == "${HOME}" || "${path}" == "${HOME}/"* ]]; then
-    return 0
-  fi
   if [[ "${path}" == "/scratch/adesilva" || "${path}" == "/scratch/adesilva/"* ]]; then
     return 0
   fi
@@ -31,9 +33,13 @@ find_repo_root() {
     fi
     current="$(dirname "${current}")"
   done
-  printf '%s\n' "$(cd "${1}/../.." 2>/dev/null || pwd)"
+  return 1
 }
-DETECTED_REPO_ROOT="$(find_repo_root "${SCRIPT_DIR}")"
+if ! DETECTED_REPO_ROOT="$(find_repo_root "${SCRIPT_DIR}")"; then
+  echo "Unable to locate an ns-3 checkout containing contrib/leosim from ${SCRIPT_DIR}." >&2
+  echo "Set LEOSIM_REPO_ROOT to the checkout or ns3 directory." >&2
+  exit 2
+fi
 
 # LEOSIM_REPO_ROOT historically referred to either the checkout containing
 # ns3/ or to ns3 itself. Accept both layouts and avoid producing ns3/ns3.
@@ -43,7 +49,13 @@ if [[ -d "${configured_root}/contrib/leosim" ]]; then
 elif [[ -d "${configured_root}/ns3/contrib/leosim" ]]; then
   REPO_ROOT="${configured_root}/ns3"
 else
-  REPO_ROOT="${configured_root}"
+  echo "Invalid LEOSIM_REPO_ROOT: ${configured_root}" >&2
+  echo "Expected contrib/leosim or ns3/contrib/leosim below that directory." >&2
+  exit 2
+fi
+if [[ "${REPO_ROOT}" == "/" || ! -d "${REPO_ROOT}/contrib/leosim" ]]; then
+  echo "Refusing invalid repository root: ${REPO_ROOT}" >&2
+  exit 2
 fi
 candidate_ns3_root="${LEOSIM_NS3_ROOT:-}"
 if [[ -n "${candidate_ns3_root}" ]]; then
@@ -64,13 +76,7 @@ HANDOVER_SBATCH="${SCRIPT_DIR}/sonic-handover-paper.sbatch"
 BUILD_HOST="${SCRIPT_DIR}/build_leosim.sh"
 BUILD_CONTAINER="${SCRIPT_DIR}/build_leosim_container.sh"
 if [[ -z "${SIF:-}" ]]; then
-  if [[ -d "/scratch/adesilva" && -w "/scratch/adesilva" ]]; then
-    SIF="/scratch/adesilva/leosim.sif"
-  elif [[ -d "${HOME}" && -w "${HOME}" ]]; then
-    SIF="${HOME}/leosim.sif"
-  else
-    SIF="${REPO_ROOT}/leosim.sif"
-  fi
+  SIF="/scratch/adesilva/leosim.sif"
 fi
 if [[ "${SIF}" == "/" || "${SIF}" == "/leosim.sif" ]]; then
   SIF="/scratch/adesilva/leosim.sif"
@@ -80,7 +86,7 @@ for opt_path in "${SIF}" "${RESULTS_ROOT:-}" "${ALDSR_RESULTS_ROOT:-}" \
   "${LEOSIM_RESULTS_ROOT:-}" "${LEOSIM_ARCHIVE_ROOT:-}"; do
   if [[ -n "${opt_path}" ]] && ! is_allowed_storage_path "${opt_path}"; then
     echo "Path is outside the allowed storage roots: ${opt_path}" >&2
-    echo "Use a path under ${HOME} or /scratch/adesilva." >&2
+    echo "Use a path under /scratch/adesilva." >&2
     exit 2
   fi
 done
@@ -119,6 +125,7 @@ Environment:
   LEOSIM_HO_CPUS       CPUs per handover task (default: 4).
   LEOSIM_HO_BUFFER_PACKETS
                        Per-ground-node handover buffer size (default: 1024).
+  LEOSIM_PYTHON_ENV    Host-build Python environment; must be under /scratch/adesilva.
 EOF
 }
 
@@ -180,17 +187,23 @@ archive_outputs() {
   fi
 
   mkdir -p "$archive_root/logs"
-  find "$REPO_ROOT/logs" -maxdepth 1 -type f \
+  find "/scratch/adesilva/logs" -maxdepth 1 -type f \
     \( -name 'leosim-routing-*.out' -o -name 'leosim-routing-*.err' \) \
     -exec mv -t "$archive_root/logs" -- {} + 2>/dev/null || true
-  find "$REPO_ROOT/handover_logs" -maxdepth 1 -type f \
+  find "/scratch/adesilva/logs" -maxdepth 1 -type f \
     \( -name 'leosim-ho-*.out' -o -name 'leosim-ho-*.err' \) \
     -exec mv -t "$archive_root/logs" -- {} + 2>/dev/null || true
   echo "Rerun archive: $archive_root"
 }
 
 build_experiments() {
-  mkdir -p "$(dirname "$SIF")"
+  export LEOSIM_PYTHON_ENV="${LEOSIM_PYTHON_ENV:-/scratch/adesilva/venvs/leosim-sonic}"
+  if ! is_allowed_storage_path "$LEOSIM_PYTHON_ENV"; then
+    echo "LEOSIM_PYTHON_ENV must be under /scratch/adesilva: $LEOSIM_PYTHON_ENV" >&2
+    exit 2
+  fi
+  mkdir -p "$(dirname "$SIF")" "$TMPDIR" "$APPTAINER_CACHEDIR" "$APPTAINER_TMPDIR" \
+    "$XDG_CACHE_HOME" "$CCACHE_DIR" "/scratch/adesilva/logs"
   if ((skip_container)); then
     echo "Skipping routing container build as requested."
   elif ((rebuild_container)) || [[ ! -s "$SIF" ]]; then
@@ -217,13 +230,14 @@ submit_routing_experiments() {
     exit 2
   fi
 
-  mkdir -p "/scratch/adesilva/logs" "$REPO_ROOT/logs"
+  mkdir -p "/scratch/adesilva/logs" "/scratch/adesilva/tmp"
   cd "$REPO_ROOT"
   results_root="${RESULTS_ROOT:-/scratch/adesilva/results/leosim-routing}"
   mkdir -p "$results_root"
   routing_job="$(sbatch --parsable \
     --export="ALL,SIF=${SIF},RESULTS_ROOT=${results_root}" "$ROUTING_SBATCH")"
   echo "Submitted routing array:  $routing_job"
+  echo "Routing results: ${results_root}/${routing_job%%;*}"
   echo "Monitor with: squeue -j ${routing_job%%;*}"
 }
 
@@ -239,7 +253,7 @@ submit_handover_experiments() {
     exit 2
   fi
 
-  mkdir -p "/scratch/adesilva/logs" "$REPO_ROOT/handover_logs"
+  mkdir -p "/scratch/adesilva/logs" "/scratch/adesilva/tmp"
   cd "$REPO_ROOT"
   results_root="${LEOSIM_RESULTS_ROOT:-/scratch/adesilva/handover/results}"
   ho_cpus="${LEOSIM_HO_CPUS:-4}"
@@ -263,11 +277,12 @@ submit_aldsr_experiments() {
     exit 2
   fi
   local results_root="${ALDSR_RESULTS_ROOT:-/scratch/adesilva/results/leosim-aldsr}"
-  mkdir -p "/scratch/adesilva/logs" "$REPO_ROOT/logs" "$results_root"
+  mkdir -p "/scratch/adesilva/logs" "/scratch/adesilva/tmp" "$results_root"
   cd "$REPO_ROOT"
   aldsr_job="$(sbatch --parsable \
     --export="ALL,SIF=${SIF},ALDSR_RESULTS_ROOT=${results_root}" "$ALDSR_SBATCH")"
   echo "Submitted ALDSR array: $aldsr_job"
+  echo "ALDSR results: ${results_root}/${aldsr_job%%;*}"
   echo "Monitor with: squeue -j ${aldsr_job%%;*}"
 }
 

@@ -5,8 +5,8 @@
 #SBATCH --cpus-per-task=2
 #SBATCH --time=24:00:00
 #SBATCH --array=0-6%7
-#SBATCH --output=logs/%x-%A_%a.out
-#SBATCH --error=logs/%x-%A_%a.err
+#SBATCH --output=/scratch/adesilva/logs/%x-%A_%a.out
+#SBATCH --error=/scratch/adesilva/logs/%x-%A_%a.err
 
 # To enable email notifications, either submit with `--mail-user`/`--mail-type`
 # options to `sbatch` or uncomment and set the following two lines below.
@@ -19,6 +19,12 @@
 #SBATCH --mail-type=BEGIN,END,FAIL
 
 set -euo pipefail
+
+export TMPDIR="/scratch/adesilva/tmp/${SLURM_JOB_ID}-${SLURM_ARRAY_TASK_ID}"
+export APPTAINER_CACHEDIR="/scratch/adesilva/cache/apptainer"
+export APPTAINER_TMPDIR="${TMPDIR}/apptainer"
+export XDG_CACHE_HOME="/scratch/adesilva/cache"
+mkdir -p "$TMPDIR" "$APPTAINER_CACHEDIR" "$APPTAINER_TMPDIR" /scratch/adesilva/logs
 
 if command -v module >/dev/null 2>&1; then
   module purge
@@ -34,8 +40,11 @@ SIM_TIMES=(1200)
 UPDATE_INTERVALS=(30)
 
 REPO_ROOT="${REPO_ROOT:-${SLURM_SUBMIT_DIR}}"
-SIF="${SIF:-${REPO_ROOT}/leosim.sif}"
-RESULTS_ROOT="${RESULTS_ROOT:-/scratch/adesilva/results/leosim-routing/${SLURM_ARRAY_JOB_ID}}"
+SIF="${SIF:-/scratch/adesilva/leosim.sif}"
+BASE_RESULTS_ROOT="${RESULTS_ROOT:-/scratch/adesilva/results/leosim-routing}"
+RESULTS_ROOT="${BASE_RESULTS_ROOT}/${SLURM_ARRAY_JOB_ID}"
+case "${SIF}" in /scratch/adesilva/*) ;; *) echo "SIF must be under /scratch/adesilva" >&2; exit 2 ;; esac
+case "${BASE_RESULTS_ROOT}" in /scratch/adesilva|/scratch/adesilva/*) ;; *) echo "RESULTS_ROOT must be under /scratch/adesilva" >&2; exit 2 ;; esac
 CONTAINER_ROOT="/opt/leosim"
 CONTAINER_NS3_ROOT="${CONTAINER_ROOT}/ns3"
 CONTAINER_RESULTS_ROOT="/results"
@@ -113,7 +122,7 @@ run_dir="${RESULTS_ROOT}/${run_id}"
 output_stem="result-job${SLURM_ARRAY_JOB_ID}-task${task_id}-restart${SLURM_RESTART_COUNT:-0}-pid$$"
 container_prefix="${CONTAINER_RESULTS_ROOT}/${run_id}/${output_stem}"
 container_route_tree_dir="${CONTAINER_RESULTS_ROOT}/${run_id}/route-trees"
-mkdir -p "${REPO_ROOT}/logs" "$run_dir"
+mkdir -p "$run_dir"
 
 if ! command -v apptainer >/dev/null 2>&1; then
   echo "Apptainer is unavailable; load the site Apptainer module or set APPTAINER_MODULE." >&2
@@ -131,7 +140,8 @@ fi
 # Older container images use fixed /tmp filenames during the engine self-test.
 # Serialize tests on each node so concurrent array tasks cannot truncate one
 # another's binary fixtures. FD 8 is kept separate from the preprocessing lock.
-exec 8>/tmp/leosim-rengine-selftest.lock
+mkdir -p /scratch/adesilva/tmp
+exec 8>/scratch/adesilva/tmp/leosim-rengine-selftest.lock
 if ! flock -w 300 8; then
   echo "Timed out waiting for the routing-engine self-test lock on $(hostname)." >&2
   exit 2

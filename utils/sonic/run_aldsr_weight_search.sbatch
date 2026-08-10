@@ -5,10 +5,16 @@
 #SBATCH --cpus-per-task=6
 #SBATCH --time=24:00:00
 #SBATCH --array=0-26%20
-#SBATCH --output=logs/%x-%A_%a.out
-#SBATCH --error=logs/%x-%A_%a.err
+#SBATCH --output=/scratch/adesilva/logs/%x-%A_%a.out
+#SBATCH --error=/scratch/adesilva/logs/%x-%A_%a.err
 
 set -euo pipefail
+
+export TMPDIR="/scratch/adesilva/tmp/${SLURM_JOB_ID}-${SLURM_ARRAY_TASK_ID}"
+export APPTAINER_CACHEDIR="/scratch/adesilva/cache/apptainer"
+export APPTAINER_TMPDIR="${TMPDIR}/apptainer"
+export XDG_CACHE_HOME="/scratch/adesilva/cache"
+mkdir -p "$TMPDIR" "$APPTAINER_CACHEDIR" "$APPTAINER_TMPDIR" /scratch/adesilva/logs
 
 if command -v module >/dev/null 2>&1; then
   module purge
@@ -29,8 +35,11 @@ SIM_TIMES=(1200)
 UPDATE_INTERVALS=(30)
 
 REPO_ROOT="${REPO_ROOT:-${SLURM_SUBMIT_DIR}}"
-SIF="${SIF:-${REPO_ROOT}/leosim.sif}"
-RESULTS_ROOT="${ALDSR_RESULTS_ROOT:-${RESULTS_ROOT:-/scratch/adesilva/results/leosim-aldsr/${SLURM_ARRAY_JOB_ID}}}"
+SIF="${SIF:-/scratch/adesilva/leosim.sif}"
+BASE_RESULTS_ROOT="${ALDSR_RESULTS_ROOT:-${RESULTS_ROOT:-/scratch/adesilva/results/leosim-aldsr}}"
+RESULTS_ROOT="${BASE_RESULTS_ROOT}/${SLURM_ARRAY_JOB_ID}"
+case "${SIF}" in /scratch/adesilva/*) ;; *) echo "SIF must be under /scratch/adesilva" >&2; exit 2 ;; esac
+case "${BASE_RESULTS_ROOT}" in /scratch/adesilva|/scratch/adesilva/*) ;; *) echo "ALDSR results must be under /scratch/adesilva" >&2; exit 2 ;; esac
 CONTAINER_NS3_ROOT="/opt/leosim/ns3"
 CONTAINER_RESULTS_ROOT="/results"
 container_route_tree_engine="${CONTAINER_NS3_ROOT}/contrib/leosim/utils/rengine/leosim-rengine"
@@ -93,7 +102,8 @@ for required_option in routingMetric combinedLoadWeight combinedMinLifetime rngR
   fi
 done
 
-exec 8>/tmp/leosim-rengine-selftest.lock
+mkdir -p /scratch/adesilva/tmp
+exec 8>/scratch/adesilva/tmp/leosim-rengine-selftest.lock
 flock -w 300 8
 apptainer exec --cleanenv "$SIF" "$container_route_tree_engine" --self-test
 flock -u 8
@@ -101,7 +111,7 @@ flock -u 8
 prepro_dir="${RESULTS_ROOT}/_preprocessed"
 satellite_positions="${prepro_dir}/alpha-beta-gamma_duration-${sim_time}s_step-${tle_timestep}s.csv"
 container_satellite_positions="${CONTAINER_RESULTS_ROOT}/_preprocessed/$(basename "$satellite_positions")"
-mkdir -p "$prepro_dir" "${REPO_ROOT}/logs"
+mkdir -p "$prepro_dir"
 exec 9>"${satellite_positions}.lock"
 flock -w 21600 9
 if [[ ! -s "$satellite_positions" ]]; then

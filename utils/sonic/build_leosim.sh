@@ -27,7 +27,15 @@ elif [[ -d "${REPO_ROOT}/ns3" && -x "${REPO_ROOT}/ns3/ns3" ]]; then
 else
   NS3_ROOT="${REPO_ROOT}"
 fi
-PYTHON_ENV="${LEOSIM_PYTHON_ENV:-${REPO_ROOT}/.venv-leosim-sonic}"
+PYTHON_ENV="${LEOSIM_PYTHON_ENV:-/scratch/adesilva/venvs/leosim-sonic}"
+export TMPDIR="/scratch/adesilva/tmp/build-${SLURM_JOB_ID:-local}-$$"
+export XDG_CACHE_HOME="/scratch/adesilva/cache"
+export CCACHE_DIR="/scratch/adesilva/cache/ccache"
+case "${PYTHON_ENV}" in
+  /scratch/adesilva/*) ;;
+  *) echo "LEOSIM_PYTHON_ENV must be under /scratch/adesilva: ${PYTHON_ENV}" >&2; exit 2 ;;
+esac
+mkdir -p "$TMPDIR" "$XDG_CACHE_HOME" "$CCACHE_DIR" "$(dirname "$PYTHON_ENV")"
 
 if [[ ! -d "${NS3_ROOT}" || ! -x "${NS3_ROOT}/ns3" ]]; then
   echo "No host ns-3 launcher found at ${NS3_ROOT}/ns3; skipping host build because ns-3 is embedded in the container."

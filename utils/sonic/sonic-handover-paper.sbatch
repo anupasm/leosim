@@ -3,8 +3,8 @@
 #SBATCH --array=0-5%6
 #SBATCH --time=48:00:00
 #SBATCH --cpus-per-task=4
-#SBATCH --output=logs/leosim-ho-%A_%a.out
-#SBATCH --error=logs/leosim-ho-%A_%a.err
+#SBATCH --output=/scratch/adesilva/logs/leosim-ho-%A_%a.out
+#SBATCH --error=/scratch/adesilva/logs/leosim-ho-%A_%a.err
 
 # SONIC Slurm array for the 3 policy x 2 buffering design. Each treatment
 # uses the same 5 Mbps per-flow traffic load and random seed/run for a paired comparison.
@@ -13,6 +13,12 @@
 # tasks never modify the shared ns-3 build tree.
 
 set -euo pipefail
+
+export TMPDIR="/scratch/adesilva/tmp/${SLURM_JOB_ID}-${SLURM_ARRAY_TASK_ID}"
+export APPTAINER_CACHEDIR="/scratch/adesilva/cache/apptainer"
+export APPTAINER_TMPDIR="${TMPDIR}/apptainer"
+export XDG_CACHE_HOME="/scratch/adesilva/cache"
+mkdir -p "$TMPDIR" "$APPTAINER_CACHEDIR" "$APPTAINER_TMPDIR" /scratch/adesilva/logs
 
 if command -v module >/dev/null 2>&1; then
     module purge
@@ -66,18 +72,20 @@ fi
 CONTAINER_ROOT="/opt/leosim"
 CONTAINER_NS3_ROOT="${CONTAINER_ROOT}/ns3"
 if [[ -z "${SIF:-}" ]]; then
-    if [[ -d "/scratch/adesilva" && -w "/scratch/adesilva" ]]; then
-        SIF="/scratch/adesilva/leosim.sif"
-    elif [[ -d "${HOME}" && -w "${HOME}" ]]; then
-        SIF="${HOME}/leosim.sif"
-    else
-        SIF="${repo_root}/leosim.sif"
-    fi
+    SIF="/scratch/adesilva/leosim.sif"
 fi
 if [[ "${SIF}" == "/" || "${SIF}" == "/leosim.sif" ]]; then
     SIF="/scratch/adesilva/leosim.sif"
 fi
+case "${SIF}" in
+    /scratch/adesilva/*) ;;
+    *) echo "SIF must be under /scratch/adesilva: ${SIF}" >&2; exit 2 ;;
+esac
 base_results_root="${LEOSIM_RESULTS_ROOT:-/scratch/adesilva/handover/results}"
+case "${base_results_root}" in
+    /scratch/adesilva|/scratch/adesilva/*) ;;
+    *) echo "LEOSIM_RESULTS_ROOT must be under /scratch/adesilva: ${base_results_root}" >&2; exit 2 ;;
+esac
 results_root="${base_results_root}/${SLURM_ARRAY_JOB_ID}"
 
 # Decode the six-task paired design. Adjacent IDs compare buffering off/on for
@@ -115,7 +123,7 @@ run_id="policy-${policy}_load-${load}_buffer-${buffering}_run-${rng_run}"
 run_dir="${results_root}/${run_id}"
 output_stem="result-job${SLURM_ARRAY_JOB_ID}-task${SLURM_ARRAY_TASK_ID}-restart${SLURM_RESTART_COUNT:-0}-pid$$"
 output_prefix="${run_dir}/${output_stem}"
-route_tree_dir="${TMPDIR:-/tmp}/leosim-route-trees-${SLURM_JOB_ID}-${SLURM_ARRAY_TASK_ID}"
+route_tree_dir="/scratch/adesilva/tmp/leosim-route-trees-${SLURM_JOB_ID}-${SLURM_ARRAY_TASK_ID}"
 if [[ -d "${repo_root}/data" ]]; then
     data_root="${repo_root}/data"
 elif [[ -d "${PWD}/data" ]]; then
@@ -123,9 +131,11 @@ elif [[ -d "${PWD}/data" ]]; then
 else
     data_root="${PWD}/data"
 fi
-prepro_dir="${data_root}/prepro"
+prepro_dir="${results_root}/_preprocessed"
 mkdir -p "${run_dir}" "${route_tree_dir}" "${prepro_dir}"
 
+exec 9>"${prepro_dir}/.prepare.lock"
+flock 9
 if [[ ! -s "${prepro_dir}/satellite_mobility.tcl" ]]; then
     if ! command -v apptainer >/dev/null 2>&1; then
         echo "Apptainer is unavailable; load the site Apptainer module or set APPTAINER_MODULE." >&2
@@ -160,6 +170,7 @@ if [[ ! -s "${prepro_dir}/satellite_mobility.tcl" ]]; then
         --workers "${SLURM_CPUS_PER_TASK:-8}" \
         --ns3-format >/dev/null
 fi
+flock -u 9
 
 if [[ -x "${ns3_dir}/ns3" ]]; then
     cd "${ns3_dir}"
