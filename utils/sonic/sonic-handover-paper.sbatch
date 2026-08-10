@@ -80,11 +80,9 @@ fi
 base_results_root="${LEOSIM_RESULTS_ROOT:-/scratch/adesilva/handover/results}"
 results_root="${base_results_root}/${SLURM_ARRAY_JOB_ID}"
 
-# Decode the complete factorial array. Adjacent IDs vary the random run first,
-# keeping every five-task block a directly comparable treatment.
+# Decode the six-task paired design. Adjacent IDs compare buffering off/on for
+# the same handover policy, with one common random run.
 index=${SLURM_ARRAY_TASK_ID}
-rng_run=$((index % 5 + 1))
-index=$((index / 5))
 buffering=$((index % 2))
 index=$((index / 2))
 policy_index=${index}

@@ -1,7 +1,7 @@
 #!/bin/bash -l
 set -euo pipefail
 
-# Build and submit the LeoSim routing and handover Slurm campaigns.
+# Build and submit the LeoSim routing and 5 Mbps handover Slurm campaigns.
 # Previous outputs are archived only when --rerun is requested.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -76,7 +76,8 @@ if [[ "${SIF}" == "/" || "${SIF}" == "/leosim.sif" ]]; then
   SIF="/scratch/adesilva/leosim.sif"
 fi
 
-for opt_path in "${SIF}" "${RESULTS_ROOT:-}" "${ALDSR_RESULTS_ROOT:-}" "${LEOSIM_RESULTS_ROOT:-}"; do
+for opt_path in "${SIF}" "${RESULTS_ROOT:-}" "${ALDSR_RESULTS_ROOT:-}" \
+  "${LEOSIM_RESULTS_ROOT:-}" "${LEOSIM_ARCHIVE_ROOT:-}"; do
   if [[ -n "${opt_path}" ]] && ! is_allowed_storage_path "${opt_path}"; then
     echo "Path is outside the allowed storage roots: ${opt_path}" >&2
     echo "Use a path under ${HOME} or /scratch/adesilva." >&2
@@ -97,9 +98,9 @@ Actions:
   routing     Submit only the routing array campaign.
   aldsr       Build and submit only the ALDSR weight-search campaign.
   handover    Submit only the handover array campaign.
-  submit      Submit both existing builds with sbatch.
-  all         Build and submit both campaigns (default).
-  rerun       Archive previous outputs, build, and submit both campaigns.
+  submit      Submit all three campaigns using existing builds.
+  all         Build and submit routing, ALDSR, and handover campaigns (default).
+  rerun       Archive previous outputs, build, and submit all three campaigns.
   clean       Archive previous outputs without building or submitting.
 
 Options:
@@ -114,6 +115,10 @@ Environment:
   RESULTS_ROOT         Optional routing-results root passed through to sbatch.
   ALDSR_RESULTS_ROOT   Optional ALDSR-results root passed through to sbatch.
   LEOSIM_RESULTS_ROOT  Optional handover-results root passed through to sbatch.
+  LEOSIM_ARCHIVE_ROOT  Archive destination root used by clean/rerun.
+  LEOSIM_HO_CPUS       CPUs per handover task (default: 4).
+  LEOSIM_HO_BUFFER_PACKETS
+                       Per-ground-node handover buffer size (default: 1024).
 EOF
 }
 
@@ -146,14 +151,15 @@ done
 # image, which embeds the ns-3 checkout and the LeoSim module.
 
 archive_outputs() {
-  local stamp archive_root routing_results handover_results
+  local stamp archive_root routing_results aldsr_results handover_results
   stamp="$(date -u +%Y%m%dT%H%M%SZ)"
   local scratch_root="/scratch/adesilva"
   if [[ ! -d "$scratch_root" ]]; then
     mkdir -p "$scratch_root"
   fi
-  archive_root="${RESULTS_ROOT:-${scratch_root}/rerun-archive}/${stamp}"
+  archive_root="${LEOSIM_ARCHIVE_ROOT:-${scratch_root}/rerun-archive}/${stamp}"
   routing_results="${RESULTS_ROOT:-${scratch_root}/results/leosim-routing}"
+  aldsr_results="${ALDSR_RESULTS_ROOT:-${scratch_root}/results/leosim-aldsr}"
   handover_results="${LEOSIM_RESULTS_ROOT:-${scratch_root}/handover/results}"
   mkdir -p "$archive_root"
 
@@ -167,12 +173,17 @@ archive_outputs() {
     mv "$handover_results" "$archive_root/handover/results"
     echo "Archived handover results to $archive_root/handover/results"
   fi
+  if [[ -d "$aldsr_results" ]]; then
+    mkdir -p "$archive_root/aldsr"
+    mv "$aldsr_results" "$archive_root/aldsr/results"
+    echo "Archived ALDSR results to $archive_root/aldsr/results"
+  fi
 
   mkdir -p "$archive_root/logs"
   find "$REPO_ROOT/logs" -maxdepth 1 -type f \
     \( -name 'leosim-routing-*.out' -o -name 'leosim-routing-*.err' \) \
     -exec mv -t "$archive_root/logs" -- {} + 2>/dev/null || true
-  find "$REPO_ROOT" -maxdepth 1 -type f \
+  find "$REPO_ROOT/handover_logs" -maxdepth 1 -type f \
     \( -name 'leosim-ho-*.out' -o -name 'leosim-ho-*.err' \) \
     -exec mv -t "$archive_root/logs" -- {} + 2>/dev/null || true
   echo "Rerun archive: $archive_root"
@@ -188,9 +199,14 @@ build_experiments() {
     echo "Using existing routing container: $SIF"
     echo "Pass --rebuild-container after source changes that must enter the image."
   fi
+
+  # The handover batch prefers the host executable when this checkout has an
+  # ns-3 launcher. Build it once here; array jobs use --no-build concurrently.
+  "$BUILD_HOST" "$REPO_ROOT"
 }
 
 submit_routing_experiments() {
+  local results_root
   if ! command -v sbatch >/dev/null 2>&1; then
     echo "sbatch is unavailable; run this script on a Slurm login node." >&2
     exit 2
@@ -201,31 +217,39 @@ submit_routing_experiments() {
     exit 2
   fi
 
-  mkdir -p "/scratch/adesilva/logs"
+  mkdir -p "/scratch/adesilva/logs" "$REPO_ROOT/logs"
   cd "$REPO_ROOT"
-  routing_job="$(sbatch --parsable --export="ALL,SIF=${SIF},RESULTS_ROOT=/scratch/adesilva/results/leosim-routing" "$ROUTING_SBATCH")"
+  results_root="${RESULTS_ROOT:-/scratch/adesilva/results/leosim-routing}"
+  mkdir -p "$results_root"
+  routing_job="$(sbatch --parsable \
+    --export="ALL,SIF=${SIF},RESULTS_ROOT=${results_root}" "$ROUTING_SBATCH")"
   echo "Submitted routing array:  $routing_job"
   echo "Monitor with: squeue -j ${routing_job%%;*}"
 }
 
 submit_handover_experiments() {
+  local results_root ho_cpus ho_buffer_packets
   if ! command -v sbatch >/dev/null 2>&1; then
     echo "sbatch is unavailable; run this script on a Slurm login node." >&2
     exit 2
   fi
-  if [[ ! -s "$SIF" ]]; then
-    echo "Routing container is missing: $SIF" >&2
-    echo "Run the build action without --skip-container first." >&2
+  if [[ ! -x "${NS3_ROOT}/ns3" && ! -s "$SIF" ]]; then
+    echo "Neither a host ns-3 launcher nor a container image is available." >&2
+    echo "Expected ${NS3_ROOT}/ns3 or ${SIF}." >&2
     exit 2
   fi
 
-  mkdir -p "/scratch/adesilva/logs"
-  mkdir -p "handover_logs"
+  mkdir -p "/scratch/adesilva/logs" "$REPO_ROOT/handover_logs"
   cd "$REPO_ROOT"
-  handover_job="$(sbatch --parsable --cpus-per-task="${LEOSIM_HO_CPUS:-2}" \
-    --export="ALL,LEOSIM_REPO_ROOT=${REPO_ROOT},LEOSIM_NS3_ROOT=${NS3_ROOT},LEOSIM_RESULTS_ROOT=/scratch/adesilva/handover/results" \
+  results_root="${LEOSIM_RESULTS_ROOT:-/scratch/adesilva/handover/results}"
+  ho_cpus="${LEOSIM_HO_CPUS:-4}"
+  ho_buffer_packets="${LEOSIM_HO_BUFFER_PACKETS:-1024}"
+  mkdir -p "$results_root"
+  handover_job="$(sbatch --parsable --cpus-per-task="${ho_cpus}" \
+    --export="ALL,SIF=${SIF},LEOSIM_REPO_ROOT=${REPO_ROOT},LEOSIM_NS3_ROOT=${NS3_ROOT},LEOSIM_RESULTS_ROOT=${results_root},LEOSIM_HO_BUFFER_PACKETS=${ho_buffer_packets}" \
     "$HANDOVER_SBATCH")"
   echo "Submitted handover array: $handover_job"
+  echo "Handover results: ${results_root}/${handover_job%%;*}"
   echo "Monitor with: squeue -j ${handover_job%%;*}"
 }
 
@@ -239,7 +263,7 @@ submit_aldsr_experiments() {
     exit 2
   fi
   local results_root="${ALDSR_RESULTS_ROOT:-/scratch/adesilva/results/leosim-aldsr}"
-  mkdir -p "/scratch/adesilva/logs" "$results_root"
+  mkdir -p "/scratch/adesilva/logs" "$REPO_ROOT/logs" "$results_root"
   cd "$REPO_ROOT"
   aldsr_job="$(sbatch --parsable \
     --export="ALL,SIF=${SIF},ALDSR_RESULTS_ROOT=${results_root}" "$ALDSR_SBATCH")"
@@ -249,6 +273,7 @@ submit_aldsr_experiments() {
 
 submit_experiments() {
   submit_routing_experiments
+  submit_aldsr_experiments
   submit_handover_experiments
 }
 
