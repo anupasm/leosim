@@ -20,6 +20,11 @@ is_allowed_storage_path() {
   return 1
 }
 
+is_leosim_checkout_root() {
+  local path="${1}"
+  [[ -f "${path}/CMakeLists.txt" && -d "${path}/model" && -d "${path}/helper" ]]
+}
+
 find_repo_root() {
   local current="${1}"
   while [[ "${current}" != "/" ]]; do
@@ -29,6 +34,10 @@ find_repo_root() {
     fi
     if [[ -d "${current}/ns3/contrib/leosim" ]]; then
       printf '%s\n' "${current}/ns3"
+      return 0
+    fi
+    if is_leosim_checkout_root "${current}"; then
+      printf '%s\n' "${current}"
       return 0
     fi
     current="$(dirname "${current}")"
@@ -48,12 +57,18 @@ if [[ -d "${configured_root}/contrib/leosim" ]]; then
   REPO_ROOT="${configured_root}"
 elif [[ -d "${configured_root}/ns3/contrib/leosim" ]]; then
   REPO_ROOT="${configured_root}/ns3"
+elif is_leosim_checkout_root "${configured_root}"; then
+  REPO_ROOT="${configured_root}"
 else
   echo "Invalid LEOSIM_REPO_ROOT: ${configured_root}" >&2
-  echo "Expected contrib/leosim or ns3/contrib/leosim below that directory." >&2
+  echo "Expected contrib/leosim, ns3/contrib/leosim, or a LeoSim checkout root below that directory." >&2
   exit 2
 fi
-if [[ "${REPO_ROOT}" == "/" || ! -d "${REPO_ROOT}/contrib/leosim" ]]; then
+if [[ "${REPO_ROOT}" == "/" ]]; then
+  echo "Refusing invalid repository root: ${REPO_ROOT}" >&2
+  exit 2
+fi
+if [[ ! -d "${REPO_ROOT}/contrib/leosim" ]] && ! is_leosim_checkout_root "${REPO_ROOT}"; then
   echo "Refusing invalid repository root: ${REPO_ROOT}" >&2
   exit 2
 fi
@@ -63,6 +78,8 @@ if [[ -n "${candidate_ns3_root}" ]]; then
     NS3_ROOT="${candidate_ns3_root}"
   elif [[ -d "${candidate_ns3_root}/ns3" && -x "${candidate_ns3_root}/ns3/ns3" && -d "${candidate_ns3_root}/ns3/contrib/leosim" ]]; then
     NS3_ROOT="${candidate_ns3_root}/ns3"
+  elif is_leosim_checkout_root "${candidate_ns3_root}"; then
+    NS3_ROOT="${candidate_ns3_root}"
   else
     echo "Ignoring invalid LEOSIM_NS3_ROOT=${candidate_ns3_root}; resolving from the repo instead." >&2
     NS3_ROOT="${REPO_ROOT}"
