@@ -13,6 +13,7 @@ namespace ns3
 
 class Socket;
 class Packet;
+class LeoSimBeamManager;
 
 /**
  * Rate-controlled LeoSim TCP source that treats transient no-route connection
@@ -27,6 +28,8 @@ class LeoSimTcpTrafficApplication : public Application
                    const DataRate& dataRate,
                    uint32_t packetSize,
                    Time retryInterval = Seconds(1));
+
+    void SetHandoverManager(Ptr<LeoSimBeamManager> manager);
 
   protected:
     void StartApplication() override;
@@ -49,6 +52,7 @@ class LeoSimTcpTrafficApplication : public Application
     Time m_retryInterval{Seconds(1)};
     Ptr<Socket> m_socket;
     Ptr<Packet> m_pendingPacket;
+    Ptr<LeoSimBeamManager> m_handoverManager;
     EventId m_sendEvent;
     EventId m_retryEvent;
     bool m_running{false};

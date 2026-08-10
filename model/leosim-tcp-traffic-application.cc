@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 #include "leosim-tcp-traffic-application.h"
+#include "leosim-beam-manager.h"
 
 #include "ns3/inet-socket-address.h"
 #include "ns3/log.h"
@@ -38,6 +39,12 @@ LeoSimTcpTrafficApplication::Configure(const Address& remote,
     m_dataRate = dataRate;
     m_packetSize = packetSize;
     m_retryInterval = retryInterval;
+}
+
+void
+LeoSimTcpTrafficApplication::SetHandoverManager(Ptr<LeoSimBeamManager> manager)
+{
+    m_handoverManager = manager;
 }
 
 void
@@ -147,6 +154,14 @@ LeoSimTcpTrafficApplication::SendPendingPacket()
 {
     if (!m_running || !m_connected || !m_socket || !m_pendingPacket)
     {
+        return;
+    }
+
+    if (m_handoverManager &&
+        m_handoverManager->TryBufferPacket(GetNode()->GetId(), m_socket, m_pendingPacket))
+    {
+        m_pendingPacket = nullptr;
+        ScheduleNextPacket();
         return;
     }
 

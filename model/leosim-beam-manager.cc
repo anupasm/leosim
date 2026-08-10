@@ -2063,6 +2063,8 @@ LeoSimBeamManager::ExecuteChoHandover(uint32_t ueNodeId,
         NS_LOG_DEBUG("Ignoring duplicate CHO execution request for UE " << ueNodeId);
         return;
     }
+    m_handoverBuffers.erase(ueNodeId);
+    m_handoverBufferCounters[ueNodeId] = {};
     beamIt->second.state = LEOSIM_BEAM_EXECUTING;
 
     if (!m_beamStateCallback.IsNull())
@@ -2266,8 +2268,19 @@ LeoSimBeamManager::CompleteHandover(uint32_t ueNodeId,
         failedEvent.handoverLatencyMs =
             std::max(0.0,
                      (failedEvent.completedAt - failedEvent.initiatedAt).GetSeconds() * 1000.0);
-        failedEvent.packetsBuffered = 0;
-        failedEvent.packetsDropped = 0;
+        const auto counters = m_handoverBufferCounters.find(ueNodeId);
+        failedEvent.packetsBuffered = counters == m_handoverBufferCounters.end()
+                                          ? 0
+                                          : counters->second.buffered;
+        failedEvent.packetsDropped = counters == m_handoverBufferCounters.end()
+                                         ? 0
+                                         : counters->second.dropped;
+        const auto queued = m_handoverBuffers.find(ueNodeId);
+        if (queued != m_handoverBuffers.end())
+        {
+            failedEvent.packetsDropped += queued->second.size();
+            m_handoverBuffers.erase(queued);
+        }
         failedEvent.success = false;
         failedEvent.failureReason = "TARGET_ACCESS_UNAVAILABLE";
         failedEvent.sinrBefore = FiniteRadioQuality(sourceBeam.sinr, oldLinkQuality.snr);
@@ -2311,6 +2324,7 @@ LeoSimBeamManager::CompleteHandover(uint32_t ueNodeId,
         {
             m_handoverCallback(failedEvent);
         }
+        m_handoverBufferCounters.erase(ueNodeId);
         FinishInterSatelliteHandover(ueNodeId);
         return;
     }
@@ -2349,6 +2363,14 @@ LeoSimBeamManager::CompleteHandover(uint32_t ueNodeId,
                  << (hoType == LEOSIM_HO_INTER_SATELLITE ? "INTER_SATELLITE" : "INTER_ORBIT")
                  << " (source plane " << sourcePlane << ", target plane " << targetPlane << ")");
 
+    // The target access state is committed, so buffered application packets can
+    // now continue on their original connected sockets.  Flush before taking
+    // the counter snapshot so send failures are included in the event.
+    if (m_handoverBufferingEnabled)
+    {
+        FlushBuffer(ueNodeId);
+    }
+
     // Step 5: Build a LeoSimHandoverEvent and populate all fields
     LeoSimHandoverEvent hoEvent;
     hoEvent.ueNodeId = ueNodeId;
@@ -2368,8 +2390,13 @@ LeoSimBeamManager::CompleteHandover(uint32_t ueNodeId,
     hoEvent.completedAt = Simulator::Now();
     hoEvent.handoverLatencyMs =
         std::max(0.0, (hoEvent.completedAt - hoEvent.initiatedAt).GetSeconds() * 1000.0);
-    hoEvent.packetsBuffered = 0; // TODO: get from buffer manager
-    hoEvent.packetsDropped = 0;  // TODO: get from buffer manager
+    const auto bufferCounters = m_handoverBufferCounters.find(ueNodeId);
+    hoEvent.packetsBuffered = bufferCounters == m_handoverBufferCounters.end()
+                                  ? 0
+                                  : bufferCounters->second.buffered;
+    hoEvent.packetsDropped = bufferCounters == m_handoverBufferCounters.end()
+                                 ? 0
+                                 : bufferCounters->second.dropped;
     hoEvent.success = HasEndToEndHandoverConnectivity(ueNodeId, targetSatId);
     if (!hoEvent.success)
     {
@@ -2402,13 +2429,6 @@ LeoSimBeamManager::CompleteHandover(uint32_t ueNodeId,
                                                          << targetSatId);
     }
 
-    // Step 9: If m_handoverBufferingEnabled is true, call FlushBuffer(ueNodeId)
-    if (m_handoverBufferingEnabled)
-    {
-        FlushBuffer(ueNodeId);
-        NS_LOG_DEBUG("Flushed buffered packets for UE " << ueNodeId);
-    }
-
     // Step 10: Clear m_choConfigs[ueNodeId]
     m_choConfigs[ueNodeId].clear();
     m_choCandidateOrder[ueNodeId].clear();
@@ -2427,6 +2447,7 @@ LeoSimBeamManager::CompleteHandover(uint32_t ueNodeId,
         m_handoverCallback(hoEvent);
         NS_LOG_DEBUG("Fired handover callback for UE " << ueNodeId);
     }
+    m_handoverBufferCounters.erase(ueNodeId);
 
     FinishInterSatelliteHandover(ueNodeId);
 
@@ -3564,27 +3585,11 @@ LeoSimBeamManager::Start(NodeContainer groundNodes,
         }
     }
 
-    // Initialize raw sockets for each managed ground node to support packet buffering and
-    // transmission
+    // Register managed-node addresses for flow monitoring.
     for (uint32_t i = 0; i < groundNodes.GetN(); i++)
     {
         Ptr<Node> ueNode = groundNodes.Get(i);
         uint32_t ueNodeId = ueNode->GetId();
-
-        // Create a raw socket (SOCK_RAW) for packet transmission
-        // Using IPPROTO_RAW allows sending raw IP packets
-        Ptr<Socket> socket =
-            Socket::CreateSocket(ueNode, TypeId::LookupByName("ns3::UdpSocketFactory"));
-
-        if (socket)
-        {
-            m_ueSocketMap[ueNodeId] = socket;
-            NS_LOG_DEBUG("Created socket for UE " << ueNodeId);
-        }
-        else
-        {
-            NS_LOG_WARN("Failed to create socket for UE " << ueNodeId);
-        }
 
         // Extract IPv4 address from UE node for flow monitoring
         Ptr<Ipv4> ipv4 = ueNode->GetObject<Ipv4>();
@@ -3690,7 +3695,6 @@ LeoSimBeamManager::Start(NodeContainer groundNodes,
                             this);
     }
 
-    NS_LOG_DEBUG("Initialized " << m_ueSocketMap.size() << " UE sockets for handover buffering");
 }
 
 void
@@ -4009,39 +4013,28 @@ LeoSimBeamManager::GetPingPongCount() const
     return m_pingPongCount;
 }
 
-void
-LeoSimBeamManager::BufferPacket(uint32_t ueNodeId, Ptr<Packet> pkt)
+bool
+LeoSimBeamManager::TryBufferPacket(uint32_t ueNodeId, Ptr<Socket> socket, Ptr<Packet> pkt)
 {
-    NS_LOG_FUNCTION(this << ueNodeId << pkt);
+    NS_LOG_FUNCTION(this << ueNodeId << socket << pkt);
 
-    if (!m_handoverBufferingEnabled)
+    if (!m_handoverBufferingEnabled ||
+        m_inFlightInterSatelliteHandovers.count(ueNodeId) == 0)
     {
-        NS_LOG_DEBUG("Handover buffering disabled for UE " << ueNodeId << ", packet not buffered");
-        return;
+        return false;
     }
 
-    // Get reference to the buffer queue for this UE
-    std::queue<Ptr<Packet>>& buffer = m_handoverBuffers[ueNodeId];
+    std::queue<BufferedPacket>& buffer = m_handoverBuffers[ueNodeId];
+    HandoverBufferCounters& counters = m_handoverBufferCounters[ueNodeId];
 
     // Check if buffer has space
     if (buffer.size() < m_maxBufferSize)
     {
-        buffer.push(pkt);
+        buffer.push({socket, pkt});
+        ++counters.buffered;
         NS_LOG_DEBUG("Buffered packet for UE " << ueNodeId << ", buffer size now: " << buffer.size()
                                                << " packets");
 
-        // Update the packets buffered counter in the most recent handover event for this UE
-        if (!m_handoverHistory.empty())
-        {
-            for (auto it = m_handoverHistory.rbegin(); it != m_handoverHistory.rend(); ++it)
-            {
-                if (it->ueNodeId == ueNodeId)
-                {
-                    it->packetsBuffered++;
-                    break;
-                }
-            }
-        }
     }
     else
     {
@@ -4049,22 +4042,9 @@ LeoSimBeamManager::BufferPacket(uint32_t ueNodeId, Ptr<Packet> pkt)
         NS_LOG_DEBUG("Buffer full for UE " << ueNodeId << " (size=" << buffer.size() << " >= max="
                                            << m_maxBufferSize << "), dropping incoming packet");
 
-        // Try to update the drop counter in the current handover event for this UE
-        if (!m_handoverHistory.empty())
-        {
-            // Find the most recent handover event for this UE
-            for (auto it = m_handoverHistory.rbegin(); it != m_handoverHistory.rend(); ++it)
-            {
-                if (it->ueNodeId == ueNodeId)
-                {
-                    it->packetsDropped++;
-                    NS_LOG_DEBUG("Incremented dropped packet counter to "
-                                 << it->packetsDropped << " for UE " << ueNodeId);
-                    break;
-                }
-            }
-        }
+        ++counters.dropped;
     }
+    return true;
 }
 
 void
@@ -4080,35 +4060,22 @@ LeoSimBeamManager::FlushBuffer(uint32_t ueNodeId)
         return;
     }
 
-    std::queue<Ptr<Packet>>& buffer = bufferIt->second;
+    std::queue<BufferedPacket>& buffer = bufferIt->second;
     uint32_t packetsFlushed = 0;
-
-    // Check if socket exists for this UE
-    auto socketIt = m_ueSocketMap.find(ueNodeId);
-    if (socketIt == m_ueSocketMap.end())
-    {
-        NS_LOG_WARN("No socket found for UE " << ueNodeId << ", cannot flush buffer");
-        // Clear the buffer anyway
-        while (!buffer.empty())
-        {
-            buffer.pop();
-        }
-        m_handoverBuffers.erase(bufferIt);
-        return;
-    }
-
-    Ptr<Socket> socket = socketIt->second;
 
     // Send all buffered packets through the socket
     while (!buffer.empty())
     {
-        Ptr<Packet> pkt = buffer.front();
+        BufferedPacket buffered = buffer.front();
         buffer.pop();
-
-        if (socket)
+        const int sent = buffered.socket ? buffered.socket->Send(buffered.packet) : -1;
+        if (sent == static_cast<int>(buffered.packet->GetSize()))
         {
-            socket->Send(pkt);
             packetsFlushed++;
+        }
+        else
+        {
+            ++m_handoverBufferCounters[ueNodeId].dropped;
         }
     }
 

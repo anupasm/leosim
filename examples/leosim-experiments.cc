@@ -286,6 +286,7 @@ AssignPerLinkSubnets(NetDeviceContainer devices, Ipv4AddressHelper& ipv4)
 ApplicationContainer
 InstallSingleTcpFlow(NodeContainer ueNodes,
                      NodeContainer serverNodes,
+                     Ptr<LeoSimBeamManager> beamManager,
                      uint32_t ueId,
                      uint32_t serverId,
                      uint16_t port,
@@ -328,6 +329,7 @@ InstallSingleTcpFlow(NodeContainer ueNodes,
                       DataRate(tcpRate),
                       packetSize,
                       Seconds(1.0));
+    source->SetHandoverManager(beamManager);
     ueNode->AddApplication(source);
     ApplicationContainer sourceApps(source);
     sourceApps.Start(Seconds(startTime));
@@ -343,6 +345,7 @@ InstallSingleTcpFlow(NodeContainer ueNodes,
 ApplicationContainer
 InstallAllTcpFlows(NodeContainer ueNodes,
                    NodeContainer serverNodes,
+                   Ptr<LeoSimBeamManager> beamManager,
                    uint16_t basePort,
                    double startTime,
                    double stopTime,
@@ -362,6 +365,7 @@ InstallAllTcpFlows(NodeContainer ueNodes,
             }
             apps.Add(InstallSingleTcpFlow(ueNodes,
                                           serverNodes,
+                                          beamManager,
                                           ue,
                                           server,
                                           static_cast<uint16_t>(port),
@@ -1269,6 +1273,7 @@ main(int argc, char* argv[])
     {
         trafficApps = InstallAllTcpFlows(ueNodes,
                                          serverNodes,
+                                         beamManager,
                                          port,
                                          appStart,
                                          appStop,
@@ -1279,6 +1284,7 @@ main(int argc, char* argv[])
     {
         trafficApps = InstallSingleTcpFlow(ueNodes,
                                            serverNodes,
+                                           beamManager,
                                            ueId,
                                            serverId,
                                            port,
