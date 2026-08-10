@@ -50,7 +50,7 @@ BHO baseline:
 ```bash
 ./ns3 run "leosim-experiments \
   --simTime=300 --numUes=20 --numServers=4 \
-  --hoMode=BHO --maxCandidates=1 --enableHoBuffering=0 \
+  --hoMode=BHO --maxCandidates=1 --enableHoBuffering=0 --hoBufferSize=1024 \
   --tcpRate=1Mbps --enableHandoverLogging=1 \
   --outputPrefix=results/handover-bho"
 ```
@@ -60,7 +60,7 @@ CHO with three candidates and buffering:
 ```bash
 ./ns3 run "leosim-experiments \
   --simTime=300 --numUes=20 --numServers=4 \
-  --hoMode=CHO --maxCandidates=3 --enableHoBuffering=1 \
+  --hoMode=CHO --maxCandidates=3 --enableHoBuffering=1 --hoBufferSize=1024 \
   --ttt=1 --t310=1 --a3Offset=3 --a4Threshold=-110 \
   --tteTrigger=30 --choPrep=100 --choExec=150 \
   --beamUpdateIntervalMs=100 --tcpRate=1Mbps \

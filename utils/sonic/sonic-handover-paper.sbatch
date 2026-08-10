@@ -7,7 +7,7 @@
 #SBATCH --error=logs/leosim-ho-%A_%a.err
 
 # SONIC Slurm array for the 3 policy x 2 buffering design. Each treatment
-# uses the same traffic load and random seed/run for a paired comparison.
+# uses the same 5 Mbps per-flow traffic load and random seed/run for a paired comparison.
 # Build leosim-experiments once on a SONIC login/build node before
 # submitting this script.  The array deliberately uses --no-build so concurrent
 # tasks never modify the shared ns-3 build tree.
@@ -90,7 +90,7 @@ index=$((index / 2))
 policy_index=${index}
 
 policies=(bho cho1 cho3)
-load=1Mbps
+load=5Mbps
 policy=${policies[policy_index]}
 rng_run=1
 
@@ -211,7 +211,8 @@ command_line="leosim-experiments \
 --useRouteTreeCache=1 --routeTreeWorkers=${SLURM_CPUS_PER_TASK:-8} \
 --routeTreeWorkDir=${route_tree_dir} \
 --hoMode=${ho_mode} --maxCandidates=${max_candidates} \
---enableHoBuffering=${buffering} --enableLoadBalancing=0 \
+--enableHoBuffering=${buffering} --hoBufferSize=${LEOSIM_HO_BUFFER_PACKETS:-1024} \
+--enableLoadBalancing=0 \
 --ttt=1 --t310=1 --n310=3 --n311=3 \
 --a3Offset=3 --a4Threshold=-110 --tteTrigger=30 \
 --choPrep=100 --choExec=150 --beamUpdateIntervalMs=100 \

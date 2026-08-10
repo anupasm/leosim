@@ -42,6 +42,7 @@ LeoSimBeamManagerHelper::LeoSimBeamManagerHelper()
       m_updateInterval(MilliSeconds(100)),
       m_loadBalancingEnabled(false),
       m_handoverBufferingEnabled(true),
+      m_maxHandoverBufferSize(1024),
       m_phasedArraySteeringInterval(MilliSeconds(100)),
       m_beamGeometryUpdateInterval(MilliSeconds(100)),
       m_sinrThresholdDb(-10.0),
@@ -233,6 +234,13 @@ LeoSimBeamManagerHelper::EnableHandoverBuffering(bool enable)
 }
 
 void
+LeoSimBeamManagerHelper::SetMaxHandoverBufferSize(uint32_t maxPackets)
+{
+    NS_ABORT_MSG_IF(maxPackets == 0, "Handover buffer size must be positive");
+    m_maxHandoverBufferSize = maxPackets;
+}
+
+void
 LeoSimBeamManagerHelper::EnableFlowMonitorIntegration(Ptr<FlowMonitor> monitor,
                                                       Ptr<Ipv4FlowClassifier> classifier)
 {
@@ -343,7 +351,7 @@ LeoSimBeamManagerHelper::Install(NodeContainer groundNodes,
 
     m_manager->EnableLoadBalancing(m_loadBalancingEnabled);
     m_manager->EnableHandoverBuffering(m_handoverBufferingEnabled);
-    m_manager->SetMaxBufferSize(100); // Default reasonable value
+    m_manager->SetMaxBufferSize(m_maxHandoverBufferSize);
 
     if (m_flowMonitor && m_flowClassifier)
     {

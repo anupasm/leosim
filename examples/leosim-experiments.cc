@@ -496,6 +496,7 @@ main(int argc, char* argv[])
     std::string hoModeName = "CHO";
     uint32_t maxCandidates = 3;
     bool enableHoBuffering = true;
+    uint32_t hoBufferSize = 1024;
     bool enableLoadBalancing = true;
     double ttt = 1.0;
     double t310 = 1.0;
@@ -641,6 +642,9 @@ main(int argc, char* argv[])
     cmd.AddValue("hoMode", "Handover policy: BHO or CHO", hoModeName);
     cmd.AddValue("maxCandidates", "Maximum prepared CHO candidates", maxCandidates);
     cmd.AddValue("enableHoBuffering", "Buffer packets during handover execution", enableHoBuffering);
+    cmd.AddValue("hoBufferSize",
+                 "Maximum packets buffered per ground node during handover",
+                 hoBufferSize);
     cmd.AddValue("enableLoadBalancing", "Include satellite load in handover selection", enableLoadBalancing);
     cmd.AddValue("ttt", "Handover time-to-trigger in seconds", ttt);
     cmd.AddValue("t310", "Radio-link failure timer in seconds", t310);
@@ -672,7 +676,7 @@ main(int argc, char* argv[])
     {
         NS_FATAL_ERROR("hoMode must be BHO or CHO");
     }
-    if (maxCandidates == 0 || ttt < 0.0 || t310 < 0.0 || tteTrigger < 0.0 ||
+    if (maxCandidates == 0 || hoBufferSize == 0 || ttt < 0.0 || t310 < 0.0 || tteTrigger < 0.0 ||
         choPrepMs < 0.0 || choExecMs < 0.0 || beamUpdateIntervalMs <= 0.0)
     {
         NS_FATAL_ERROR("Invalid handover timer or candidate configuration");
@@ -1093,6 +1097,7 @@ main(int argc, char* argv[])
     beamHelper.SetUpdateInterval(MilliSeconds(beamUpdateIntervalMs));
     beamHelper.EnableLoadBalancing(enableLoadBalancing);
     beamHelper.EnableHandoverBuffering(enableHoBuffering);
+    beamHelper.SetMaxHandoverBufferSize(hoBufferSize);
 
     // The beam manager's visibility scan requires a populated multi-beam model.
     // Without it no serving access link can be selected, so the routing calculator

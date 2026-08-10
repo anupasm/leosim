@@ -268,6 +268,9 @@ class LeoSimBeamManagerHelper
      */
     void EnableHandoverBuffering(bool enable);
 
+    /** Set the positive per-ground-node handover buffer limit, in packets. */
+    void SetMaxHandoverBufferSize(uint32_t maxPackets);
+
     /** @} */
 
     /**
@@ -424,6 +427,7 @@ class LeoSimBeamManagerHelper
     // Load balancing and buffering
     bool m_loadBalancingEnabled;
     bool m_handoverBufferingEnabled;
+    uint32_t m_maxHandoverBufferSize;
 
     // Flow monitoring
     Ptr<FlowMonitor> m_flowMonitor;
