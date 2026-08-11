@@ -53,8 +53,9 @@ struct LeoSimSatelliteIslCapacity
  * Deterministically assigns synthetic background utilization to directed ISLs.
  *
  * Requested background load above a satellite's aggregate outgoing capacity is
- * proportionally rejected and recorded as dropped load. The model does not
- * change device rates or affect routing.
+ * proportionally rejected and recorded as dropped load. When attached by a
+ * scenario, the admitted load reduces ISL device rates and supplies costs to
+ * load-aware routing without creating background packet flows.
  */
 class LeoSimIslLoadModel : public Object
 {

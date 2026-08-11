@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=leosim-ho
-#SBATCH --array=0-17%6
+#SBATCH --array=0-5%6
 #SBATCH --time=48:00:00
 #SBATCH --cpus-per-task=4
 #SBATCH --output=/scratch/adesilva/logs/leosim-ho-%A_%a.out
 #SBATCH --error=/scratch/adesilva/logs/leosim-ho-%A_%a.err
 
-# SONIC Slurm array for the 3 policy x 2 buffering x 3 RNG-run design. Each
+# SONIC Slurm array for the 3 policy x 2 buffering design. Each
 # policy/buffer treatment uses the same 5 Mbps per-flow traffic load and 12
 # ground nodes: two GSS and two UEs from each of alpha, beta, and gamma. Each
-# six-task block shares one RNG run for paired comparisons.
+# task uses the same fixed RNG run for paired comparisons.
 # Build leosim-experiments once on a SONIC login/build node before
 # submitting this script.  The array deliberately uses --no-build so concurrent
 # tasks never modify the shared ns-3 build tree.
@@ -93,13 +93,13 @@ case "${base_results_root}" in
 esac
 results_root="${base_results_root}/${SLURM_ARRAY_JOB_ID}"
 
-# Decode each six-task paired block. Adjacent IDs compare buffering off/on for
-# the same handover policy, with one common random run per block.
+# Decode the six paired tasks. Adjacent IDs compare buffering off/on for the
+# same handover policy, with one common random run across the campaign.
 index=${SLURM_ARRAY_TASK_ID}
 buffering=$((index % 2))
 index=$((index / 2))
 policy_index=$((index % 3))
-rng_run=$((index / 3 + 1))
+rng_run=1
 
 policies=(bho cho1 cho3)
 load=5Mbps

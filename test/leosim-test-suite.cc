@@ -1985,6 +1985,125 @@ class LeoSimTestCurrentBeamMatchesRoutingNextHop : public TestCase
   void DoRun() override;
 };
 
+/**
+ * \ingroup leosim-test-suite
+ * \brief Verify reactive BHO bypasses CHO preparation and records BHO mode.
+ */
+class LeoSimTestBhoUsesReactivePath : public TestCase
+{
+  public:
+    LeoSimTestBhoUsesReactivePath()
+        : TestCase("LeoSim BHO uses reactive path without CHO preparation")
+    {
+    }
+
+  private:
+    void OnChoConfig(uint32_t,
+                     uint32_t,
+                     std::vector<LeoSimTopsisCandidate>)
+    {
+        ++m_choConfigCallbacks;
+    }
+
+    void SwapSatellitePositions()
+    {
+        m_satAMobility->SetPosition(TestGeodeticPosition(20.0, 0.0, 550000.0));
+        m_satBMobility->SetPosition(TestGeodeticPosition(0.0, 0.0, 550000.0));
+        m_channel->UpdateAllLinks();
+    }
+
+    void DoRun() override
+    {
+        NodeContainer groundNodes;
+        groundNodes.Create(1);
+        NodeContainer sats;
+        sats.Create(2);
+
+        Ptr<Node> ue = groundNodes.Get(0);
+        Ptr<Node> satA = sats.Get(0);
+        Ptr<Node> satB = sats.Get(1);
+        InternetStackHelper internet;
+        internet.Install(groundNodes);
+        internet.Install(sats);
+
+        SetLeoSimTestPosition(ue, TestGeodeticPosition(0.0, 0.0, 0.0), LEOSIM_UE);
+        SetLeoSimTestPosition(satA,
+                              TestGeodeticPosition(0.0, 0.0, 550000.0),
+                              LEOSIM_SATELLITE);
+        SetLeoSimTestPosition(satB,
+                              TestGeodeticPosition(20.0, 0.0, 550000.0),
+                              LEOSIM_SATELLITE);
+        m_satAMobility = satA->GetObject<LeoSimMobilityModel>();
+        m_satBMobility = satB->GetObject<LeoSimMobilityModel>();
+
+        m_channel = CreateObject<LeoSimChannelModel>();
+        m_channel->SetMinElevationAngle(-90.0);
+        m_channel->SetMaxLinkDistance(6000000.0);
+        m_channel->SetTransmitPower(80.0);
+        m_channel->AddLink(satA, ue, LEOSIM_LINK_SATELLITE_TO_GROUND);
+        m_channel->AddLink(satB, ue, LEOSIM_LINK_SATELLITE_TO_GROUND);
+        m_channel->UpdateAllLinks();
+
+        Ptr<LeoSimMultiBeamModel> beamModel = CreateObject<LeoSimMultiBeamModel>();
+        beamModel->SetBeamsForSatellite(
+            satA->GetId(),
+            {MakeTestBeam(satA->GetId(), 0, 0.0, 0.0, 5000.0)});
+        beamModel->SetBeamsForSatellite(
+            satB->GetId(),
+            {MakeTestBeam(satB->GetId(), 0, 0.0, 0.0, 5000.0)});
+
+        Ptr<LeoSimBeamManager> manager = CreateObject<LeoSimBeamManager>();
+        manager->SetHandoverMode(LEOSIM_HO_MODE_BHO);
+        manager->SetChannelModel(m_channel);
+        manager->SetMultiBeamModel(beamModel);
+        manager->SetLoader(CreateObject<LeoSimLoader>());
+        manager->SetUpdateInterval(MilliSeconds(10));
+        manager->SetTttDuration(MilliSeconds(1));
+        manager->SetChoPreparationDelay(MilliSeconds(100));
+        manager->SetChoExecutionDelay(MilliSeconds(2));
+        manager->SetA3Offset(0.1);
+        manager->SetA4Threshold(-300.0);
+        manager->SetElevationThreshold(-90.0);
+        manager->SetWeatherFadeThresholdDb(1e9);
+        manager->SetSinrThresholdDb(-300.0);
+        manager->SetBeamGeometryUpdateInterval(Seconds(0));
+        manager->SetChoConfigCallback(
+            MakeCallback(&LeoSimTestBhoUsesReactivePath::OnChoConfig, this));
+        manager->Start(groundNodes, sats, Seconds(0), MilliSeconds(200));
+
+        Simulator::Schedule(MilliSeconds(20),
+                            &LeoSimTestBhoUsesReactivePath::SwapSatellitePositions,
+                            this);
+        Simulator::Stop(MilliSeconds(200));
+        Simulator::Run();
+
+        const auto history = manager->GetHandoverHistory();
+        NS_TEST_ASSERT_MSG_EQ(m_choConfigCallbacks,
+                              0,
+                              "Reactive BHO must not emit CHO candidate configurations");
+        NS_TEST_ASSERT_MSG_EQ(history.empty(), false, "BHO should complete a reactive handover");
+        if (!history.empty())
+        {
+            NS_TEST_ASSERT_MSG_EQ(history.front().mode,
+                                  LEOSIM_HO_MODE_BHO,
+                                  "BHO event must be recorded with BHO mode");
+            NS_TEST_ASSERT_MSG_LT(history.front().handoverLatencyMs,
+                                  50.0,
+                                  "BHO latency must exclude the 100 ms CHO preparation delay");
+        }
+
+        Simulator::Destroy();
+        m_channel = nullptr;
+        m_satAMobility = nullptr;
+        m_satBMobility = nullptr;
+    }
+
+    uint32_t m_choConfigCallbacks{0};
+    Ptr<LeoSimChannelModel> m_channel;
+    Ptr<LeoSimMobilityModel> m_satAMobility;
+    Ptr<LeoSimMobilityModel> m_satBMobility;
+};
+
 LeoSimTestCurrentBeamMatchesRoutingNextHop::LeoSimTestCurrentBeamMatchesRoutingNextHop()
   : TestCase("LeoSim current beam and routing next hop point to same satellite")
 {
@@ -3500,6 +3619,7 @@ LeoSimTestSuite::LeoSimTestSuite()
     AddTestCase(new LeoSimTestIntraBeamHoFasterThanInter, TestCase::Duration::QUICK);
     AddTestCase(new LeoSimTestBeamHoppingScheduleColour, TestCase::Duration::QUICK);
     AddTestCase(new LeoSimTestBeamDarkHandover, TestCase::Duration::QUICK);
+    AddTestCase(new LeoSimTestBhoUsesReactivePath, TestCase::Duration::QUICK);
     AddTestCase(new LeoSimTestDemandAwareSchedule, TestCase::Duration::QUICK);
     AddTestCase(new LeoSimTestTopsisWithSinrAttribute, TestCase::Duration::QUICK);
     AddTestCase(new LeoSimTestOperatorRegistration, TestCase::Duration::QUICK);

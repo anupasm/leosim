@@ -772,7 +772,9 @@ class LeoSimBeamManager : public Object
     // Per-candidate CHO configurations (indexed by [UE ID][sat ID])
     std::map<uint32_t, std::map<uint32_t, LeoSimChoConfig>> m_choConfigs;
     std::map<uint32_t, std::vector<uint32_t>> m_choCandidateOrder; //!< TOPSIS satellite order
-    std::map<uint32_t, Time> m_choInitiatedAt; //!< Start time of active CHO attempt
+    // Historical member name retained for ABI/source stability; stores the
+    // start of either CHO preparation or reactive BHO execution.
+    std::map<uint32_t, Time> m_choInitiatedAt;
     std::map<uint32_t, EventId> m_choPreparationEventIds; //!< Pending preparation callbacks
     std::map<uint32_t, std::map<uint32_t, LeoSimBeamRecord>> m_preparedCandidateBeams; //!< Prepared CHO beam records
 
@@ -922,6 +924,16 @@ class LeoSimBeamManager : public Object
                                 const std::vector<LeoSimTopsisCandidate>& topN);
 
     /**
+     * \brief Dispatch a handover trigger to the configured BHO or CHO procedure.
+     * \param ueNodeId UE node identifier
+     * \param candidates Ranked target candidates
+     * \param trigger Handover trigger type used by reactive BHO
+     */
+    void StartInterSatelliteHandover(uint32_t ueNodeId,
+                                     const std::vector<LeoSimTopsisCandidate>& candidates,
+                                     LeoSimHandoverTrigger trigger);
+
+    /**
      * \brief Evaluate CHO execution conditions for all configured candidates
      * \param ueNodeId UE node identifier
      */
@@ -938,16 +950,28 @@ class LeoSimBeamManager : public Object
                             LeoSimHandoverTrigger trigger);
 
     /**
+     * \brief Execute reactive best-effort handover without CHO preparation.
+     * \param ueNodeId UE node identifier
+     * \param targetSatId Target satellite node ID
+     * \param trigger Handover trigger event
+     */
+    void ExecuteBhoHandover(uint32_t ueNodeId,
+                            uint32_t targetSatId,
+                            LeoSimHandoverTrigger trigger);
+
+    /**
      * \brief Complete handover processing and update state
      * \param ueNodeId UE node identifier
      * \param sourceSatId Source satellite node ID
      * \param targetSatId Target satellite node ID
      * \param trigger Handover trigger type
+     * \param mode Procedure that initiated this in-flight handover
      */
     void CompleteHandover(uint32_t ueNodeId,
                           uint32_t sourceSatId,
                           uint32_t targetSatId,
-                          LeoSimHandoverTrigger trigger);
+                          LeoSimHandoverTrigger trigger,
+                          LeoSimHandoverMode mode);
 
     /**
      * \brief Fail an active CHO if its serving access link has disconnected.

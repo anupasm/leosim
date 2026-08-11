@@ -660,19 +660,14 @@ LeoSimBeamManager::RunT310Evaluation(uint32_t ueNodeId)
             NS_LOG_WARN("RLF declared for UE " << ueNodeId << " (T310 counter=" << t310Counter
                                                << " >= N310=" << m_n310 << ")");
 
-            // Get ranked candidates and initiate CHO preparation
+            // Get ranked candidates and dispatch to reactive BHO or predictive CHO.
             std::vector<LeoSimBeamRecord> visibleBeams = ScanVisibleSatellites(ueNodeId);
             std::vector<LeoSimTopsisCandidate> rankedCandidates =
                 RankByTopsis(visibleBeams, ueNodeId);
 
             if (!rankedCandidates.empty())
             {
-                // Initiate CHO preparation with the top candidate
-                uint32_t topCandidateSatId = rankedCandidates[0].beamRecord.satelliteNodeId;
-                InitiateChoPreparation(ueNodeId, topCandidateSatId);
-
-                NS_LOG_DEBUG("RLF recovery via CHO initiated for UE "
-                             << ueNodeId << " to satellite " << topCandidateSatId);
+                StartInterSatelliteHandover(ueNodeId, rankedCandidates, LEOSIM_HO_RLF);
             }
             else
             {
@@ -833,18 +828,28 @@ LeoSimBeamManager::RunTttEvaluation(uint32_t ueNodeId)
                 if (!candidates.empty())
                 {
                     const LeoSimBeamRecord& servingBeamCur = beamIt->second;
-                    const LeoSimTopsisCandidate& bestCandCur = candidates[0];
+                    auto bestNeighborCur = std::find_if(
+                        candidates.begin(),
+                        candidates.end(),
+                        [&servingBeamCur](const LeoSimTopsisCandidate& candidate) {
+                            return candidate.beamRecord.satelliteNodeId !=
+                                   servingBeamCur.satelliteNodeId;
+                        });
 
                     // Re-evaluate A3: best > serving + offset AND different satellite
                     bool a3StillHolds =
-                        (bestCandCur.beamRecord.rsrp > servingBeamCur.rsrp + m_a3Offset) &&
-                        (bestCandCur.beamRecord.satelliteNodeId != servingBeamCur.satelliteNodeId);
+                        bestNeighborCur != candidates.end() &&
+                        bestNeighborCur->beamRecord.rsrp > servingBeamCur.rsrp + m_a3Offset;
 
                     if (a3StillHolds)
                     {
+                        const LeoSimHandoverTrigger trigger =
+                            bestNeighborCur->beamRecord.rsrp > m_a4Threshold ? LEOSIM_HO_A4
+                                                                            : LEOSIM_HO_A3;
                         NS_LOG_DEBUG("A3 condition still holds after TTT expiry for UE "
-                                     << ueNodeId << ", proceeding with CHO preparation");
-                        InitiateChoPreparation(ueNodeId, bestCandCur.beamRecord.satelliteNodeId);
+                                     << ueNodeId << ", dispatching "
+                                     << (m_hoMode == LEOSIM_HO_MODE_BHO ? "BHO" : "CHO"));
+                        StartInterSatelliteHandover(ueNodeId, candidates, trigger);
                     }
                     else
                     {
@@ -1728,6 +1733,42 @@ LeoSimBeamManager::InitiateChoPreparation(uint32_t ueNodeId,
 }
 
 void
+LeoSimBeamManager::StartInterSatelliteHandover(
+    uint32_t ueNodeId,
+    const std::vector<LeoSimTopsisCandidate>& candidates,
+    LeoSimHandoverTrigger trigger)
+{
+    auto serving = m_currentBeams.find(ueNodeId);
+    if (serving == m_currentBeams.end())
+    {
+        NS_LOG_WARN("Cannot start handover for UE " << ueNodeId << ": no serving beam");
+        return;
+    }
+
+    const uint32_t servingSatId = serving->second.satelliteNodeId;
+    auto target = std::find_if(candidates.begin(),
+                               candidates.end(),
+                               [servingSatId](const LeoSimTopsisCandidate& candidate) {
+                                   return candidate.beamRecord.satelliteNodeId != servingSatId;
+                               });
+    if (target == candidates.end())
+    {
+        NS_LOG_DEBUG("No non-serving handover candidate for UE " << ueNodeId);
+        return;
+    }
+
+    if (m_hoMode == LEOSIM_HO_MODE_BHO)
+    {
+        // BHO is reactive: choose the currently best target and execute without
+        // preparing conditional configurations or waiting for m_prepDelay.
+        ExecuteBhoHandover(ueNodeId, target->beamRecord.satelliteNodeId, trigger);
+        return;
+    }
+
+    InitiateChoPreparation(ueNodeId, candidates);
+}
+
+void
 LeoSimBeamManager::EvaluateChoConditions(uint32_t ueNodeId)
 {
     NS_LOG_FUNCTION(this << ueNodeId);
@@ -2112,12 +2153,66 @@ LeoSimBeamManager::ExecuteChoHandover(uint32_t ueNodeId,
     // Step 3: Schedule Simulator::Schedule(m_execDelay, lambda)
     auto execCallback = [this, ueNodeId, sourceSatId, targetSatId, trigger]() {
         // Lambda calls CompleteHandover
-        CompleteHandover(ueNodeId, sourceSatId, targetSatId, trigger);
+        CompleteHandover(ueNodeId, sourceSatId, targetSatId, trigger, LEOSIM_HO_MODE_CHO);
     };
 
     Simulator::Schedule(m_execDelay, execCallback);
     NS_LOG_DEBUG("CHO execution scheduled after " << m_execDelay.GetMilliSeconds() << "ms for UE "
                                                   << ueNodeId);
+}
+
+void
+LeoSimBeamManager::ExecuteBhoHandover(uint32_t ueNodeId,
+                                      uint32_t targetSatId,
+                                      LeoSimHandoverTrigger trigger)
+{
+    NS_LOG_FUNCTION(this << ueNodeId << targetSatId << trigger);
+
+    auto beamIt = m_currentBeams.find(ueNodeId);
+    if (beamIt == m_currentBeams.end())
+    {
+        NS_LOG_WARN("UE " << ueNodeId << " has no current beam for BHO execution");
+        m_choInitiatedAt.erase(ueNodeId);
+        return;
+    }
+
+    const uint32_t sourceSatId = beamIt->second.satelliteNodeId;
+    if (sourceSatId == targetSatId)
+    {
+        NS_LOG_DEBUG("Ignoring BHO request to current serving satellite " << targetSatId);
+        m_choInitiatedAt.erase(ueNodeId);
+        return;
+    }
+    if (!m_inFlightInterSatelliteHandovers.insert(ueNodeId).second)
+    {
+        NS_LOG_DEBUG("Ignoring duplicate BHO execution request for UE " << ueNodeId);
+        return;
+    }
+
+    // Record the start only after accepting the request.  A duplicate must not
+    // overwrite the timestamp of the handover that is already in flight.
+    m_choInitiatedAt[ueNodeId] = Simulator::Now();
+
+    m_handoverBuffers.erase(ueNodeId);
+    m_handoverBufferCounters[ueNodeId] = {};
+    beamIt->second.state = LEOSIM_BEAM_EXECUTING;
+    if (!m_beamStateCallback.IsNull())
+    {
+        m_beamStateCallback(ueNodeId, beamIt->second, 0.0);
+    }
+
+    NS_LOG_DEBUG("BHO execution initiated for UE "
+                 << ueNodeId << ": satellite " << sourceSatId << " -> " << targetSatId
+                 << ", trigger=" << trigger << " at time " << Simulator::Now().GetSeconds()
+                 << "s");
+
+    Simulator::Schedule(m_execDelay, [this, ueNodeId, sourceSatId, targetSatId, trigger]() {
+        CompleteHandover(ueNodeId,
+                         sourceSatId,
+                         targetSatId,
+                         trigger,
+                         LEOSIM_HO_MODE_BHO);
+    });
 }
 
 void
@@ -2187,7 +2282,8 @@ void
 LeoSimBeamManager::CompleteHandover(uint32_t ueNodeId,
                                     uint32_t sourceSatId,
                                     uint32_t targetSatId,
-                                    LeoSimHandoverTrigger trigger)
+                                    LeoSimHandoverTrigger trigger,
+                                    LeoSimHandoverMode mode)
 {
     NS_LOG_FUNCTION(this << ueNodeId << sourceSatId << targetSatId << trigger);
 
@@ -2251,7 +2347,7 @@ LeoSimBeamManager::CompleteHandover(uint32_t ueNodeId,
         failedEvent.sourceCellId = sourceBeam.cellId;
         failedEvent.targetCellId =
             targetVisible ? targetBeam.cellId : std::numeric_limits<uint32_t>::max();
-        failedEvent.mode = LEOSIM_HO_MODE_CHO;
+        failedEvent.mode = mode;
         const uint32_t sourcePlane =
             m_loader->GetOrbitPlane(GetLeoSimIdFromNodeId(sourceSatId));
         const uint32_t targetPlane =
@@ -2262,7 +2358,8 @@ LeoSimBeamManager::CompleteHandover(uint32_t ueNodeId,
         const auto initiated = m_choInitiatedAt.find(ueNodeId);
         failedEvent.initiatedAt =
             initiated == m_choInitiatedAt.end()
-                ? Simulator::Now() - m_prepDelay - m_execDelay
+                ? Simulator::Now() -
+                      (mode == LEOSIM_HO_MODE_CHO ? m_prepDelay + m_execDelay : m_execDelay)
                 : initiated->second;
         failedEvent.completedAt = Simulator::Now();
         failedEvent.handoverLatencyMs =
@@ -2380,13 +2477,15 @@ LeoSimBeamManager::CompleteHandover(uint32_t ueNodeId,
     hoEvent.targetBeamId = currentBeam.beamId;
     hoEvent.sourceCellId = sourceBeam.cellId;
     hoEvent.targetCellId = currentBeam.cellId;
-    hoEvent.mode = LEOSIM_HO_MODE_CHO; // Conditional handover
+    hoEvent.mode = mode;
     hoEvent.type = hoType;
     hoEvent.trigger = trigger;
     const auto initiated = m_choInitiatedAt.find(ueNodeId);
     hoEvent.initiatedAt =
-        initiated == m_choInitiatedAt.end() ? Simulator::Now() - m_prepDelay - m_execDelay
-                                            : initiated->second;
+        initiated == m_choInitiatedAt.end()
+            ? Simulator::Now() -
+                  (mode == LEOSIM_HO_MODE_CHO ? m_prepDelay + m_execDelay : m_execDelay)
+            : initiated->second;
     hoEvent.completedAt = Simulator::Now();
     hoEvent.handoverLatencyMs =
         std::max(0.0, (hoEvent.completedAt - hoEvent.initiatedAt).GetSeconds() * 1000.0);
@@ -2437,9 +2536,11 @@ LeoSimBeamManager::CompleteHandover(uint32_t ueNodeId,
     m_choPreparationEventIds.erase(ueNodeId);
     NS_LOG_DEBUG("Cleared CHO configs for UE " << ueNodeId);
 
-    // Step 11: Call PreScheduleEphemerisHandovers(Seconds(600))
-    PreScheduleEphemerisHandovers(Seconds(600));
-    NS_LOG_DEBUG("Pre-scheduled ephemeris handovers with 600s lookahead for new satellite");
+    if (mode == LEOSIM_HO_MODE_CHO)
+    {
+        PreScheduleEphemerisHandovers(Seconds(600));
+        NS_LOG_DEBUG("Pre-scheduled ephemeris handovers with 600s lookahead for new satellite");
+    }
 
     // Step 12: If m_handoverCallback is not null, fire it with the event
     if (!m_handoverCallback.IsNull())
@@ -2452,16 +2553,24 @@ LeoSimBeamManager::CompleteHandover(uint32_t ueNodeId,
     FinishInterSatelliteHandover(ueNodeId);
 
     // Step 13: Log NS_LOG_DEBUG
-    NS_LOG_DEBUG("CHO completed for UE " << ueNodeId << ": satellite " << sourceSatId << " -> "
-                                         << targetSatId << ", latency=" << hoEvent.handoverLatencyMs
-                                         << "ms, trigger=" << trigger << " at time "
-                                         << Simulator::Now().GetSeconds() << "s");
+    NS_LOG_DEBUG((mode == LEOSIM_HO_MODE_BHO ? "BHO" : "CHO")
+                 << " completed for UE " << ueNodeId << ": satellite " << sourceSatId << " -> "
+                 << targetSatId << ", latency=" << hoEvent.handoverLatencyMs
+                 << "ms, trigger=" << trigger << " at time " << Simulator::Now().GetSeconds()
+                 << "s");
 }
 
 void
 LeoSimBeamManager::PreScheduleEphemerisHandovers(Time lookaheadWindow)
 {
     NS_LOG_FUNCTION(this << lookaheadWindow.GetSeconds());
+
+    // Ephemeris lookahead is a CHO preparation feature. Reactive BHO waits
+    // until an A3/A4, weather, or link-failure trigger is satisfied.
+    if (m_hoMode == LEOSIM_HO_MODE_BHO)
+    {
+        return;
+    }
 
     if (!m_loader || !m_channelModel)
     {
@@ -2546,12 +2655,9 @@ LeoSimBeamManager::PreScheduleEphemerisHandovers(Time lookaheadWindow)
                 return;
             }
 
-            // Initiate preparation for top-ranked candidate
-            uint32_t targetSat = candidates[0].beamRecord.satelliteNodeId;
-            NS_LOG_DEBUG("Initiating CHO preparation for UE "
-                         << ueNodeId << " to satellite " << targetSat
-                         << " (TOPSIS score: " << candidates[0].topsisScore << ")");
-            InitiateChoPreparation(ueNodeId, targetSat);
+            NS_LOG_DEBUG("Dispatching ephemeris handover for UE "
+                         << ueNodeId << " (TOPSIS score: " << candidates[0].topsisScore << ")");
+            StartInterSatelliteHandover(ueNodeId, candidates, LEOSIM_HO_TIME_BASED);
         };
 
         // Schedule the preparation callback
@@ -2706,9 +2812,8 @@ LeoSimBeamManager::EvaluateIntraBeamNeed(uint32_t ueNodeId)
             {
                 NS_LOG_DEBUG("Weather fade trigger for UE "
                              << ueNodeId << ": attenuation=" << atten << " dB > threshold="
-                             << m_weatherFadeThresholdDb << " dB, preparing CHO to sat "
-                             << candidates[0].beamRecord.satelliteNodeId);
-                InitiateChoPreparation(ueNodeId, candidates);
+                             << m_weatherFadeThresholdDb << " dB");
+                StartInterSatelliteHandover(ueNodeId, candidates, LEOSIM_HO_WEATHER_FADE);
                 return;
             }
         }
@@ -3256,13 +3361,15 @@ LeoSimBeamManager::UpdateCycle()
                         RankByTopsis(visibleBeams, ueNodeId);
                     if (!ranked.empty())
                     {
-                        InitiateChoPreparation(ueNodeId, ranked);
+                        StartInterSatelliteHandover(ueNodeId,
+                                                    ranked,
+                                                    LEOSIM_HO_LOCATION_BASED);
                     }
                 }
             }
         }
 
-        // When connected, run TTT/A3/A4 evaluation to trigger CHO preparation.
+        // When connected, run TTT/A3/A4 evaluation to trigger BHO or CHO.
         if (currentBeamPostIntra.state == LEOSIM_BEAM_CONNECTED)
         {
             LeoSimTaskProfiler::ScopedEvent phase(
@@ -3647,7 +3754,10 @@ LeoSimBeamManager::Start(NodeContainer groundNodes,
     // Kick off ephemeris-based pre-scheduling once we have an initial serving beam.
     // Without this, TIME_BASED (TTE) handovers will only be scheduled after a
     // previous handover completes.
-    PreScheduleEphemerisHandovers(Seconds(600));
+    if (m_hoMode == LEOSIM_HO_MODE_CHO)
+    {
+        PreScheduleEphemerisHandovers(Seconds(600));
+    }
 
     // Schedule the first update cycle after the start time
     m_updateEventId =
