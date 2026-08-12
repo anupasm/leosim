@@ -2,7 +2,7 @@
 #SBATCH --job-name=leosim-routing
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=6
+#SBATCH --cpus-per-task=2
 #SBATCH --time=24:00:00
 #SBATCH --array=0-6%7
 #SBATCH --output=/scratch/adesilva/logs/%x-%A_%a.out
@@ -68,8 +68,10 @@ metric="${METRICS[$index]}"
 
 app_start="${APP_START:-1}"
 app_stop="${APP_STOP:-$((sim_time - 1))}"
-num_ues="${NUM_UES:-0}"
-num_servers="${NUM_SERVERS:-0}"
+# Keep the routing campaign consistent with the scalability and handover
+# campaigns: six UE clients and six ground-station servers (12 ground nodes).
+num_ues="${NUM_UES:-6}"
+num_servers="${NUM_SERVERS:-6}"
 all_to_all="${ALL_TO_ALL_TRAFFIC:-1}"
 tcp_rate="${TCP_RATE:-1Mbps}"
 verbose="${VERBOSE:-1}"

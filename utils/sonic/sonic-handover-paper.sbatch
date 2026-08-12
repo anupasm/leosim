@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=leosim-ho
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
 #SBATCH --array=0-5%6
 #SBATCH --time=48:00:00
-#SBATCH --cpus-per-task=4
+#SBATCH --cpus-per-task=2
 #SBATCH --output=/scratch/adesilva/logs/leosim-ho-%A_%a.out
 #SBATCH --error=/scratch/adesilva/logs/leosim-ho-%A_%a.err
 
@@ -36,6 +38,8 @@ SATELLITE_COUNT=5000
 SATELLITE_COUNTS=${SATELLITE_COUNT}
 SIM_TIME=1800
 UPDATE_INTERVAL=30
+ROUTING_UPDATE_INTERVAL="${LEOSIM_ROUTING_UPDATE_INTERVAL:-30}"
+BEAM_UPDATE_INTERVAL_MS="${LEOSIM_BEAM_UPDATE_INTERVAL_MS:-1000}"
 GROUND_DEVICES_PER_OPERATOR=${LEOSIM_GROUND_DEVICES_PER_OPERATOR:-2}
 NUM_UES=${LEOSIM_NUM_UES:-$((3 * GROUND_DEVICES_PER_OPERATOR))}
 NUM_SERVERS=${LEOSIM_NUM_SERVERS:-$((3 * GROUND_DEVICES_PER_OPERATOR))}
@@ -286,7 +290,7 @@ command_line="leosim-experiments \
 --appStart=60 --appStop=3599 \
 --tcpRate=${load} --tcpPacketSize=512 --allToAllTraffic=1 \
 --enableIsl=1 --maxIslNeighbors=4 \
---enableDynamicRouting=1 --routingUpdateInterval=10 \
+--enableDynamicRouting=1 --routingUpdateInterval=${ROUTING_UPDATE_INTERVAL} \
 --useRouteTreeCache=1 --routeTreeWorkers=${SLURM_CPUS_PER_TASK:-8} \
 --routeTreeEngine=${route_tree_engine} \
 --routeTreeWorkDir=${route_tree_dir} \
@@ -295,7 +299,7 @@ command_line="leosim-experiments \
 --enableLoadBalancing=0 \
 --ttt=1 --t310=1 --n310=3 --n311=3 \
 --a3Offset=3 --a4Threshold=-110 --tteTrigger=30 \
---choPrep=100 --choExec=150 --beamUpdateIntervalMs=100 \
+--choPrep=100 --choExec=150 --beamUpdateIntervalMs=${BEAM_UPDATE_INTERVAL_MS} \
 --enableStatistics=1 --statisticsInterval=1 \
 --enableHandoverLogging=1 --writeFlowMonitor=1 \
 --enableTaskProfiler=1 --progressLogInterval=30 \
@@ -308,6 +312,8 @@ command_line="leosim-experiments \
     echo "array_task_id=${SLURM_ARRAY_TASK_ID}"
     echo "hostname=$(hostname)"
     echo "started_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "routing_update_interval_s=${ROUTING_UPDATE_INTERVAL}"
+    echo "beam_update_interval_ms=${BEAM_UPDATE_INTERVAL_MS}"
     echo "ns_global_value=${NS_GLOBAL_VALUE}"
     echo "command=${command_line}"
     git -C "${repo_root}" rev-parse HEAD 2>/dev/null || echo "commit=unavailable"

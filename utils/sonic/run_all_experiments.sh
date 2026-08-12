@@ -144,6 +144,12 @@ Environment:
                        GSS and UEs selected per operator (default: 2 each).
   LEOSIM_HO_BUFFER_PACKETS
                        Per-ground-node handover buffer size (default: 1024).
+  LEOSIM_ROUTING_UPDATE_INTERVAL
+                       Handover-campaign route update interval in seconds
+                       (default: 30, matching the routing campaign).
+  LEOSIM_BEAM_UPDATE_INTERVAL_MS
+                       Handover-campaign beam update interval in milliseconds
+                       (default: 1000, matching the routing campaign default).
   LEOSIM_PYTHON_ENV    Host-build Python environment; must be under /scratch/adesilva.
 EOF
 }
@@ -261,7 +267,7 @@ submit_routing_experiments() {
 }
 
 submit_handover_experiments() {
-  local results_root ho_cpus ho_buffer_packets
+  local results_root ho_cpus ho_buffer_packets routing_interval beam_interval_ms
   if ! command -v sbatch >/dev/null 2>&1; then
     echo "sbatch is unavailable; run this script on a Slurm login node." >&2
     exit 2
@@ -277,12 +283,15 @@ submit_handover_experiments() {
   results_root="${LEOSIM_RESULTS_ROOT:-/scratch/adesilva/handover/results}"
   ho_cpus="${LEOSIM_HO_CPUS:-4}"
   ho_buffer_packets="${LEOSIM_HO_BUFFER_PACKETS:-1024}"
+  routing_interval="${LEOSIM_ROUTING_UPDATE_INTERVAL:-30}"
+  beam_interval_ms="${LEOSIM_BEAM_UPDATE_INTERVAL_MS:-1000}"
   mkdir -p "$results_root"
   handover_job="$(sbatch --parsable --cpus-per-task="${ho_cpus}" \
-    --export="ALL,SIF=${SIF},LEOSIM_REPO_ROOT=${REPO_ROOT},LEOSIM_NS3_ROOT=${NS3_ROOT},LEOSIM_RESULTS_ROOT=${results_root},LEOSIM_HO_BUFFER_PACKETS=${ho_buffer_packets}" \
+    --export="ALL,SIF=${SIF},LEOSIM_REPO_ROOT=${REPO_ROOT},LEOSIM_NS3_ROOT=${NS3_ROOT},LEOSIM_RESULTS_ROOT=${results_root},LEOSIM_HO_BUFFER_PACKETS=${ho_buffer_packets},LEOSIM_ROUTING_UPDATE_INTERVAL=${routing_interval},LEOSIM_BEAM_UPDATE_INTERVAL_MS=${beam_interval_ms}" \
     "$HANDOVER_SBATCH")"
   echo "Submitted handover array: $handover_job"
   echo "Handover results: ${results_root}/${handover_job%%;*}"
+  echo "Handover intervals: route=${routing_interval}s, beam=${beam_interval_ms}ms"
   echo "Monitor with: squeue -j ${handover_job%%;*}"
 }
 
