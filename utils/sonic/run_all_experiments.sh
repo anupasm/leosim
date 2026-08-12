@@ -192,7 +192,7 @@ archive_outputs() {
   archive_root="${LEOSIM_ARCHIVE_ROOT:-${scratch_root}/rerun-archive}/${stamp}"
   routing_results="${RESULTS_ROOT:-${scratch_root}/results/leosim-routing}"
   aldsr_results="${ALDSR_RESULTS_ROOT:-${scratch_root}/results/leosim-aldsr}"
-  handover_results="${LEOSIM_RESULTS_ROOT:-${scratch_root}/handover/results}"
+  handover_results="${LEOSIM_RESULTS_ROOT:-${scratch_root}/results/leosim-handover}"
   mkdir -p "$archive_root"
 
   if [[ -d "$routing_results" ]]; then
@@ -280,7 +280,7 @@ submit_handover_experiments() {
 
   mkdir -p "/scratch/adesilva/logs" "/scratch/adesilva/tmp"
   cd "$REPO_ROOT"
-  results_root="${LEOSIM_RESULTS_ROOT:-/scratch/adesilva/handover/results}"
+  results_root="${LEOSIM_RESULTS_ROOT:-/scratch/adesilva/results/leosim-handover}"
   ho_cpus="${LEOSIM_HO_CPUS:-4}"
   ho_buffer_packets="${LEOSIM_HO_BUFFER_PACKETS:-1024}"
   routing_interval="${LEOSIM_ROUTING_UPDATE_INTERVAL:-30}"

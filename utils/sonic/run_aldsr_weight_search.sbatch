@@ -2,9 +2,9 @@
 #SBATCH --job-name=leosim-aldsr
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=6
+#SBATCH --cpus-per-task=1
 #SBATCH --time=24:00:00
-#SBATCH --array=0-26%20
+#SBATCH --array=0-26%27
 #SBATCH --output=/scratch/adesilva/logs/%x-%A_%a.out
 #SBATCH --error=/scratch/adesilva/logs/%x-%A_%a.err
 
@@ -141,7 +141,7 @@ fi
 
 scenario="leosim-experiments"
 scenario+=" --satellites=${container_satellite_positions} --useTrace=0"
-scenario+=" --numSatellites=${satellites} --numServers=${NUM_SERVERS:-0} --numUes=${NUM_UES:-0}"
+scenario+=" --numSatellites=${satellites} --numServers=${NUM_SERVERS:-6} --numUes=${NUM_UES:-6}"
 scenario+=" --rngSeed=1 --rngRun=${seed} --syntheticLoadSeed=${seed}"
 scenario+=" --allToAllTraffic=${ALL_TO_ALL_TRAFFIC:-1} --routingMetric=${policy}"
 scenario+=" --combinedLoadWeight=${load_weight} --combinedDistanceWeight=${distance_weight}"

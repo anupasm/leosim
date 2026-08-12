@@ -2,15 +2,15 @@
 #SBATCH --job-name=leosim-hop-scale
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=6
+#SBATCH --cpus-per-task=4
 #SBATCH --array=0-2%3
 #SBATCH --time=48:00:00
 #SBATCH --output=/scratch/adesilva/logs/%x-%A_%a.out
 #SBATCH --error=/scratch/adesilva/logs/%x-%A_%a.err
 
-# Hop-routing scalability campaign: three concurrent array tasks use 18 CPUs.
-# Together with the routing (14) and handover (12) arrays, the full campaign
-# uses 44 of the server's 47 CPUs. Each task has six UEs and six GSSs.
+# Hop-routing scalability campaign: three concurrent array tasks use 12 CPUs.
+# Together with ALDSR (27) and handover (6), the full campaign uses 45 of the
+# server's 47 CPUs. Each task has six UEs and six GSSs.
 # Build the container/experiment before submission; runs use --no-build.
 
 set -euo pipefail
@@ -23,7 +23,7 @@ if (( task_id < 0 || task_id >= ${#SATELLITE_COUNTS[@]} )); then
 fi
 
 satellites=${SATELLITE_COUNTS[task_id]}
-allocated_cpus=${SLURM_CPUS_PER_TASK:-6}
+allocated_cpus=${SLURM_CPUS_PER_TASK:-4}
 sim_time=${LEOSIM_SIM_TIME:-1200}
 update_interval=${LEOSIM_ROUTING_UPDATE_INTERVAL:-30}
 tle_timestep=${LEOSIM_TLE_TIMESTEP:-5}
@@ -133,7 +133,7 @@ command=(srun --exclusive --ntasks=1 --cpus-per-task="${allocated_cpus}" --cpu-b
     echo "routing_update_interval_s=${update_interval}"
     echo "slurm_cpus_per_task=${allocated_cpus}"
     echo "concurrent_array_tasks=3"
-    echo "campaign_cpus=18"
+    echo "campaign_cpus=12"
     echo "hostname=$(hostname)"
     echo "started_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "git_commit=$(git -C "${repo_root}" rev-parse HEAD 2>/dev/null || echo embedded-in-image)"

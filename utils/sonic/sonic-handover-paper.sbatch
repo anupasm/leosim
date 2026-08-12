@@ -4,7 +4,7 @@
 #SBATCH --ntasks=1
 #SBATCH --array=0-5%6
 #SBATCH --time=48:00:00
-#SBATCH --cpus-per-task=2
+#SBATCH --cpus-per-task=1
 #SBATCH --output=/scratch/adesilva/logs/leosim-ho-%A_%a.out
 #SBATCH --error=/scratch/adesilva/logs/leosim-ho-%A_%a.err
 
@@ -90,7 +90,7 @@ case "${SIF}" in
     /scratch/adesilva/*) ;;
     *) echo "SIF must be under /scratch/adesilva: ${SIF}" >&2; exit 2 ;;
 esac
-base_results_root="${LEOSIM_RESULTS_ROOT:-/scratch/adesilva/handover/results}"
+base_results_root="${LEOSIM_RESULTS_ROOT:-/scratch/adesilva/results/leosim-handover}"
 case "${base_results_root}" in
     /scratch/adesilva|/scratch/adesilva/*) ;;
     *) echo "LEOSIM_RESULTS_ROOT must be under /scratch/adesilva: ${base_results_root}" >&2; exit 2 ;;
