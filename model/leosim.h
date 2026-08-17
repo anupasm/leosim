@@ -34,6 +34,7 @@
 #ifndef LEOSIM_H
 #define LEOSIM_H
 
+#include "leosim-beam-capacity-manager.h"
 #include "leosim-beam-hopping-manager.h"
 #include "leosim-beam-layout-engine.h"
 #include "leosim-beam-load-balancer.h"

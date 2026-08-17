@@ -1,6 +1,7 @@
 build_lib(
   LIBNAME leosim
   SOURCE_FILES
+    model/leosim-beam-capacity-manager.cc
     model/leosim-beam-manager.cc
     model/leosim-multi-beam-model.cc
     model/leosim-beam-layout-engine.cc
@@ -32,6 +33,7 @@ build_lib(
     
   HEADER_FILES
     model/leosim.h
+    model/leosim-beam-capacity-manager.h
     model/leosim-beam-manager.h
     model/leosim-beam-layout-engine.h
     model/leosim-beam-hopping-manager.h

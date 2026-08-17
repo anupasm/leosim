@@ -11,6 +11,7 @@
 #include "ns3/flow-monitor-module.h"
 #include "ns3/internet-module.h"
 #include "ns3/leosim-beam-manager-helper.h"
+#include "ns3/leosim-beam-capacity-manager.h"
 #include "ns3/leosim-beam-layout-engine.h"
 #include "ns3/leosim-channel-helper.h"
 #include "ns3/leosim-channel-model.h"
@@ -41,6 +42,7 @@
 #include <iomanip>
 #include <iostream>
 #include <map>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -432,6 +434,22 @@ main(int argc, char* argv[])
     double minElevation = 10.0;
     double accessMaxDistance = 2500000.0;
     std::string accessDataRate = "100Mbps";
+    bool enableSharedBeamCapacity = true;
+    std::string beamCapacity;
+    std::string beamDownlinkCapacity = "1Gbps";
+    std::string beamUplinkCapacity = "250Mbps";
+    std::string satelliteDownlinkCapacity = "20Gbps";
+    std::string satelliteUplinkCapacity = "5Gbps";
+    std::string uePackageDownlinkRate = "100Mbps";
+    std::string uePackageUplinkRate = "20Mbps";
+    std::string ueServiceProfileFile;
+    std::string beamScheduler = "alpha-fair";
+    double alphaFairness = 1.0;
+    double queuePressureWeight = 1.0;
+    bool beamDemandAware = true;
+    double beamActiveUserTimeoutMs = 200.0;
+    double beamCapacityUpdateIntervalMs = 100.0;
+    bool enableBeamCapacityLogging = true;
     std::string accessDelay = "1ms";
     std::string delayMode = "geometry";
     double delayUpdateInterval = 1.0;
@@ -530,6 +548,42 @@ main(int argc, char* argv[])
     cmd.AddValue("minElevation", "Minimum satellite access-link elevation angle in degrees", minElevation);
     cmd.AddValue("accessMaxDistance", "Maximum satellite-ground link distance in meters", accessMaxDistance);
     cmd.AddValue("accessDataRate", "Satellite-ground point-to-point data rate", accessDataRate);
+    cmd.AddValue("enableSharedBeamCapacity",
+                 "Share a finite beam capacity among associated ground nodes",
+                 enableSharedBeamCapacity);
+    cmd.AddValue("beamCapacity",
+                 "Deprecated symmetric beam capacity override; empty uses separate UL/DL values",
+                 beamCapacity);
+    cmd.AddValue("beamDownlinkCapacity", "Total downlink capacity per beam", beamDownlinkCapacity);
+    cmd.AddValue("beamUplinkCapacity", "Total uplink capacity per beam", beamUplinkCapacity);
+    cmd.AddValue("satelliteDownlinkCapacity",
+                 "Aggregate downlink capacity shared by all beams on a satellite",
+                 satelliteDownlinkCapacity);
+    cmd.AddValue("satelliteUplinkCapacity",
+                 "Aggregate uplink capacity shared by all beams on a satellite",
+                 satelliteUplinkCapacity);
+    cmd.AddValue("uePackageDownlinkRate", "Per-UE subscription downlink peak", uePackageDownlinkRate);
+    cmd.AddValue("uePackageUplinkRate", "Per-UE subscription uplink peak", uePackageUplinkRate);
+    cmd.AddValue("ueServiceProfileFile",
+                 "Optional UE profile CSV: node_id,dl_peak,dl_min,ul_peak,ul_min,weight",
+                 ueServiceProfileFile);
+    cmd.AddValue("beamScheduler", "Beam scheduler: alpha-fair, pf, or equal", beamScheduler);
+    cmd.AddValue("alphaFairness", "Alpha parameter for alpha-fair allocation", alphaFairness);
+    cmd.AddValue("queuePressureWeight",
+                 "Weight applied to normalized transmit-queue pressure",
+                 queuePressureWeight);
+    cmd.AddValue("beamDemandAware",
+                 "Allocate shared capacity only to recently active users",
+                 beamDemandAware);
+    cmd.AddValue("beamActiveUserTimeoutMs",
+                 "Time after last offered packet that a direction remains active",
+                 beamActiveUserTimeoutMs);
+    cmd.AddValue("beamCapacityUpdateIntervalMs",
+                 "Beam capacity allocation refresh interval in milliseconds",
+                 beamCapacityUpdateIntervalMs);
+    cmd.AddValue("enableBeamCapacityLogging",
+                 "Write per-user beam capacity allocations to CSV",
+                 enableBeamCapacityLogging);
     cmd.AddValue("accessDelay", "Satellite-ground propagation delay, e.g. 1ms", accessDelay);
     cmd.AddValue("delayMode",
                  "Packet propagation-delay model: constant or geometry",
@@ -684,6 +738,15 @@ main(int argc, char* argv[])
         choPrepMs < 0.0 || choExecMs < 0.0 || beamUpdateIntervalMs <= 0.0)
     {
         NS_FATAL_ERROR("Invalid handover timer or candidate configuration");
+    }
+    if (beamScheduler != "alpha-fair" && beamScheduler != "pf" && beamScheduler != "equal")
+    {
+        NS_FATAL_ERROR("beamScheduler must be alpha-fair, pf, or equal");
+    }
+    if (beamCapacityUpdateIntervalMs <= 0.0 || beamActiveUserTimeoutMs < 0.0 ||
+        alphaFairness < 0.0 || queuePressureWeight < 0.0)
+    {
+        NS_FATAL_ERROR("Invalid beam capacity scheduler timing configuration");
     }
     if (uniqueOutputPrefix)
     {
@@ -1206,6 +1269,78 @@ main(int argc, char* argv[])
     }
     timer.Log("beam manager installation");
 
+    Ptr<LeoSimBeamCapacityManager> beamCapacityManager;
+    if (enableSharedBeamCapacity)
+    {
+        timer.Begin("beam capacity manager setup");
+        beamCapacityManager = CreateObject<LeoSimBeamCapacityManager>();
+        beamCapacityManager->SetBeamManager(beamManager);
+        beamCapacityManager->SetUplinkBeamCapacity(DataRate(beamUplinkCapacity));
+        beamCapacityManager->SetDownlinkBeamCapacity(DataRate(beamDownlinkCapacity));
+        beamCapacityManager->SetSatelliteUplinkCapacity(DataRate(satelliteUplinkCapacity));
+        beamCapacityManager->SetSatelliteDownlinkCapacity(DataRate(satelliteDownlinkCapacity));
+        if (!beamCapacity.empty())
+        {
+            beamCapacityManager->SetBeamCapacity(DataRate(beamCapacity));
+        }
+        beamCapacityManager->SetDefaultUplinkPackageRate(DataRate(uePackageUplinkRate));
+        beamCapacityManager->SetDefaultDownlinkPackageRate(DataRate(uePackageDownlinkRate));
+        beamCapacityManager->SetScheduler(
+            beamScheduler == "equal"
+                ? LEOSIM_BEAM_SCHEDULER_EQUAL
+                : (beamScheduler == "alpha-fair" ? LEOSIM_BEAM_SCHEDULER_ALPHA_FAIR
+                                                  : LEOSIM_BEAM_SCHEDULER_PROPORTIONAL_FAIR));
+        beamCapacityManager->SetAlphaFairness(alphaFairness);
+        beamCapacityManager->SetQueueDelayWeight(queuePressureWeight);
+        beamCapacityManager->SetDemandAware(beamDemandAware);
+        beamCapacityManager->SetActiveUserTimeout(MilliSeconds(beamActiveUserTimeoutMs));
+        beamCapacityManager->SetUpdateInterval(MilliSeconds(beamCapacityUpdateIntervalMs));
+        if (!ueServiceProfileFile.empty() &&
+            !beamCapacityManager->LoadUeServiceProfiles(ueServiceProfileFile))
+        {
+            NS_FATAL_ERROR("Unable to parse UE service profile file: " << ueServiceProfileFile);
+        }
+
+        std::set<uint32_t> groundNodeIds;
+        for (uint32_t i = 0; i < allGroundNodes.GetN(); ++i)
+        {
+            groundNodeIds.insert(allGroundNodes.Get(i)->GetId());
+        }
+        for (uint32_t i = 0; i + 1 < accessDevices.GetN(); i += 2)
+        {
+            Ptr<NetDevice> firstDevice = accessDevices.Get(i);
+            Ptr<NetDevice> secondDevice = accessDevices.Get(i + 1);
+            Ptr<Node> firstNode = firstDevice->GetNode();
+            Ptr<Node> secondNode = secondDevice->GetNode();
+            if (!firstNode || !secondNode)
+            {
+                continue;
+            }
+            if (groundNodeIds.count(firstNode->GetId()) != 0)
+            {
+                beamCapacityManager->RegisterAccessLink(firstNode,
+                                                        secondNode,
+                                                        firstDevice,
+                                                        secondDevice);
+            }
+            else if (groundNodeIds.count(secondNode->GetId()) != 0)
+            {
+                beamCapacityManager->RegisterAccessLink(secondNode,
+                                                        firstNode,
+                                                        secondDevice,
+                                                        firstDevice);
+            }
+        }
+        if (enableBeamCapacityLogging)
+        {
+            const std::string beamCapacityFile = outputPrefix + "-beam-capacity.csv";
+            beamCapacityManager->EnableCsvOutput(beamCapacityFile);
+            std::cout << "Beam capacity data: " << beamCapacityFile << std::endl;
+        }
+        beamCapacityManager->Start();
+        timer.Log("beam capacity manager setup");
+    }
+
     timer.Begin("routing setup");
     // With few application endpoints and thousands of satellite transit nodes,
     // a reverse tree per destination avoids running Dijkstra independently for
@@ -1477,6 +1612,10 @@ main(int argc, char* argv[])
                   << " --position_file " << positionFile << " --links " << linkFile
                   << " --packets " << packetFile
                   << " --output " << outputPrefix << "-visualization.html" << std::endl;
+    }
+    if (beamCapacityManager)
+    {
+        beamCapacityManager->Stop();
     }
     timer.Log("result post-processing");
 

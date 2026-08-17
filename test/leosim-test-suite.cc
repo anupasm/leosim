@@ -3511,9 +3511,228 @@ class LeoSimTestSuite : public TestSuite
     LeoSimTestSuite();
 };
 
+class LeoSimTestSharedBeamCapacity : public TestCase
+{
+  public:
+    LeoSimTestSharedBeamCapacity()
+        : TestCase("ground nodes in one beam share a finite beam capacity")
+    {
+    }
+
+  private:
+    static uint64_t GetRate(Ptr<NetDevice> device)
+    {
+        DataRateValue value;
+        device->GetAttribute("DataRate", value);
+        return value.Get().GetBitRate();
+    }
+
+    void DoRun() override
+    {
+        Ptr<Node> satellite = CreateObject<Node>();
+        std::vector<Ptr<Node>> groundNodes;
+        std::vector<NetDeviceContainer> links;
+        PointToPointHelper p2p;
+        p2p.SetDeviceAttribute("DataRate", StringValue("100Mbps"));
+        for (uint32_t i = 0; i < 4; ++i)
+        {
+            Ptr<Node> ground = CreateObject<Node>();
+            groundNodes.push_back(ground);
+            links.push_back(p2p.Install(ground, satellite));
+        }
+
+        Ptr<LeoSimBeamCapacityManager> manager = CreateObject<LeoSimBeamCapacityManager>();
+        manager->SetBeamCapacity(DataRate("20Mbps"));
+        for (uint32_t i = 0; i < links.size(); ++i)
+        {
+            NS_TEST_ASSERT_MSG_EQ(manager->RegisterAccessLink(groundNodes[i],
+                                                              satellite,
+                                                              links[i].Get(0),
+                                                              links[i].Get(1)),
+                                  true,
+                                  "Valid point-to-point access link was rejected");
+        }
+
+        std::vector<LeoSimBeamCapacityAssociation> sameBeam;
+        for (const auto& ground : groundNodes)
+        {
+            sameBeam.push_back({ground->GetId(), satellite->GetId(), 7});
+        }
+        manager->ApplyAssociations(sameBeam);
+
+        uint64_t totalUplink = 0;
+        uint64_t totalDownlink = 0;
+        for (const auto& link : links)
+        {
+            totalUplink += GetRate(link.Get(0));
+            totalDownlink += GetRate(link.Get(1));
+            NS_TEST_ASSERT_MSG_EQ(GetRate(link.Get(0)), 5000000, "Uplink share is not 5 Mbps");
+            NS_TEST_ASSERT_MSG_EQ(GetRate(link.Get(1)), 5000000, "Downlink share is not 5 Mbps");
+        }
+        NS_TEST_ASSERT_MSG_EQ(totalUplink, 20000000, "Uplink allocations exceed beam capacity");
+        NS_TEST_ASSERT_MSG_EQ(totalDownlink,
+                              20000000,
+                              "Downlink allocations exceed beam capacity");
+
+        manager->ApplyAssociations({sameBeam[0], sameBeam[1]});
+        NS_TEST_ASSERT_MSG_EQ(GetRate(links[0].Get(0)), 10000000, "Two users should get 10 Mbps");
+        NS_TEST_ASSERT_MSG_EQ(GetRate(links[1].Get(1)), 10000000, "Two users should get 10 Mbps");
+        NS_TEST_ASSERT_MSG_EQ(GetRate(links[2].Get(0)),
+                              100000000,
+                              "Departed user's baseline rate was not restored");
+
+        manager->ApplyAssociations({{groundNodes[0]->GetId(), satellite->GetId(), 7},
+                                    {groundNodes[1]->GetId(), satellite->GetId(), 8}});
+        NS_TEST_ASSERT_MSG_EQ(GetRate(links[0].Get(0)),
+                              20000000,
+                              "A user alone in beam 7 should get full capacity");
+        NS_TEST_ASSERT_MSG_EQ(GetRate(links[1].Get(0)),
+                              20000000,
+                              "A user alone in beam 8 should get full capacity");
+        Simulator::Destroy();
+    }
+};
+
+class LeoSimTestDemandAwareProportionalFairBeam : public TestCase
+{
+  public:
+    LeoSimTestDemandAwareProportionalFairBeam()
+        : TestCase("demand-aware PF beam scheduling respects package and directional caps")
+    {
+    }
+
+  private:
+    void DoRun() override
+    {
+        Ptr<Node> satellite = CreateObject<Node>();
+        std::vector<Ptr<Node>> grounds;
+        std::vector<NetDeviceContainer> links;
+        PointToPointHelper p2p;
+        p2p.SetDeviceAttribute("DataRate", StringValue("2Gbps"));
+
+        Ptr<LeoSimBeamCapacityManager> manager = CreateObject<LeoSimBeamCapacityManager>();
+        manager->SetUplinkBeamCapacity(DataRate("30Mbps"));
+        manager->SetDownlinkBeamCapacity(DataRate("120Mbps"));
+        manager->SetDefaultUplinkPackageRate(DataRate("20Mbps"));
+        manager->SetDefaultDownlinkPackageRate(DataRate("100Mbps"));
+        manager->SetScheduler(LEOSIM_BEAM_SCHEDULER_PROPORTIONAL_FAIR);
+
+        for (uint32_t i = 0; i < 3; ++i)
+        {
+            Ptr<Node> ground = CreateObject<Node>();
+            grounds.push_back(ground);
+            links.push_back(p2p.Install(ground, satellite));
+            manager->RegisterAccessLink(ground, satellite, links.back().Get(0), links.back().Get(1));
+        }
+
+        manager->ApplyAssociations({{grounds[0]->GetId(), satellite->GetId(), 3, 20.0, true, true},
+                                    {grounds[1]->GetId(), satellite->GetId(), 3, 5.0, true, true},
+                                    {grounds[2]->GetId(), satellite->GetId(), 3, 20.0, false, false}});
+
+        uint64_t uplinkTotal = 0;
+        uint64_t downlinkTotal = 0;
+        const auto& allocations = manager->GetAllocations();
+        NS_TEST_ASSERT_MSG_EQ(allocations.size(), 3, "Every association needs telemetry");
+        for (const auto& allocation : allocations)
+        {
+            uplinkTotal += allocation.uplinkBps;
+            downlinkTotal += allocation.downlinkBps;
+            NS_TEST_ASSERT_MSG_EQ(allocation.uplinkBps <= 20000000,
+                                  true,
+                                  "Uplink package cap was exceeded");
+            NS_TEST_ASSERT_MSG_EQ(allocation.downlinkBps <= 100000000,
+                                  true,
+                                  "Downlink package cap was exceeded");
+            NS_TEST_ASSERT_MSG_EQ(allocation.activeUplinkNodes,
+                                  2,
+                                  "Idle UE incorrectly counted as active");
+        }
+        NS_TEST_ASSERT_MSG_EQ(uplinkTotal <= 30000000, true, "Uplink beam budget was exceeded");
+        NS_TEST_ASSERT_MSG_EQ(downlinkTotal <= 120000000,
+                              true,
+                              "Downlink beam budget was exceeded");
+        NS_TEST_ASSERT_MSG_EQ(allocations[2].uplinkBps, 0, "Idle UE received uplink allocation");
+        NS_TEST_ASSERT_MSG_EQ(allocations[2].downlinkBps, 0, "Idle UE received downlink allocation");
+        NS_TEST_ASSERT_MSG_GT(allocations[0].downlinkBps,
+                              allocations[1].downlinkBps,
+                              "PF scheduler did not use the SINR opportunity metric");
+        Simulator::Destroy();
+    }
+};
+
+class LeoSimTestHierarchicalAlphaFairCapacity : public TestCase
+{
+  public:
+    LeoSimTestHierarchicalAlphaFairCapacity()
+        : TestCase("alpha-fair scheduling enforces UE, beam, and satellite constraints")
+    {
+    }
+
+  private:
+    void DoRun() override
+    {
+        Ptr<Node> satellite = CreateObject<Node>();
+        std::vector<Ptr<Node>> grounds;
+        std::vector<NetDeviceContainer> links;
+        PointToPointHelper p2p;
+        p2p.SetDeviceAttribute("DataRate", StringValue("1Gbps"));
+
+        Ptr<LeoSimBeamCapacityManager> manager = CreateObject<LeoSimBeamCapacityManager>();
+        manager->SetDownlinkBeamCapacity(DataRate("100Mbps"));
+        manager->SetUplinkBeamCapacity(DataRate("100Mbps"));
+        manager->SetSatelliteDownlinkCapacity(DataRate("100Mbps"));
+        manager->SetSatelliteUplinkCapacity(DataRate("100Mbps"));
+        manager->SetScheduler(LEOSIM_BEAM_SCHEDULER_ALPHA_FAIR);
+        manager->SetAlphaFairness(1.0);
+
+        for (uint32_t i = 0; i < 4; ++i)
+        {
+            Ptr<Node> ground = CreateObject<Node>();
+            grounds.push_back(ground);
+            LeoSimUeServiceProfile profile;
+            profile.downlinkPeak = DataRate("100Mbps");
+            profile.uplinkPeak = DataRate("100Mbps");
+            profile.downlinkMinimum = DataRate("40Mbps");
+            profile.uplinkMinimum = DataRate("40Mbps");
+            profile.weight = 1.0;
+            manager->SetUeServiceProfile(ground->GetId(), profile);
+            links.push_back(p2p.Install(ground, satellite));
+            manager->RegisterAccessLink(ground, satellite, links.back().Get(0), links.back().Get(1));
+        }
+
+        manager->ApplyAssociations({{grounds[0]->GetId(), satellite->GetId(), 1},
+                                    {grounds[1]->GetId(), satellite->GetId(), 1},
+                                    {grounds[2]->GetId(), satellite->GetId(), 2},
+                                    {grounds[3]->GetId(), satellite->GetId(), 2}});
+
+        uint64_t satelliteDownlink = 0;
+        std::map<uint32_t, uint64_t> beamDownlink;
+        for (const auto& allocation : manager->GetAllocations())
+        {
+            satelliteDownlink += allocation.downlinkBps;
+            beamDownlink[allocation.beamId] += allocation.downlinkBps;
+            NS_TEST_ASSERT_MSG_EQ(allocation.downlinkBps <= allocation.downlinkPackageCapBps,
+                                  true,
+                                  "UE package ceiling was exceeded");
+            NS_TEST_ASSERT_MSG_EQ(allocation.downlinkLimitReason,
+                                  "minimum-rate-shortfall",
+                                  "Infeasible minimum rate was not reported");
+        }
+        NS_TEST_ASSERT_MSG_EQ(satelliteDownlink,
+                              100000000,
+                              "Satellite capacity was not fully conserved");
+        NS_TEST_ASSERT_MSG_EQ(beamDownlink[1], 50000000, "Beam 1 satellite share is incorrect");
+        NS_TEST_ASSERT_MSG_EQ(beamDownlink[2], 50000000, "Beam 2 satellite share is incorrect");
+        Simulator::Destroy();
+    }
+};
+
 LeoSimTestSuite::LeoSimTestSuite()
     : TestSuite("leosim", Type::UNIT)
 {
+    AddTestCase(new LeoSimTestSharedBeamCapacity, TestCase::Duration::QUICK);
+    AddTestCase(new LeoSimTestDemandAwareProportionalFairBeam, TestCase::Duration::QUICK);
+    AddTestCase(new LeoSimTestHierarchicalAlphaFairCapacity, TestCase::Duration::QUICK);
     class DeterministicIslLoadTest : public TestCase
     {
       public:
