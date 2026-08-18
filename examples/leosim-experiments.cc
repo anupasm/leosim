@@ -445,6 +445,103 @@ InstallAllTcpFlows(NodeContainer ueNodes,
 }
 
 ApplicationContainer
+InstallSingleUdpFlow(NodeContainer sourceNodes,
+                     NodeContainer destinationNodes,
+                     uint32_t sourceIndex,
+                     uint32_t destinationIndex,
+                     uint16_t port,
+                     double startTime,
+                     double stopTime,
+                     const std::string& udpRate,
+                     uint32_t packetSize)
+{
+    if (sourceIndex >= sourceNodes.GetN())
+    {
+        NS_FATAL_ERROR("sourceIndex " << sourceIndex << " is out of range; loaded "
+                                      << sourceNodes.GetN() << " source nodes");
+    }
+    if (destinationIndex >= destinationNodes.GetN())
+    {
+        NS_FATAL_ERROR("destinationIndex " << destinationIndex << " is out of range; loaded "
+                                           << destinationNodes.GetN() << " destination nodes");
+    }
+    if (stopTime <= startTime)
+    {
+        NS_FATAL_ERROR("appStop must be greater than appStart");
+    }
+
+    Ptr<Node> sourceNode = sourceNodes.Get(sourceIndex);
+    Ptr<Node> destinationNode = destinationNodes.Get(destinationIndex);
+    Ipv4Address destinationAddress = GetFirstNonLoopbackAddress(destinationNode);
+    if (destinationAddress == Ipv4Address::GetAny())
+    {
+        NS_FATAL_ERROR("destination node " << destinationIndex
+                                           << " has no non-loopback IPv4 address");
+    }
+
+    // UDP sink on the receiving node.
+    PacketSinkHelper sinkHelper("ns3::UdpSocketFactory",
+                                InetSocketAddress(Ipv4Address::GetAny(), port));
+    ApplicationContainer apps = sinkHelper.Install(destinationNode);
+    apps.Start(Seconds(startTime > 0.1 ? startTime - 0.1 : 0.0));
+    apps.Stop(Seconds(stopTime));
+
+    // Continuous CBR UDP source (OnOff with constant on-time). Datagrams sent
+    // while a handover has no route are dropped silently by the socket, so the
+    // flow naturally exposes handover-induced loss without TCP-style retries.
+    OnOffHelper source("ns3::UdpSocketFactory", InetSocketAddress(destinationAddress, port));
+    source.SetConstantRate(DataRate(udpRate), packetSize);
+    ApplicationContainer sourceApps = source.Install(sourceNode);
+    sourceApps.Start(Seconds(startTime));
+    sourceApps.Stop(Seconds(stopTime));
+    apps.Add(sourceApps);
+
+    std::cout << "UDP flow node " << sourceNode->GetId() << " -> node "
+              << destinationNode->GetId() << " (" << destinationAddress << ':' << port
+              << "), rate=" << udpRate << ", packetSize=" << packetSize << ", start="
+              << startTime << "s, stop=" << stopTime << "s" << std::endl;
+    return apps;
+}
+
+ApplicationContainer
+InstallBidirectionalUdpFlows(NodeContainer ueNodes,
+                             NodeContainer serverNodes,
+                             uint32_t ueId,
+                             uint32_t serverId,
+                             uint16_t basePort,
+                             double startTime,
+                             double stopTime,
+                             const std::string& udpRate,
+                             uint32_t packetSize)
+{
+    ApplicationContainer apps;
+    // Uplink: UE -> server.
+    apps.Add(InstallSingleUdpFlow(ueNodes,
+                                  serverNodes,
+                                  ueId,
+                                  serverId,
+                                  basePort,
+                                  startTime,
+                                  stopTime,
+                                  udpRate,
+                                  packetSize));
+    // Downlink: server -> UE.
+    apps.Add(InstallSingleUdpFlow(serverNodes,
+                                  ueNodes,
+                                  serverId,
+                                  ueId,
+                                  static_cast<uint16_t>(basePort + 1),
+                                  startTime,
+                                  stopTime,
+                                  udpRate,
+                                  packetSize));
+    std::cout << "Installed bidirectional UDP flows UE-" << ueId << " <-> Server-" << serverId
+              << " (ports " << basePort << "/" << (basePort + 1) << ", " << udpRate << ", "
+              << packetSize << " B, " << startTime << "s.." << stopTime << "s)" << std::endl;
+    return apps;
+}
+
+ApplicationContainer
 InstallBoundedUePings(NodeContainer ueNodes,
                       const std::vector<std::pair<uint32_t, uint32_t>>& pairs,
                       const std::vector<double>& ueActivationTimes,
@@ -493,113 +590,6 @@ InstallBoundedUePings(NodeContainer ueNodes,
               << " bytes, staggerWindow=" << staggerWindow << "s)" << std::endl;
     return apps;
 }
-
-class PreHandoverPingController
-{
-  public:
-    PreHandoverPingController(Ptr<Node> source,
-                              Ptr<Node> target,
-                              uint32_t packetSize,
-                              uint32_t count,
-                              Time interval,
-                              const std::string& outputFile)
-        : m_source(source),
-          m_target(target),
-          m_packetSize(packetSize),
-          m_count(count),
-          m_interval(interval),
-          m_output(outputFile, std::ios::out | std::ios::trunc)
-    {
-        if (!m_output.is_open())
-        {
-            NS_FATAL_ERROR("Cannot open pre-handover ping output " << outputFile);
-        }
-        m_output << "burst_id,trigger_time_s,report_time_s,ground_node_id,target_ue_node_id,"
-                    "source_satellite_id,target_satellite_id,source_beam_id,target_beam_id,"
-                    "handover_mode,handover_type,handover_trigger,packet_size_bytes,requested_count,"
-                    "tx_packets,rx_packets,loss_percent,rtt_min_ms,rtt_avg_ms,rtt_max_ms,rtt_mdev_ms\n";
-        m_output.flush();
-    }
-
-    void OnHandoverStart(LeoSimHandoverEvent event)
-    {
-        if (event.ueNodeId != m_source->GetId())
-        {
-            return;
-        }
-        const Ipv4Address destination = GetFirstNonLoopbackAddress(m_target);
-        if (destination == Ipv4Address::GetAny())
-        {
-            std::cerr << "Skipping pre-handover ping: target UE has no IPv4 address"
-                      << std::endl;
-            return;
-        }
-
-        const uint32_t burstId = ++m_nextBurstId;
-        m_events.emplace(burstId, event);
-        PingHelper ping(destination);
-        ping.SetAttribute("Interval", TimeValue(m_interval));
-        ping.SetAttribute("Size", UintegerValue(m_packetSize));
-        ping.SetAttribute("Count", UintegerValue(m_count));
-        ping.SetAttribute("VerboseMode", EnumValue(Ping::SILENT));
-        ApplicationContainer apps = ping.Install(m_source);
-        Ptr<Ping> application = DynamicCast<Ping>(apps.Get(0));
-        application->TraceConnectWithoutContext(
-            "Report",
-            MakeBoundCallback(&PreHandoverPingController::ReportThunk, this, burstId));
-        // Application::DoInitialize schedules this value as a delay from the
-        // current time, so zero starts at this handover callback's timestamp.
-        apps.Start(Seconds(0));
-        // The node was initialized at time zero. Applications attached from a
-        // runtime handover callback must therefore be initialized explicitly.
-        application->Initialize();
-        m_apps.Add(apps);
-        std::cout << "[pre-handover-ping] burst=" << burstId << " t="
-                  << Simulator::Now().GetSeconds() << "s alpha_gs(node " << m_source->GetId()
-                  << ") -> UE(node " << m_target->GetId() << "), size=" << m_packetSize
-                  << " bytes count=" << m_count << std::endl;
-    }
-
-  private:
-    static void ReportThunk(PreHandoverPingController* controller,
-                            uint32_t burstId,
-                            const Ping::PingReport& report)
-    {
-        controller->RecordReport(burstId, report);
-    }
-
-    void RecordReport(uint32_t burstId, const Ping::PingReport& report)
-    {
-        auto it = m_events.find(burstId);
-        if (it == m_events.end())
-        {
-            return;
-        }
-        const LeoSimHandoverEvent& event = it->second;
-        m_output << burstId << ',' << std::fixed << std::setprecision(9)
-                 << event.initiatedAt.GetSeconds() << ',' << Simulator::Now().GetSeconds() << ','
-                 << event.ueNodeId << ',' << m_target->GetId() << ',' << event.sourceSatId << ','
-                 << event.targetSatId << ',' << event.sourceBeamId << ',' << event.targetBeamId
-                 << ',' << static_cast<uint32_t>(event.mode) << ','
-                 << static_cast<uint32_t>(event.type) << ','
-                 << static_cast<uint32_t>(event.trigger) << ',' << m_packetSize << ',' << m_count
-                 << ',' << report.m_transmitted << ',' << report.m_received << ',' << report.m_loss
-                 << ',' << report.m_rttMin << ',' << report.m_rttAvg << ',' << report.m_rttMax << ','
-                 << report.m_rttMdev << '\n';
-        m_output.flush();
-        m_events.erase(it);
-    }
-
-    Ptr<Node> m_source;
-    Ptr<Node> m_target;
-    uint32_t m_packetSize;
-    uint32_t m_count;
-    Time m_interval;
-    std::ofstream m_output;
-    uint32_t m_nextBurstId{0};
-    std::map<uint32_t, LeoSimHandoverEvent> m_events;
-    ApplicationContainer m_apps;
-};
 
 void
 PrintFlowMonitorSummary(Ptr<FlowMonitor> monitor, Ptr<Ipv4FlowClassifier> classifier)
@@ -721,6 +711,8 @@ main(int argc, char* argv[])
     double appStop = 599.0;
     std::string tcpRate = "1Mbps";
     uint32_t tcpPacketSize = 1024;
+    std::string udpRate = "1Mbps";
+    uint32_t udpPacketSize = 1400;
     bool allToAllTraffic = true;
     bool enableUePing = false;
     uint32_t uePingStartIndex = 1;
@@ -728,11 +720,6 @@ main(int argc, char* argv[])
     double uePingInterval = 1.0;
     uint32_t uePingPacketSize = 56;
     double uePingStaggerWindow = 1.0;
-    bool enablePreHandoverPing = false;
-    uint32_t preHandoverPingTargetUe = 0;
-    uint32_t preHandoverPingPacketSize = 1400;
-    uint32_t preHandoverPingCount = 20;
-    double preHandoverPingIntervalMs = 10.0;
     bool enableDynamicGroundNodes = false;
     uint32_t initialUes = 0;
     double ueIntroductionStart = 30.0;
@@ -907,8 +894,8 @@ main(int argc, char* argv[])
     cmd.AddValue("serverId", "Server/GSS index used by this single scenario", serverId);
     cmd.AddValue("ueId", "UE index used by this single scenario", ueId);
     cmd.AddValue("port", "TCP destination port", port);
-    cmd.AddValue("appStart", "TCP application start time in seconds", appStart);
-    cmd.AddValue("appStop", "TCP application stop time in seconds", appStop);
+    cmd.AddValue("appStart", "Traffic application start time in seconds", appStart);
+    cmd.AddValue("appStop", "Traffic application stop time in seconds", appStop);
     cmd.AddValue("tcpRate", "TCP OnOff offered rate, e.g. 1Mbps", tcpRate);
     cmd.AddValue("tcpPacketSize", "TCP application packet size in bytes", tcpPacketSize);
     cmd.AddValue("allToAllTraffic",
@@ -928,15 +915,8 @@ main(int argc, char* argv[])
     cmd.AddValue("uePingStaggerWindow",
                  "Seconds over which UE-pair ping starts are evenly staggered",
                  uePingStaggerWindow);
-    cmd.AddValue("enablePreHandoverPing",
-                 "Start an alpha_gs ICMP burst when handover execution begins",
-                 enablePreHandoverPing);
-    cmd.AddValue("preHandoverPingTargetUe",
-                 "UE index receiving alpha_gs pre-handover ping bursts",
-                 preHandoverPingTargetUe);
-    cmd.AddValue("preHandoverPingPacketSize", "ICMP payload bytes per handover ping", preHandoverPingPacketSize);
-    cmd.AddValue("preHandoverPingCount", "Packets in each handover-triggered ping burst", preHandoverPingCount);
-    cmd.AddValue("preHandoverPingIntervalMs", "Milliseconds between packets in a handover ping burst", preHandoverPingIntervalMs);
+    cmd.AddValue("udpRate", "Per-direction UDP CBR offered rate, e.g. 1Mbps", udpRate);
+    cmd.AddValue("udpPacketSize", "UDP application packet size in bytes", udpPacketSize);
     cmd.AddValue("enableDynamicGroundNodes",
                  "Introduce UEs progressively instead of activating all at time zero",
                  enableDynamicGroundNodes);
@@ -1049,13 +1029,6 @@ main(int argc, char* argv[])
     {
         NS_FATAL_ERROR("UE ping requires positive pair count/interval, payload >=16 bytes, and "
                        "non-negative stagger window");
-    }
-    if (enablePreHandoverPing &&
-        (preHandoverPingPacketSize < 16 || preHandoverPingPacketSize > 1472 ||
-         preHandoverPingCount == 0 || preHandoverPingIntervalMs <= 0.0))
-    {
-        NS_FATAL_ERROR("Pre-handover ping requires a 16..1472 byte payload, positive count, and "
-                       "positive interval");
     }
     if (uniqueOutputPrefix)
     {
@@ -1542,11 +1515,6 @@ main(int argc, char* argv[])
     allNodes.Add(ueNodes);
 
     std::vector<std::pair<uint32_t, uint32_t>> uePingPairIndices;
-    if (enablePreHandoverPing && preHandoverPingTargetUe >= ueNodes.GetN())
-    {
-        NS_FATAL_ERROR("preHandoverPingTargetUe " << preHandoverPingTargetUe
-                                                   << " is outside the loaded UE subset");
-    }
     if (enableUePing)
     {
         if (uePingStartIndex >= ueNodes.GetN())
@@ -1612,11 +1580,6 @@ main(int argc, char* argv[])
             }
         }
     }
-    if (enablePreHandoverPing && !allToAllTraffic && preHandoverPingTargetUe != ueId)
-    {
-        routingDestinations.Add(ueNodes.Get(preHandoverPingTargetUe));
-        routingSources.Add(ueNodes.Get(preHandoverPingTargetUe));
-    }
 
     LeoSimRoutingCalculatorHelper routingHelper;
     const std::string routeLogFile = outputPrefix + "-routes.csv";
@@ -1647,10 +1610,6 @@ main(int argc, char* argv[])
         {
             routableIds.insert(ueNodes.Get(sourceIndex)->GetId());
             routableIds.insert(ueNodes.Get(destinationIndex)->GetId());
-        }
-        if (enablePreHandoverPing)
-        {
-            routableIds.insert(ueNodes.Get(preHandoverPingTargetUe)->GetId());
         }
         routingCalculator->SetRoutableGroundNodes(routableIds);
     }
@@ -1723,11 +1682,6 @@ main(int argc, char* argv[])
     Ptr<LeoSimBeamManager> beamManager =
         beamHelper.Install(allGroundNodes, satelliteNodes, Seconds(simTime));
     beamManager->SetOperatorModel(operatorModel);
-    if (enablePreHandoverPing && preHandoverPingTargetUe >= ueNodes.GetN())
-    {
-        NS_FATAL_ERROR("preHandoverPingTargetUe " << preHandoverPingTargetUe
-                                                   << " is outside the loaded UE subset");
-    }
     if (allToAllTraffic)
     {
         for (uint32_t i = 0; i < ueNodes.GetN(); ++i)
@@ -1745,10 +1699,6 @@ main(int argc, char* argv[])
         selectedServer.Add(serverNodes.Get(serverId));
         NodeContainer selectedUe;
         selectedUe.Add(ueNodes.Get(ueId));
-        if (enablePreHandoverPing && preHandoverPingTargetUe != ueId)
-        {
-            selectedUe.Add(ueNodes.Get(preHandoverPingTargetUe));
-        }
         beamManager->SetHandoverValidationPeers(ueNodes.Get(ueId)->GetId(), selectedServer);
         beamManager->SetHandoverValidationPeers(serverNodes.Get(serverId)->GetId(), selectedUe);
     }
@@ -1756,22 +1706,6 @@ main(int argc, char* argv[])
     if (enableVisualization || enableHandoverLogging)
     {
         visualizationHelper.SetBeamManager(beamManager);
-    }
-    std::unique_ptr<PreHandoverPingController> preHandoverPingController;
-    if (enablePreHandoverPing)
-    {
-        const std::string pingFile = outputPrefix + "-pre-handover-ping.csv";
-        preHandoverPingController = std::make_unique<PreHandoverPingController>(
-            serverNodes.Get(serverId),
-            ueNodes.Get(preHandoverPingTargetUe),
-            preHandoverPingPacketSize,
-            preHandoverPingCount,
-            MilliSeconds(preHandoverPingIntervalMs),
-            pingFile);
-        beamManager->SetHandoverStartCallback(
-            MakeCallback(&PreHandoverPingController::OnHandoverStart,
-                         preHandoverPingController.get()));
-        std::cout << "Pre-handover ping data: " << pingFile << std::endl;
     }
     timer.Log("beam manager installation");
 
@@ -2005,16 +1939,15 @@ main(int argc, char* argv[])
                            << selectedUeStart << "s, which is not before appStop=" << appStop
                            << "s");
         }
-        trafficApps = InstallSingleTcpFlow(ueNodes,
-                                           serverNodes,
-                                           beamManager,
-                                           ueId,
-                                           serverId,
-                                           port,
-                                           selectedUeStart,
-                                           appStop,
-                                           tcpRate,
-                                           tcpPacketSize);
+        trafficApps = InstallBidirectionalUdpFlows(ueNodes,
+                                                   serverNodes,
+                                                   ueId,
+                                                   serverId,
+                                                   port,
+                                                   selectedUeStart,
+                                                   appStop,
+                                                   udpRate,
+                                                   udpPacketSize);
     }
     ApplicationContainer uePingApps;
     if (enableUePing)

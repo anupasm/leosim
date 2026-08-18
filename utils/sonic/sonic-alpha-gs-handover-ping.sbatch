@@ -7,10 +7,11 @@
 #SBATCH --output=/scratch/adesilva/logs/leosim-alpha-gs-%A.out
 #SBATCH --error=/scratch/adesilva/logs/leosim-alpha-gs-%A.err
 
-# Single-task LeoSim run for the alpha-GS handover-ping scenario: 500
-# satellites, 1 ground station server, 5000 UEs, a single GS->UE TCP flow,
-# and an ICMP pre-handover ping burst (20 x 1400 B @ 10 ms) fired on every
-# alpha-GS handover.  SIM_TIME defaults to 1800 s.  The scenario is faithful
+# Single-task LeoSim run for the alpha-GS UDP scenario: 500
+# satellites, 1 ground station server, 5000 UEs, and continuous bidirectional
+# CBR UDP flows (UE-0 <-> Server-0) replacing the old GS->UE ICMP ping bursts
+# and the single TCP flow.  SIM_TIME defaults to 1800 s.  The scenario is
+# faithful
 # to the 200 s local pilot (leosim-alpha-gs-handover-ping-*) except for the
 # longer duration.  The ns-3 core loop is single-threaded; the CPUs allocated
 # here are used by the parallel pre-simulation stages (TLE preprocessing and
@@ -34,19 +35,26 @@ fi
 SIM_TIME="${LEOSIM_SIM_TIME:-1800}"
 SATELLITE_COUNT="${LEOSIM_SATELLITES:-500}"
 NUM_SERVERS="${LEOSIM_NUM_SERVERS:-1}"
-NUM_UES="${LEOSIM_NUM_UES:-5000}"
+NUM_UES="${LEOSIM_NUM_UES:-3000}"
+# Maximum candidate satellite access links per ground node per trajectory epoch.
+# 8 captures every simultaneously-visible satellite for the 500-sat coverage
+# selection; 4 keeps 2x handover redundancy at half the access-device/IP cost.
+MAX_ACCESS_SATS="${LEOSIM_MAX_ACCESS_SATS:-4}"
 SERVER_ID="${LEOSIM_SERVER_ID:-0}"
 UE_ID="${LEOSIM_UE_ID:-0}"
 UPDATE_INTERVAL="${LEOSIM_ROUTING_UPDATE_INTERVAL:-30}"
 BEAM_UPDATE_INTERVAL_MS="${LEOSIM_BEAM_UPDATE_INTERVAL_MS:-1000}"
 RNG_SEED="${LEOSIM_RNG_SEED:-20260803}"
 RNG_RUN="${LEOSIM_RNG_RUN:-1}"
-TCP_RATE="${LEOSIM_TCP_RATE:-1Mbps}"
-TCP_PACKET_SIZE="${LEOSIM_TCP_PACKET_SIZE:-1024}"
-PING_TARGET_UE="${LEOSIM_PING_TARGET_UE:-0}"
-PING_PACKET_SIZE="${LEOSIM_PING_PACKET_SIZE:-1400}"
-PING_COUNT="${LEOSIM_PING_COUNT:-20}"
-PING_INTERVAL_MS="${LEOSIM_PING_INTERVAL_MS:-10}"
+UDP_RATE="${LEOSIM_UDP_RATE:-1Mbps}"
+UDP_PACKET_SIZE="${LEOSIM_UDP_PACKET_SIZE:-1400}"
+# UE-to-UE ICMP pings between disjoint UE pairs (1 skips the UE-0 endpoint used
+# by the GS<->UE UDP flows).
+UE_PING_ENABLE="${LEOSIM_UE_PING_ENABLE:-1}"
+UE_PING_PAIRS="${LEOSIM_UE_PING_PAIRS:-100}"
+UE_PING_INTERVAL="${LEOSIM_UE_PING_INTERVAL:-1}"
+UE_PING_PACKET_SIZE="${LEOSIM_UE_PING_PACKET_SIZE:-56}"
+UE_PING_STAGGER="${LEOSIM_UE_PING_STAGGER_WINDOW:-1}"
 
 # Preprocessing / coverage selection
 allocated_cpus="${SLURM_CPUS_PER_TASK:-8}"
@@ -58,6 +66,19 @@ SOUTH_INDIA_LON="${LEOSIM_SOUTH_INDIA_LON:-80.2707}"
 # 0 = use every satellite that covers the UE area or the South-India location;
 # otherwise cap the selection file to the first N IDs (sorted numerically).
 SELECTION_COUNT="${LEOSIM_SELECTION_COUNT:-0}"
+
+# --- Diagnostics -------------------------------------------------------------
+# Timestamped stage marker so the slurm log shows exactly which step the job is
+# on. A watchdog runs alongside the simulation and periodically logs elapsed
+# wall time, the number of live leosim processes, the stdout.log line count, and
+# the most recent experiment [timing] line - so a stall is attributable to the
+# exact step (preprocess / coverage / route-tree / Simulator::Run).
+job_start=$(date +%s)
+WATCHDOG_INTERVAL="${LEOSIM_WATCHDOG_INTERVAL:-60}"
+stage() {
+    echo "[alpha-gs][$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"
+}
+trap 'echo "[alpha-gs][$(date -u +%Y-%m-%dT%H:%M:%SZ)] script exit status=$?"' EXIT
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ns3_dir="${LEOSIM_NS3_ROOT:-}"
@@ -92,6 +113,19 @@ repo_root="${LEOSIM_REPO_ROOT:-${ns3_dir}}"
 if [[ -z "${repo_root}" || "${repo_root}" == "/" || "${repo_root}" == "/ns3" ]]; then
     repo_root="$(pwd)"
 fi
+
+# Locate the LeoSim module root (the directory holding utils/, model/, helper/).
+# Two layouts are supported:
+#   A) ns-3 checkout:   <repo_root>/contrib/leosim   (e.g. ~/LeoSim/ns3 locally)
+#   B) standalone:      <repo_root>                  (e.g. ~/leosim on the server)
+leo_module_root="${repo_root}/contrib/leosim"
+if [[ ! -d "${leo_module_root}/utils" ]]; then
+    if [[ -d "${repo_root}/utils" && -d "${repo_root}/model" && -d "${repo_root}/helper" ]]; then
+        leo_module_root="${repo_root}"
+    else
+        leo_module_root="$(cd "${script_dir}/../.." 2>/dev/null && pwd)" || leo_module_root="${repo_root}"
+    fi
+fi
 CONTAINER_ROOT="/opt/leosim"
 CONTAINER_NS3_ROOT="${CONTAINER_ROOT}/ns3"
 if [[ -z "${SIF:-}" ]]; then
@@ -110,18 +144,19 @@ case "${base_results_root}" in
     *) echo "LEOSIM_RESULTS_ROOT must be under /scratch/adesilva: ${base_results_root}" >&2; exit 2 ;;
 esac
 results_root="${base_results_root}/${SLURM_JOB_ID}"
-run_id="alpha-gs-handover-ping_sats-${SATELLITE_COUNT}_ues-${NUM_UES}_gss-${NUM_SERVERS}_duration-${SIM_TIME}s"
+run_id="alpha-gs-udp_sats-${SATELLITE_COUNT}_ues-${NUM_UES}_gss-${NUM_SERVERS}_duration-${SIM_TIME}s"
 run_dir="${results_root}/${run_id}"
 output_stem="result-job${SLURM_JOB_ID}-restart${SLURM_RESTART_COUNT:-0}-pid$$"
 output_prefix="${run_dir}/${output_stem}"
 route_tree_dir="/scratch/adesilva/tmp/leosim-route-trees-${SLURM_JOB_ID}"
 mkdir -p "${run_dir}" "${route_tree_dir}"
+stage "job preparing: run_dir=${run_dir}, cpus=${allocated_cpus}"
 
 # Data directory: prefer the data-b dataset used by the local pilot.
-if [[ -d "${repo_root}/contrib/leosim/data-b" ]]; then
-    data_dir="${repo_root}/contrib/leosim/data-b"
-elif [[ -d "${repo_root}/contrib/leosim/data" ]]; then
-    data_dir="${repo_root}/contrib/leosim/data"
+if [[ -d "${leo_module_root}/data-b" ]]; then
+    data_dir="${leo_module_root}/data-b"
+elif [[ -d "${leo_module_root}/data" ]]; then
+    data_dir="${leo_module_root}/data"
 else
     data_dir="${PWD}/data"
 fi
@@ -132,10 +167,10 @@ fi
 # image provides /opt/venv/bin/python.
 if [[ -n "${LEOSIM_PYTHON:-}" ]]; then
     python_cmd=("${LEOSIM_PYTHON}")
-    python_scripts_dir="${repo_root}/contrib/leosim/utils"
+    python_scripts_dir="${leo_module_root}/utils"
 elif [[ -x "${ns3_dir}/ns3" ]]; then
     python_cmd=()
-    for candidate in "${repo_root}/.venv/bin/python" /opt/venv/bin/python python3; do
+    for candidate in "${leo_module_root}/.venv/bin/python" "${repo_root}/../.venv/bin/python" /opt/venv/bin/python python3; do
         if command -v "${candidate}" >/dev/null 2>&1 || [[ -x "${candidate}" ]]; then
             if "${candidate}" -c 'import numpy, skyfield' >/dev/null 2>&1; then
                 python_cmd=("${candidate}")
@@ -148,7 +183,7 @@ elif [[ -x "${ns3_dir}/ns3" ]]; then
         echo "Set LEOSIM_PYTHON to a suitable interpreter or use the Apptainer image." >&2
         exit 2
     fi
-    python_scripts_dir="${repo_root}/contrib/leosim/utils"
+    python_scripts_dir="${leo_module_root}/utils"
 else
     if ! command -v apptainer >/dev/null 2>&1; then
         echo "Apptainer is unavailable; no containerized runtime for preprocessing." >&2
@@ -166,23 +201,28 @@ else
     # Python utilities come from the bound host repo, NOT the image, so the SIF
     # only needs the compiled leosim-experiments binary and /opt/venv. This
     # avoids stale in-image copies (e.g. missing find_satellites_covering_ue_area.py).
-    python_scripts_dir="${repo_root}/contrib/leosim/utils"
+    python_scripts_dir="${leo_module_root}/utils"
 fi
 
-if [[ ! -f "${python_scripts_dir}/find_satellites_covering_ue_area.py" || \
-      ! -f "${python_scripts_dir}/tle_to_positions.py" ]]; then
-    echo "Missing LeoSim Python utilities in ${python_scripts_dir}" >&2
+missing=()
+for needed in find_satellites_covering_ue_area.py tle_to_positions.py; do
+    if [[ ! -f "${python_scripts_dir}/${needed}" ]]; then
+        missing+=("${needed}")
+    fi
+done
+if [[ ${#missing[@]} -gt 0 ]]; then
+    echo "Missing LeoSim Python utilities in ${python_scripts_dir}: ${missing[*]}" >&2
     echo "Sync the repo (rsync) so contrib/leosim/utils is present on this host." >&2
     exit 2
 fi
 
-# Preprocessed ns-3 mobility trace, generated per job from the data-b TLEs when a
-# valid copy is not already present. The repo's data-b/prepro trace is reused
-# (copied) when it is present and long enough.
+# Preprocessed ns-3 mobility trace. Always generated from the FULL data-b TLE
+# constellation (11,514 satellites: alpha/beta/gamma), so the coverage-based
+# satellite selection and the simulation use the complete constellation rather
+# than the small 1,600-satellite sample in data-b/prepro. A trace already
+# generated in this job's _preprocessed dir is reused (restart-friendly).
 prepro_dir="${results_root}/_preprocessed"
 mkdir -p "${prepro_dir}"
-repo_trace="${data_dir}/prepro/satellite_mobility.tcl"
-repo_names="${repo_trace}.names.csv"
 satellite_trace="${prepro_dir}/satellite_mobility.tcl"
 satellite_names="${satellite_trace}.names.csv"
 
@@ -197,19 +237,6 @@ prepare_trace() {
         if [[ "${prepared_satellites}" -ge "${SATELLITE_COUNT}" && -n "${trace_duration}" &&
               $(awk 'BEGIN { print ('"${trace_duration}"' >= '"${SIM_TIME}"') ? 1 : 0 }') -eq 1 ]]; then
             echo "Reusing prepared trace: ${satellite_trace} (${prepared_satellites} sats, ${trace_duration}s)"
-            return 0
-        fi
-    fi
-    if [[ -s "${repo_trace}" && -s "${repo_names}" ]]; then
-        repo_prepared=$(awk 'END { print (NR > 0 ? NR - 1 : 0) }' "${repo_names}")
-        repo_duration=$(awk "${trace_duration_awk}" "${repo_trace}")
-        if [[ "${repo_prepared}" -ge "${SATELLITE_COUNT}" && -n "${repo_duration}" &&
-              $(awk 'BEGIN { print ('"${repo_duration}"' >= '"${SIM_TIME}"') ? 1 : 0 }') -eq 1 ]]; then
-            echo "Copying repo mobility trace into ${prepro_dir} (${repo_prepared} sats, ${repo_duration}s)"
-            cp -f "${repo_trace}" "${satellite_trace}"
-            cp -f "${repo_names}" "${satellite_names}"
-            prepared_satellites="${repo_prepared}"
-            trace_duration="${repo_duration}"
             return 0
         fi
     fi
@@ -241,6 +268,7 @@ if [[ -z "${trace_duration}" || $(awk 'BEGIN { print ('"${trace_duration}"' < '"
     echo "Prepared trace covers ${trace_duration}s but ${SIM_TIME}s are required." >&2
     exit 3
 fi
+stage "trace ready: ${prepared_satellites} sats over ${trace_duration}s -> ${satellite_trace}"
 
 # Select the satellites that cover the UE area (data-b/ues) and the South-India
 # UE location (alpha_ue_South_India), then use their union as the constellation.
@@ -281,12 +309,13 @@ if [[ "${SELECTION_COUNT}" -gt 0 && "${selection_count}" -gt "${SELECTION_COUNT}
     selection_count="${SELECTION_COUNT}"
 fi
 echo "Coverage selection: ${selection_count} satellites cover the UE area and the South-India location."
+stage "selection ready: ${selection_count} sats -> ${satellite_selection}"
 
 # Host ns-3 if available, otherwise the Apptainer image.
 if [[ -x "${ns3_dir}/ns3" ]]; then
     cd "${ns3_dir}"
     ns3_cmd=("${ns3_dir}/ns3" run --no-build)
-    route_tree_engine="${ns3_dir}/contrib/leosim/utils/rengine/leosim-rengine"
+    route_tree_engine="${leo_module_root}/utils/rengine/leosim-rengine"
     echo "Using host ns-3 at ${ns3_dir}/ns3"
 else
     if ! command -v apptainer >/dev/null 2>&1; then
@@ -309,8 +338,8 @@ else
     echo "Using containerized ns-3 from ${SIF}"
     if ! apptainer exec --cleanenv --pwd /opt/leosim/ns3 "${SIF}" \
         ./ns3 run "leosim-experiments --PrintHelp" --no-build 2>/dev/null \
-        | grep -q -- "--enablePreHandoverPing"; then
-        echo "Container leosim-experiments is missing --enablePreHandoverPing; rebuild the SIF." >&2
+        | grep -q -- "--udpRate"; then
+        echo "Container leosim-experiments is missing --udpRate; rebuild the SIF." >&2
         echo "Run utils/sonic/build_leosim_container.sh from the current repo." >&2
         exit 2
     fi
@@ -332,6 +361,7 @@ else
     fi
 fi
 
+stage "ns-3 and routing engine ready; command_line built"
 export OMP_NUM_THREADS="${allocated_cpus}"
 export NS_GLOBAL_VALUE="RngSeed=${RNG_SEED};RngRun=${RNG_RUN}"
 
@@ -347,13 +377,12 @@ command_line="leosim-experiments \
 --allToAllTraffic=0 \
 --serverId=${SERVER_ID} --ueId=${UE_ID} \
 --appStart=1 --appStop=$((SIM_TIME - 1)) \
---tcpRate=${TCP_RATE} --tcpPacketSize=${TCP_PACKET_SIZE} \
---enablePreHandoverPing=1 \
---preHandoverPingTargetUe=${PING_TARGET_UE} \
---preHandoverPingPacketSize=${PING_PACKET_SIZE} \
---preHandoverPingCount=${PING_COUNT} \
---preHandoverPingIntervalMs=${PING_INTERVAL_MS} \
---enableIsl=1 --maxIslNeighbors=4 \
+--udpRate=${UDP_RATE} --udpPacketSize=${UDP_PACKET_SIZE} \
+--enableUePing=${UE_PING_ENABLE} --uePingPairs=${UE_PING_PAIRS} \
+--uePingInterval=${UE_PING_INTERVAL} --uePingPacketSize=${UE_PING_PACKET_SIZE} \
+--uePingStaggerWindow=${UE_PING_STAGGER} \
+--enableIsl=1 --maxIslNeighbors=4 --maxAccessSatellites=${MAX_ACCESS_SATS} \
+--enableSyntheticIslLoad=0 --enableIslLoadLogging=0 \
 --enableDynamicRouting=1 --routingUpdateInterval=${UPDATE_INTERVAL} \
 --useRouteTreeCache=1 --routeTreeWorkers=${allocated_cpus} \
 --routeTreeEngine=${route_tree_engine} \
@@ -385,17 +414,18 @@ command_line="leosim-experiments \
     echo "tle_timestep=${TLE_TIMESTEP}"
     echo "num_servers=${NUM_SERVERS}"
     echo "num_ues=${NUM_UES}"
+    echo "max_access_satellites=${MAX_ACCESS_SATS}"
     echo "server_id=${SERVER_ID}"
     echo "ue_id=${UE_ID}"
     echo "all_to_all_traffic=0"
-    echo "tcp_rate=${TCP_RATE}"
+    echo "udp_rate=${UDP_RATE}"
+    echo "udp_packet_size=${UDP_PACKET_SIZE}"
+    echo "ue_ping_enabled=${UE_PING_ENABLE}"
+    echo "ue_ping_pairs=${UE_PING_PAIRS}"
+    echo "ue_ping_interval=${UE_PING_INTERVAL}"
+    echo "synthetic_isl_load=0"
     echo "routing_update_interval_s=${UPDATE_INTERVAL}"
     echo "beam_update_interval_ms=${BEAM_UPDATE_INTERVAL_MS}"
-    echo "pre_handover_ping=1"
-    echo "pre_handover_ping_target_ue=${PING_TARGET_UE}"
-    echo "pre_handover_ping_packet_size=${PING_PACKET_SIZE}"
-    echo "pre_handover_ping_count=${PING_COUNT}"
-    echo "pre_handover_ping_interval_ms=${PING_INTERVAL_MS}"
     echo "ns_global_value=${NS_GLOBAL_VALUE}"
     echo "data_dir=${data_dir}"
     echo "satellite_trace=${satellite_trace}"
@@ -410,16 +440,31 @@ command_line="leosim-experiments \
     fi
 } > "${run_dir}/metadata.txt"
 
+stage "starting leosim-experiments (simTime=${SIM_TIME}s, ues=${NUM_UES}, sats=${selection_count}, workers=${allocated_cpus})"
+run_start_epoch=$(date +%s)
 set +e
 if command -v /usr/bin/time >/dev/null 2>&1; then
     /usr/bin/time -v "${ns3_cmd[@]}" "${command_line}" \
-        > "${run_dir}/stdout.log" 2> "${run_dir}/stderr.log"
+        > "${run_dir}/stdout.log" 2> "${run_dir}/stderr.log" &
 else
     time "${ns3_cmd[@]}" "${command_line}" \
-        > "${run_dir}/stdout.log" 2> "${run_dir}/stderr.log"
+        > "${run_dir}/stdout.log" 2> "${run_dir}/stderr.log" &
 fi
+run_pid=$!
+while kill -0 "${run_pid}" 2>/dev/null; do
+    sleep "${WATCHDOG_INTERVAL}"
+    elapsed=$(( $(date +%s) - run_start_epoch ))
+    last_line=$(tail -n 1 "${run_dir}/stdout.log" 2>/dev/null || true)
+    loglines=$(wc -l < "${run_dir}/stdout.log" 2>/dev/null || echo 0)
+    nproc=$(pgrep -fc "leosim-experiments|leosim-rengine" 2>/dev/null || echo 0)
+    printf '[alpha-gs][%s] sim t+%ss pid=%s live_procs=%s loglines=%s last=[%s]\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${elapsed}" "${run_pid}" "${nproc}" "${loglines}" "${last_line}" \
+        | tee -a "${run_dir}/watchdog.log"
+done
+wait "${run_pid}"
 status=$?
 set -e
+stage "sim finished status=${status} after $(( $(date +%s) - run_start_epoch ))s"
 
 echo "${status}" > "${run_dir}/exit-status.txt"
 date -u +%Y-%m-%dT%H:%M:%SZ > "${run_dir}/finished-utc.txt"
@@ -433,7 +478,6 @@ required=(
     "${output_prefix}-statistics.csv"
     "${output_prefix}-statistics.json"
     "${output_prefix}-handovers.csv"
-    "${output_prefix}-pre-handover-ping.csv"
     "${output_prefix}-cho-candidates.csv"
     "${output_prefix}-flowmon.xml"
 )
@@ -449,16 +493,16 @@ summary_json="${output_prefix}-statistics.json"
 tx_packets=$(sed -n 's/.*"network": {"tx_packets": \([0-9][0-9]*\).*/\1/p' "${summary_json}")
 sink_count=$(sed -n 's/.*"sink_count": \([0-9][0-9]*\).*/\1/p' "${summary_json}")
 sinks_with_rx=$(sed -n 's/.*"sinks_with_rx": \([0-9][0-9]*\).*/\1/p' "${summary_json}")
-ping_bursts=$(awk -F, 'END { print (NR > 1 ? NR - 1 : 0) }' "${output_prefix}-pre-handover-ping.csv")
 if [[ -z "${tx_packets}" || -z "${sink_count}" || -z "${sinks_with_rx}" ]]; then
     echo "Could not validate statistics summary: ${summary_json}" >&2
     echo 4 > "${run_dir}/exit-status.txt"
     exit 4
 fi
-if [[ "${tx_packets}" -eq 0 || "${sinks_with_rx}" -eq 0 || "${ping_bursts}" -lt 1 ]]; then
-    echo "Invalid completed run: tx_packets=${tx_packets}, sinks_with_rx=${sinks_with_rx}, ping_bursts=${ping_bursts}." >&2
+if [[ "${tx_packets}" -eq 0 || "${sinks_with_rx}" -eq 0 ]]; then
+    echo "Invalid completed run: tx_packets=${tx_packets}, sinks_with_rx=${sinks_with_rx}." >&2
     echo 4 > "${run_dir}/exit-status.txt"
     exit 4
 fi
 
+stage "COMPLETE: ${run_id}"
 echo "Completed ${run_id}: ${run_dir}"
