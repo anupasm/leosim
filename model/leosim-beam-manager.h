@@ -39,6 +39,7 @@
 
 #include <array>
 #include <cstdint>
+#include <fstream>
 #include <map>
 #include <queue>
 #include <set>
@@ -294,6 +295,21 @@ class LeoSimBeamManager : public Object
      * \param interval Positive update interval
      */
     void SetUpdateInterval(Time interval);
+
+    /**
+     * Configure simulation times at which selected ground nodes become active.
+     * Nodes absent from the map are active from simulation start.
+     */
+    void SetGroundNodeActivationTimes(const std::map<uint32_t, Time>& activationTimes);
+
+    /** Write one summary row for each ground-node activation batch. */
+    void EnableGroundNodeLifecycleLogging(const std::string& filename);
+
+    /** Return true when a managed ground node has reached its activation time. */
+    bool IsGroundNodeActive(uint32_t groundNodeId) const;
+
+    /** Return the current number of active managed ground nodes. */
+    uint32_t GetNumActiveGroundNodes() const;
     /** @} */
 
     /**
@@ -607,6 +623,15 @@ class LeoSimBeamManager : public Object
     void SetHandoverCallback(Callback<void, LeoSimHandoverEvent> callback);
 
     /**
+     * \brief Set the callback fired when handover execution begins
+     *
+     * Unlike SetHandoverCallback(), this notification is emitted before the
+     * execution delay and therefore permits applications to inject traffic
+     * across the handover boundary.
+     */
+    void SetHandoverStartCallback(Callback<void, LeoSimHandoverEvent> callback);
+
+    /**
      * \brief Set the callback for serving beam state updates
      *
      * This callback is fired when the UE's serving beam record/state changes
@@ -816,9 +841,15 @@ class LeoSimBeamManager : public Object
     Time m_updateInterval = MilliSeconds(100);           //!< Beam manager update interval
     EventId m_updateEventId;                             //!< Scheduled update cycle event
     EventId m_beamGeometryEventId;                       //!< Scheduled beam geometry update event
+    std::map<uint32_t, Time> m_groundNodeActivationTimes; //!< Optional activation time by node ID
+    std::set<uint32_t> m_activeGroundNodes;               //!< Nodes admitted to beam management
+    std::vector<EventId> m_groundNodeActivationEvents;    //!< Pending batch activation events
+    uint32_t m_groundNodeActivationBatchId = 0;           //!< Lifecycle batch sequence
+    std::ofstream m_groundNodeLifecycleCsv;               //!< Optional lifecycle summary stream
 
     // Callbacks
     Callback<void, LeoSimHandoverEvent> m_handoverCallback; //!< HO event callback
+    Callback<void, LeoSimHandoverEvent> m_handoverStartCallback; //!< HO execution-start callback
     Callback<void, uint32_t, LeoSimBeamRecord, double> m_beamStateCallback; //!< Serving beam state callback
     Callback<void> m_accessStateChangeCallback; //!< Route refresh trigger for access changes
     Callback<void, uint32_t, uint32_t, std::vector<LeoSimTopsisCandidate>> m_choConfigCallback; //!< CHO config callback
@@ -834,6 +865,12 @@ class LeoSimBeamManager : public Object
      * \brief Main update cycle called periodically
      */
     void UpdateCycle();
+
+    /** Activate a scheduled batch and perform initial beam association. */
+    void ActivateGroundNodeBatch(std::vector<uint32_t> groundNodeIds);
+
+    /** Append an activation-batch summary when lifecycle logging is enabled. */
+    void LogGroundNodeActivationBatch(uint32_t introducedNodes);
 
     void NotifyAccessStateChanged();
     void FinishInterSatelliteHandover(uint32_t ueNodeId);

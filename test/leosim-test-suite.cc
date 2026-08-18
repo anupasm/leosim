@@ -3727,12 +3727,73 @@ class LeoSimTestHierarchicalAlphaFairCapacity : public TestCase
     }
 };
 
+class LeoSimTestPeriodicGroundNodeActivation : public TestCase
+{
+  public:
+    LeoSimTestPeriodicGroundNodeActivation()
+        : TestCase("ground nodes activate in deterministic periodic batches")
+    {
+    }
+
+  private:
+    void DoRun() override
+    {
+        NodeContainer groundNodes;
+        groundNodes.Create(5);
+        NodeContainer satellites;
+
+        std::map<uint32_t, Time> activationTimes;
+        activationTimes[groundNodes.Get(0)->GetId()] = Seconds(0.0);
+        activationTimes[groundNodes.Get(1)->GetId()] = Seconds(1.0);
+        activationTimes[groundNodes.Get(2)->GetId()] = Seconds(1.0);
+        activationTimes[groundNodes.Get(3)->GetId()] = Seconds(2.0);
+        // Node 4 is intentionally absent and must retain legacy time-zero activation.
+
+        Ptr<LeoSimBeamManager> manager = CreateObject<LeoSimBeamManager>();
+        manager->SetGroundNodeActivationTimes(activationTimes);
+        manager->Start(groundNodes, satellites, Seconds(0.0), Seconds(3.0));
+
+        NS_TEST_ASSERT_MSG_EQ(manager->GetNumActiveGroundNodes(),
+                              2,
+                              "Only the scheduled time-zero and unscheduled nodes should start");
+        NS_TEST_ASSERT_MSG_EQ(manager->IsGroundNodeActive(groundNodes.Get(1)->GetId()),
+                              false,
+                              "Future node activated before its scheduled time");
+
+        Simulator::Schedule(Seconds(1.0), [this, manager, groundNodes]() {
+            NS_TEST_ASSERT_MSG_EQ(manager->GetNumActiveGroundNodes(),
+                                  4,
+                                  "First two-node batch was not activated together");
+            NS_TEST_ASSERT_MSG_EQ(manager->IsGroundNodeActive(groundNodes.Get(1)->GetId()),
+                                  true,
+                                  "First scheduled node is still dormant");
+            NS_TEST_ASSERT_MSG_EQ(manager->IsGroundNodeActive(groundNodes.Get(3)->GetId()),
+                                  false,
+                                  "Second-batch node activated too early");
+        });
+        Simulator::Schedule(Seconds(2.0), [this, manager, groundNodes]() {
+            NS_TEST_ASSERT_MSG_EQ(manager->GetNumActiveGroundNodes(),
+                                  5,
+                                  "Second activation batch did not complete");
+            NS_TEST_ASSERT_MSG_EQ(manager->IsGroundNodeActive(groundNodes.Get(3)->GetId()),
+                                  true,
+                                  "Second-batch node is still dormant");
+        });
+
+        Simulator::Stop(Seconds(2.1));
+        Simulator::Run();
+        manager->Stop();
+        Simulator::Destroy();
+    }
+};
+
 LeoSimTestSuite::LeoSimTestSuite()
     : TestSuite("leosim", Type::UNIT)
 {
     AddTestCase(new LeoSimTestSharedBeamCapacity, TestCase::Duration::QUICK);
     AddTestCase(new LeoSimTestDemandAwareProportionalFairBeam, TestCase::Duration::QUICK);
     AddTestCase(new LeoSimTestHierarchicalAlphaFairCapacity, TestCase::Duration::QUICK);
+    AddTestCase(new LeoSimTestPeriodicGroundNodeActivation, TestCase::Duration::QUICK);
     class DeterministicIslLoadTest : public TestCase
     {
       public:

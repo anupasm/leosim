@@ -184,6 +184,13 @@ class LeoSimChannelHelper
     void SetMaxGroundLinksPerNode(uint32_t maxLinks);
 
     /**
+     * \brief Bound and sample trajectory epochs used to provision access candidates.
+     * \param horizon Only waypoints at or before this simulation time are considered.
+     * \param interval Minimum time between sampled waypoints.
+     */
+    void SetGroundAccessPlanningWindow(Time horizon, Time interval);
+
+    /**
      * \brief Set minimum elevation angle
      * \param angle Minimum elevation angle in degrees
      */
@@ -356,6 +363,8 @@ class LeoSimChannelHelper
     Time m_updateInterval;          //!< Update interval
     bool m_verbose;                 //!< Verbose logging
     uint32_t m_maxGroundLinksPerNode; //!< Maximum satellite candidates per ground node
+    Time m_groundAccessPlanningHorizon; //!< Candidate provisioning horizon
+    Time m_groundAccessSampleInterval; //!< Candidate trajectory sampling interval
 
     // ISL-specific parameters
     double m_islMaxDistance;        //!< Maximum ISL distance (meters)

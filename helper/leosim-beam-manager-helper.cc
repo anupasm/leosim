@@ -220,6 +220,19 @@ LeoSimBeamManagerHelper::SetUpdateInterval(Time interval)
 }
 
 void
+LeoSimBeamManagerHelper::SetGroundNodeActivationTimes(
+    const std::map<uint32_t, Time>& activationTimes)
+{
+    m_groundNodeActivationTimes = activationTimes;
+}
+
+void
+LeoSimBeamManagerHelper::EnableGroundNodeLifecycleLogging(const std::string& filename)
+{
+    m_groundNodeLifecycleFile = filename;
+}
+
+void
 LeoSimBeamManagerHelper::EnableLoadBalancing(bool enable)
 {
     NS_LOG_FUNCTION(this << enable);
@@ -345,6 +358,11 @@ LeoSimBeamManagerHelper::Install(NodeContainer groundNodes,
     m_manager->SetMaxCandidates(m_maxCandidates);
     m_manager->SetSingleBestLinkMode(m_singleBestLinkMode);
     m_manager->SetUpdateInterval(m_updateInterval);
+    m_manager->SetGroundNodeActivationTimes(m_groundNodeActivationTimes);
+    if (!m_groundNodeLifecycleFile.empty())
+    {
+        m_manager->EnableGroundNodeLifecycleLogging(m_groundNodeLifecycleFile);
+    }
 
     m_manager->SetChoPreparationDelay(m_choPreparationDelay);
     m_manager->SetChoExecutionDelay(m_choExecutionDelay);

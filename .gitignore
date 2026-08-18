@@ -21,3 +21,5 @@ data-*/
 data/prepro/*
 logs/*
 handover_logs/*
+
+!data-b/

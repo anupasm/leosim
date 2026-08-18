@@ -308,6 +308,13 @@ LeoSimRoutingCalculator::IsAccessAuthorityEnabled() const
 }
 
 void
+LeoSimRoutingCalculator::SetRoutableGroundNodes(const std::set<uint32_t>& nodeIds)
+{
+    m_routableGroundNodeIds = nodeIds;
+    m_cachedTopology.clear();
+}
+
+void
 LeoSimRoutingCalculator::SetRouteProvider(Ptr<LeoSimRouteProvider> provider)
 {
     NS_LOG_FUNCTION(this << provider);
@@ -903,6 +910,17 @@ LeoSimRoutingCalculator::GetAccessLinkState(
 
     const uint32_t groundId = groundNode->GetId();
     const uint32_t satId = satNode->GetId();
+
+    if (!m_routableGroundNodeIds.empty() &&
+        m_routableGroundNodeIds.count(groundId) == 0)
+    {
+        return LEOSIM_ACCESS_NOT_SELECTED;
+    }
+
+    if (!m_beamManager->IsGroundNodeActive(groundId))
+    {
+        return LEOSIM_ACCESS_NOT_SELECTED;
+    }
 
     if (m_beamManager->IsServingAccessLink(groundId, satId))
     {

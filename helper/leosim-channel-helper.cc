@@ -53,6 +53,8 @@ LeoSimChannelHelper::LeoSimChannelHelper()
       m_updateInterval(Seconds(1.0)),
       m_verbose(false),
       m_maxGroundLinksPerNode(1),
+      m_groundAccessPlanningHorizon(Time::Max()),
+      m_groundAccessSampleInterval(Seconds(1)),
       m_islMaxDistance(5000000.0),
       m_islTransmitPower(30.0),
       m_islAntennaGain(30.0),
@@ -168,6 +170,56 @@ LeoSimChannelHelper::AddGroundAccessLinks(Ptr<LeoSimChannelModel> channelModel,
     uint32_t linkCount = 0;
     const uint32_t maxLinks = std::max<uint32_t>(1, m_maxGroundLinksPerNode);
 
+    // Satellite trajectories are identical for every ground node. Preparing
+    // them inside the ground-node loop copied the complete waypoint history
+    // thousands of times in large UE scenarios and made access-channel setup
+    // appear to hang before simulation time started.
+    std::vector<std::vector<Vector>> satellitePositions(satellites.GetN());
+    std::size_t epochs = 1;
+    for (uint32_t s = 0; s < satellites.GetN(); ++s)
+    {
+        Ptr<Node> satellite = satellites.Get(s);
+        Ptr<MobilityModel> satMobility = satellite->GetObject<MobilityModel>();
+        if (!satMobility)
+        {
+            continue;
+        }
+
+        Ptr<LeoSimMobilityModel> leoMobility = satellite->GetObject<LeoSimMobilityModel>();
+        if (leoMobility)
+        {
+            const auto& waypoints = leoMobility->GetWaypoints();
+            LeoSimWaypoint lastEligible{};
+            bool haveLastEligible = false;
+            Time lastSampleTime;
+            bool haveSample = false;
+            for (const auto& waypoint : waypoints)
+            {
+                if (waypoint.time > m_groundAccessPlanningHorizon)
+                {
+                    break;
+                }
+                lastEligible = waypoint;
+                haveLastEligible = true;
+                if (!haveSample || waypoint.time - lastSampleTime >= m_groundAccessSampleInterval)
+                {
+                    satellitePositions[s].push_back(waypoint.position);
+                    lastSampleTime = waypoint.time;
+                    haveSample = true;
+                }
+            }
+            if (haveLastEligible && (!haveSample || lastEligible.time != lastSampleTime))
+            {
+                satellitePositions[s].push_back(lastEligible.position);
+            }
+        }
+        if (satellitePositions[s].empty())
+        {
+            satellitePositions[s].push_back(satMobility->GetPosition());
+        }
+        epochs = std::max(epochs, satellitePositions[s].size());
+    }
+
     for (uint32_t g = 0; g < groundNodes.GetN(); ++g)
     {
         Ptr<Node> ground = groundNodes.Get(g);
@@ -178,35 +230,6 @@ LeoSimChannelHelper::AddGroundAccessLinks(Ptr<LeoSimChannelModel> channelModel,
         }
 
         const Vector groundPos = groundMobility->GetPosition();
-        std::vector<std::vector<Vector>> satellitePositions(satellites.GetN());
-        std::size_t epochs = 1;
-
-        for (uint32_t s = 0; s < satellites.GetN(); ++s)
-        {
-            Ptr<Node> satellite = satellites.Get(s);
-            Ptr<MobilityModel> satMobility = satellite->GetObject<MobilityModel>();
-            if (!satMobility)
-            {
-                continue;
-            }
-
-            Ptr<LeoSimMobilityModel> leoMobility =
-                satellite->GetObject<LeoSimMobilityModel>();
-            if (leoMobility)
-            {
-                const auto waypoints = leoMobility->GetWaypoints();
-                satellitePositions[s].reserve(waypoints.size());
-                for (const auto& waypoint : waypoints)
-                {
-                    satellitePositions[s].push_back(waypoint.position);
-                }
-            }
-            if (satellitePositions[s].empty())
-            {
-                satellitePositions[s].push_back(satMobility->GetPosition());
-            }
-            epochs = std::max(epochs, satellitePositions[s].size());
-        }
 
         // Provision the union of the nearest visible satellites at every loaded
         // trajectory epoch. Net devices and addresses must exist before the
@@ -394,6 +417,16 @@ LeoSimChannelHelper::SetMaxGroundLinksPerNode(uint32_t maxLinks)
 {
     NS_LOG_FUNCTION(this << maxLinks);
     m_maxGroundLinksPerNode = std::max<uint32_t>(1, maxLinks);
+}
+
+void
+LeoSimChannelHelper::SetGroundAccessPlanningWindow(Time horizon, Time interval)
+{
+    NS_ABORT_MSG_IF(horizon.IsNegative(), "Ground access planning horizon cannot be negative");
+    NS_ABORT_MSG_IF(!interval.IsStrictlyPositive(),
+                    "Ground access trajectory sample interval must be positive");
+    m_groundAccessPlanningHorizon = horizon;
+    m_groundAccessSampleInterval = interval;
 }
 
 void

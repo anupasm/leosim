@@ -10,6 +10,7 @@
 #include "ns3/core-module.h"
 #include "ns3/flow-monitor-module.h"
 #include "ns3/internet-module.h"
+#include "ns3/internet-apps-module.h"
 #include "ns3/leosim-beam-manager-helper.h"
 #include "ns3/leosim-beam-capacity-manager.h"
 #include "ns3/leosim-beam-layout-engine.h"
@@ -39,9 +40,12 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <map>
+#include <memory>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -56,6 +60,47 @@ using namespace ns3;
 
 namespace
 {
+
+std::vector<uint32_t>
+LoadSatelliteSelection(const std::string& filename)
+{
+    std::ifstream input(filename);
+    if (!input.is_open())
+    {
+        throw std::runtime_error("cannot open satellite selection file: " + filename);
+    }
+    std::vector<uint32_t> ids;
+    std::set<uint32_t> seen;
+    std::string line;
+    while (std::getline(input, line))
+    {
+        if (line.empty() || line[0] == '#')
+        {
+            continue;
+        }
+        const std::size_t comma = line.find(',');
+        const std::string token = line.substr(0, comma);
+        try
+        {
+            std::size_t parsed = 0;
+            const unsigned long value = std::stoul(token, &parsed);
+            if (parsed == token.size() && value <= std::numeric_limits<uint32_t>::max() &&
+                seen.insert(static_cast<uint32_t>(value)).second)
+            {
+                ids.push_back(static_cast<uint32_t>(value));
+            }
+        }
+        catch (const std::exception&)
+        {
+            // Permit a CSV header such as "satellite_id,...".
+        }
+    }
+    if (ids.empty())
+    {
+        throw std::runtime_error("satellite selection file contains no satellite IDs: " + filename);
+    }
+    return ids;
+}
 
 std::string
 BuildRunSuffix(const std::string& handoverMode, uint32_t rngSeed, uint64_t rngRun)
@@ -352,14 +397,24 @@ InstallAllTcpFlows(NodeContainer ueNodes,
                    double startTime,
                    double stopTime,
                    const std::string& tcpRate,
-                   uint32_t packetSize)
+                   uint32_t packetSize,
+                   const std::vector<double>& ueActivationTimes)
 {
     ApplicationContainer apps;
     uint32_t flowIndex = 0;
+    uint32_t skippedFlows = 0;
     for (uint32_t ue = 0; ue < ueNodes.GetN(); ++ue)
     {
+        const double ueStart = ue < ueActivationTimes.size()
+                                   ? std::max(startTime, ueActivationTimes[ue])
+                                   : startTime;
         for (uint32_t server = 0; server < serverNodes.GetN(); ++server)
         {
+            if (ueStart >= stopTime)
+            {
+                ++skippedFlows;
+                continue;
+            }
             const uint32_t port = static_cast<uint32_t>(basePort) + flowIndex;
             if (port > 65535)
             {
@@ -371,7 +426,7 @@ InstallAllTcpFlows(NodeContainer ueNodes,
                                           ue,
                                           server,
                                           static_cast<uint16_t>(port),
-                                          startTime,
+                                          ueStart,
                                           stopTime,
                                           tcpRate,
                                           packetSize));
@@ -380,9 +435,171 @@ InstallAllTcpFlows(NodeContainer ueNodes,
     }
 
     std::cout << "Installed full traffic matrix: " << ueNodes.GetN() << " UEs x "
-              << serverNodes.GetN() << " servers = " << flowIndex << " TCP flows" << std::endl;
+              << serverNodes.GetN() << " servers = " << flowIndex << " TCP flows";
+    if (skippedFlows > 0)
+    {
+        std::cout << " (" << skippedFlows << " skipped because activation is after appStop)";
+    }
+    std::cout << std::endl;
     return apps;
 }
+
+ApplicationContainer
+InstallBoundedUePings(NodeContainer ueNodes,
+                      const std::vector<std::pair<uint32_t, uint32_t>>& pairs,
+                      const std::vector<double>& ueActivationTimes,
+                      double startTime,
+                      double stopTime,
+                      double interval,
+                      uint32_t packetSize,
+                      double staggerWindow)
+{
+    ApplicationContainer apps;
+    uint32_t installed = 0;
+    for (uint32_t index = 0; index < pairs.size(); ++index)
+    {
+        const auto [sourceIndex, destinationIndex] = pairs[index];
+        const double activationTime = std::max(ueActivationTimes.at(sourceIndex),
+                                               ueActivationTimes.at(destinationIndex));
+        const double stagger = pairs.size() > 1
+                                   ? staggerWindow * static_cast<double>(index) /
+                                         static_cast<double>(pairs.size())
+                                   : 0.0;
+        const double pairStart = std::max(startTime, activationTime) + stagger;
+        if (pairStart >= stopTime)
+        {
+            continue;
+        }
+        const Ipv4Address destination = GetFirstNonLoopbackAddress(ueNodes.Get(destinationIndex));
+        if (destination == Ipv4Address::GetAny())
+        {
+            NS_FATAL_ERROR("UE " << destinationIndex << " has no non-loopback IPv4 address");
+        }
+        PingHelper ping(destination);
+        ping.SetAttribute("Interval", TimeValue(Seconds(interval)));
+        ping.SetAttribute("Size", UintegerValue(packetSize));
+        ping.SetAttribute("Count", UintegerValue(0));
+        // QUIET emits one aggregate delivery/RTT report at shutdown, avoiding
+        // per-packet console and CSV overhead while keeping ping results observable.
+        ping.SetAttribute("VerboseMode", EnumValue(Ping::QUIET));
+        ApplicationContainer pairApps = ping.Install(ueNodes.Get(sourceIndex));
+        pairApps.Start(Seconds(pairStart));
+        pairApps.Stop(Seconds(stopTime));
+        apps.Add(pairApps);
+        ++installed;
+    }
+    std::cout << "Installed " << installed << " bounded UE-to-UE ping pairs (requested="
+              << pairs.size() << ", interval=" << interval << "s, size=" << packetSize
+              << " bytes, staggerWindow=" << staggerWindow << "s)" << std::endl;
+    return apps;
+}
+
+class PreHandoverPingController
+{
+  public:
+    PreHandoverPingController(Ptr<Node> source,
+                              Ptr<Node> target,
+                              uint32_t packetSize,
+                              uint32_t count,
+                              Time interval,
+                              const std::string& outputFile)
+        : m_source(source),
+          m_target(target),
+          m_packetSize(packetSize),
+          m_count(count),
+          m_interval(interval),
+          m_output(outputFile, std::ios::out | std::ios::trunc)
+    {
+        if (!m_output.is_open())
+        {
+            NS_FATAL_ERROR("Cannot open pre-handover ping output " << outputFile);
+        }
+        m_output << "burst_id,trigger_time_s,report_time_s,ground_node_id,target_ue_node_id,"
+                    "source_satellite_id,target_satellite_id,source_beam_id,target_beam_id,"
+                    "handover_mode,handover_type,handover_trigger,packet_size_bytes,requested_count,"
+                    "tx_packets,rx_packets,loss_percent,rtt_min_ms,rtt_avg_ms,rtt_max_ms,rtt_mdev_ms\n";
+        m_output.flush();
+    }
+
+    void OnHandoverStart(LeoSimHandoverEvent event)
+    {
+        if (event.ueNodeId != m_source->GetId())
+        {
+            return;
+        }
+        const Ipv4Address destination = GetFirstNonLoopbackAddress(m_target);
+        if (destination == Ipv4Address::GetAny())
+        {
+            std::cerr << "Skipping pre-handover ping: target UE has no IPv4 address"
+                      << std::endl;
+            return;
+        }
+
+        const uint32_t burstId = ++m_nextBurstId;
+        m_events.emplace(burstId, event);
+        PingHelper ping(destination);
+        ping.SetAttribute("Interval", TimeValue(m_interval));
+        ping.SetAttribute("Size", UintegerValue(m_packetSize));
+        ping.SetAttribute("Count", UintegerValue(m_count));
+        ping.SetAttribute("VerboseMode", EnumValue(Ping::SILENT));
+        ApplicationContainer apps = ping.Install(m_source);
+        Ptr<Ping> application = DynamicCast<Ping>(apps.Get(0));
+        application->TraceConnectWithoutContext(
+            "Report",
+            MakeBoundCallback(&PreHandoverPingController::ReportThunk, this, burstId));
+        // Application::DoInitialize schedules this value as a delay from the
+        // current time, so zero starts at this handover callback's timestamp.
+        apps.Start(Seconds(0));
+        // The node was initialized at time zero. Applications attached from a
+        // runtime handover callback must therefore be initialized explicitly.
+        application->Initialize();
+        m_apps.Add(apps);
+        std::cout << "[pre-handover-ping] burst=" << burstId << " t="
+                  << Simulator::Now().GetSeconds() << "s alpha_gs(node " << m_source->GetId()
+                  << ") -> UE(node " << m_target->GetId() << "), size=" << m_packetSize
+                  << " bytes count=" << m_count << std::endl;
+    }
+
+  private:
+    static void ReportThunk(PreHandoverPingController* controller,
+                            uint32_t burstId,
+                            const Ping::PingReport& report)
+    {
+        controller->RecordReport(burstId, report);
+    }
+
+    void RecordReport(uint32_t burstId, const Ping::PingReport& report)
+    {
+        auto it = m_events.find(burstId);
+        if (it == m_events.end())
+        {
+            return;
+        }
+        const LeoSimHandoverEvent& event = it->second;
+        m_output << burstId << ',' << std::fixed << std::setprecision(9)
+                 << event.initiatedAt.GetSeconds() << ',' << Simulator::Now().GetSeconds() << ','
+                 << event.ueNodeId << ',' << m_target->GetId() << ',' << event.sourceSatId << ','
+                 << event.targetSatId << ',' << event.sourceBeamId << ',' << event.targetBeamId
+                 << ',' << static_cast<uint32_t>(event.mode) << ','
+                 << static_cast<uint32_t>(event.type) << ','
+                 << static_cast<uint32_t>(event.trigger) << ',' << m_packetSize << ',' << m_count
+                 << ',' << report.m_transmitted << ',' << report.m_received << ',' << report.m_loss
+                 << ',' << report.m_rttMin << ',' << report.m_rttAvg << ',' << report.m_rttMax << ','
+                 << report.m_rttMdev << '\n';
+        m_output.flush();
+        m_events.erase(it);
+    }
+
+    Ptr<Node> m_source;
+    Ptr<Node> m_target;
+    uint32_t m_packetSize;
+    uint32_t m_count;
+    Time m_interval;
+    std::ofstream m_output;
+    uint32_t m_nextBurstId{0};
+    std::map<uint32_t, LeoSimHandoverEvent> m_events;
+    ApplicationContainer m_apps;
+};
 
 void
 PrintFlowMonitorSummary(Ptr<FlowMonitor> monitor, Ptr<Ipv4FlowClassifier> classifier)
@@ -427,7 +644,8 @@ main(int argc, char* argv[])
     bool useTrace = true;
     bool verbose = false;
 
-    uint32_t numSatellites = 0;
+    uint32_t numSatellites = 500;
+    std::string satelliteSelectionFile;
     uint32_t numServers = 0;
     uint32_t numUes = 0;
     uint32_t groundDevicesPerOperator = 0;
@@ -455,6 +673,7 @@ main(int argc, char* argv[])
     double delayUpdateInterval = 1.0;
     double propagationSpeed = 299792458.0;
     uint32_t maxAccessSatellites = 8;
+    double accessCandidateSampleInterval = 10.0;
 
     bool enableIsl = true;
     bool islFullMesh = false;
@@ -503,6 +722,23 @@ main(int argc, char* argv[])
     std::string tcpRate = "1Mbps";
     uint32_t tcpPacketSize = 1024;
     bool allToAllTraffic = true;
+    bool enableUePing = false;
+    uint32_t uePingStartIndex = 1;
+    uint32_t uePingPairs = 100;
+    double uePingInterval = 1.0;
+    uint32_t uePingPacketSize = 56;
+    double uePingStaggerWindow = 1.0;
+    bool enablePreHandoverPing = false;
+    uint32_t preHandoverPingTargetUe = 0;
+    uint32_t preHandoverPingPacketSize = 1400;
+    uint32_t preHandoverPingCount = 20;
+    double preHandoverPingIntervalMs = 10.0;
+    bool enableDynamicGroundNodes = false;
+    uint32_t initialUes = 0;
+    double ueIntroductionStart = 30.0;
+    double ueIntroductionInterval = 10.0;
+    uint32_t uesPerIntroduction = 100;
+    bool enableGroundNodeLifecycleLogging = true;
     bool writeFlowMonitor = true;
     bool enableVisualization = false;
     double visualizationInterval = 1.0;
@@ -540,6 +776,9 @@ main(int argc, char* argv[])
     cmd.AddValue("simTime", "Simulation duration in seconds", simTime);
     cmd.AddValue("verbose", "Enable verbose helper output", verbose);
     cmd.AddValue("numSatellites", "Number of satellites to use; 0 means all loaded satellites", numSatellites);
+    cmd.AddValue("satelliteSelectionFile",
+                 "CSV whose first column lists original satellite IDs to use exclusively",
+                 satelliteSelectionFile);
     cmd.AddValue("numServers", "Number of servers/GSS to use; 0 means all loaded servers", numServers);
     cmd.AddValue("numUes", "Number of UEs to use; 0 means all loaded UEs", numUes);
     cmd.AddValue("groundDevicesPerOperator",
@@ -597,6 +836,9 @@ main(int argc, char* argv[])
     cmd.AddValue("maxAccessSatellites",
                  "Maximum candidate satellite access links created per ground node",
                  maxAccessSatellites);
+    cmd.AddValue("accessCandidateSampleInterval",
+                 "Seconds between trajectory samples used to provision access candidates",
+                 accessCandidateSampleInterval);
     cmd.AddValue("enableIsl", "Enable inter-satellite links", enableIsl);
     cmd.AddValue("islFullMesh", "Build all-pairs ISL mesh instead of bounded nearest-neighbor mesh", islFullMesh);
     cmd.AddValue("maxIslNeighbors", "Maximum nearest-neighbor ISL degree per satellite", maxIslNeighbors);
@@ -672,6 +914,47 @@ main(int argc, char* argv[])
     cmd.AddValue("allToAllTraffic",
                  "Install one TCP flow from every UE to every server/GSS",
                  allToAllTraffic);
+    cmd.AddValue("enableUePing",
+                 "Install scalable ICMP ping traffic between bounded disjoint UE pairs",
+                 enableUePing);
+    cmd.AddValue("uePingStartIndex",
+                 "First UE index used by bounded pairing (1 skips the special UE 0 endpoint)",
+                 uePingStartIndex);
+    cmd.AddValue("uePingPairs",
+                 "Maximum disjoint UE pairs to ping; bounded by floor(numUes/2)",
+                 uePingPairs);
+    cmd.AddValue("uePingInterval", "Seconds between ping requests in each UE pair", uePingInterval);
+    cmd.AddValue("uePingPacketSize", "ICMP ping payload bytes", uePingPacketSize);
+    cmd.AddValue("uePingStaggerWindow",
+                 "Seconds over which UE-pair ping starts are evenly staggered",
+                 uePingStaggerWindow);
+    cmd.AddValue("enablePreHandoverPing",
+                 "Start an alpha_gs ICMP burst when handover execution begins",
+                 enablePreHandoverPing);
+    cmd.AddValue("preHandoverPingTargetUe",
+                 "UE index receiving alpha_gs pre-handover ping bursts",
+                 preHandoverPingTargetUe);
+    cmd.AddValue("preHandoverPingPacketSize", "ICMP payload bytes per handover ping", preHandoverPingPacketSize);
+    cmd.AddValue("preHandoverPingCount", "Packets in each handover-triggered ping burst", preHandoverPingCount);
+    cmd.AddValue("preHandoverPingIntervalMs", "Milliseconds between packets in a handover ping burst", preHandoverPingIntervalMs);
+    cmd.AddValue("enableDynamicGroundNodes",
+                 "Introduce UEs progressively instead of activating all at time zero",
+                 enableDynamicGroundNodes);
+    cmd.AddValue("initialUes",
+                 "UEs active at time zero when dynamic introduction is enabled",
+                 initialUes);
+    cmd.AddValue("ueIntroductionStart",
+                 "Simulation time in seconds for the first UE activation batch",
+                 ueIntroductionStart);
+    cmd.AddValue("ueIntroductionInterval",
+                 "Seconds between UE activation batches",
+                 ueIntroductionInterval);
+    cmd.AddValue("uesPerIntroduction",
+                 "Number of UEs activated in each periodic batch",
+                 uesPerIntroduction);
+    cmd.AddValue("enableGroundNodeLifecycleLogging",
+                 "Write periodic ground-node activation summaries to CSV",
+                 enableGroundNodeLifecycleLogging);
     cmd.AddValue("outputPrefix", "Base prefix used for simulation output files", outputPrefix);
     cmd.AddValue("uniqueOutputPrefix",
                  "Append handover mode, RNG seed/run, job ID, timestamp, and PID to the output prefix",
@@ -716,6 +999,11 @@ main(int argc, char* argv[])
     cmd.AddValue("beamUpdateIntervalMs", "Beam manager update interval in milliseconds", beamUpdateIntervalMs);
     cmd.Parse(argc, argv);
 
+    if (accessCandidateSampleInterval <= 0.0)
+    {
+        NS_FATAL_ERROR("accessCandidateSampleInterval must be positive");
+    }
+
     RngSeedManager::SetSeed(rngSeed);
     RngSeedManager::SetRun(rngRun);
 
@@ -747,6 +1035,27 @@ main(int argc, char* argv[])
         alphaFairness < 0.0 || queuePressureWeight < 0.0)
     {
         NS_FATAL_ERROR("Invalid beam capacity scheduler timing configuration");
+    }
+    if (enableDynamicGroundNodes &&
+        (ueIntroductionStart < 0.0 || ueIntroductionInterval <= 0.0 ||
+         uesPerIntroduction == 0))
+    {
+        NS_FATAL_ERROR("Dynamic UE introduction requires a non-negative start time, positive "
+                       "interval, and non-zero batch size");
+    }
+    if (enableUePing &&
+        (uePingPairs == 0 || uePingInterval <= 0.0 || uePingPacketSize < 16 ||
+         uePingStaggerWindow < 0.0))
+    {
+        NS_FATAL_ERROR("UE ping requires positive pair count/interval, payload >=16 bytes, and "
+                       "non-negative stagger window");
+    }
+    if (enablePreHandoverPing &&
+        (preHandoverPingPacketSize < 16 || preHandoverPingPacketSize > 1472 ||
+         preHandoverPingCount == 0 || preHandoverPingIntervalMs <= 0.0))
+    {
+        NS_FATAL_ERROR("Pre-handover ping requires a 16..1472 byte payload, positive count, and "
+                       "positive interval");
     }
     if (uniqueOutputPrefix)
     {
@@ -837,7 +1146,31 @@ main(int argc, char* argv[])
         return 1;
     }
 
-    if (numSatellites == 0)
+    std::vector<uint32_t> selectedSatelliteIds;
+    if (!satelliteSelectionFile.empty())
+    {
+        try
+        {
+            selectedSatelliteIds = LoadSatelliteSelection(satelliteSelectionFile);
+        }
+        catch (const std::runtime_error& error)
+        {
+            std::cerr << "Error: " << error.what() << std::endl;
+            return 1;
+        }
+        for (uint32_t satelliteId : selectedSatelliteIds)
+        {
+            if (satelliteId >= loader->GetNumSatellites())
+            {
+                std::cerr << "Error: satellite selection ID " << satelliteId
+                          << " is outside loaded range 0.."
+                          << loader->GetNumSatellites() - 1 << std::endl;
+                return 1;
+            }
+        }
+        numSatellites = selectedSatelliteIds.size();
+    }
+    else if (numSatellites == 0)
     {
         numSatellites = loader->GetNumSatellites();
     }
@@ -846,6 +1179,14 @@ main(int argc, char* argv[])
         std::cerr << "Error: requested " << numSatellites << " satellites, but only "
                   << loader->GetNumSatellites() << " were loaded." << std::endl;
         return 1;
+    }
+    if (selectedSatelliteIds.empty())
+    {
+        selectedSatelliteIds.reserve(numSatellites);
+        for (uint32_t satelliteId = 0; satelliteId < numSatellites; ++satelliteId)
+        {
+            selectedSatelliteIds.push_back(satelliteId);
+        }
     }
     if (numServers == 0)
     {
@@ -873,6 +1214,12 @@ main(int argc, char* argv[])
                   << "/" << numServers << ", ueId=" << ueId << "/" << numUes << std::endl;
         return 1;
     }
+    if (enableDynamicGroundNodes && initialUes > numUes)
+    {
+        std::cerr << "Error: initialUes=" << initialUes << " exceeds loaded UEs=" << numUes
+                  << std::endl;
+        return 1;
+    }
 
     std::cout << "Scenario: satellites=" << numSatellites << ", servers=" << numServers
               << ", UEs=" << numUes << ", accessMaxDistance=" << accessMaxDistance
@@ -881,6 +1228,15 @@ main(int argc, char* argv[])
               << "s, propagationSpeed=" << propagationSpeed
               << "m/s, islMaxDistance=" << islMaxDistance
               << "m, islDelay=" << islDelay << std::endl;
+    if (!satelliteSelectionFile.empty())
+    {
+        std::cout << "Selected original satellite IDs:";
+        for (uint32_t satelliteId : selectedSatelliteIds)
+        {
+            std::cout << ' ' << satelliteId;
+        }
+        std::cout << std::endl;
+    }
 
     NodeContainer satelliteNodes;
     NodeContainer serverNodes;
@@ -890,6 +1246,37 @@ main(int argc, char* argv[])
     ueNodes.Create(numUes);
     timer.Log("node creation");
 
+    std::vector<double> ueActivationTimes(numUes, 0.0);
+    std::map<uint32_t, Time> groundNodeActivationTimes;
+    if (enableDynamicGroundNodes)
+    {
+        uint32_t outsideSimulation = 0;
+        for (uint32_t i = 0; i < numUes; ++i)
+        {
+            double activationTime = 0.0;
+            if (i >= initialUes)
+            {
+                const uint32_t batch = (i - initialUes) / uesPerIntroduction;
+                activationTime = ueIntroductionStart +
+                                 static_cast<double>(batch) * ueIntroductionInterval;
+            }
+            ueActivationTimes[i] = activationTime;
+            groundNodeActivationTimes[ueNodes.Get(i)->GetId()] = Seconds(activationTime);
+            outsideSimulation += activationTime > simTime ? 1 : 0;
+        }
+
+        std::cout << "Dynamic UE introduction: initial=" << initialUes
+                  << ", firstBatch=" << ueIntroductionStart << "s, interval="
+                  << ueIntroductionInterval << "s, batchSize=" << uesPerIntroduction
+                  << std::endl;
+        if (outsideSimulation > 0)
+        {
+            std::cout << "Warning: " << outsideSimulation
+                      << " UEs have introduction times after simTime and will remain dormant"
+                      << std::endl;
+        }
+    }
+
     timer.Begin("mobility installation");
     LeoSimMobilityHelper mobilityHelper;
     mobilityHelper.SetLoader(loader);
@@ -897,7 +1284,10 @@ main(int argc, char* argv[])
     mobilityHelper.SetVelocityCalculation(true);
     for (uint32_t i = 0; i < numSatellites; ++i)
     {
-        mobilityHelper.InstallSatellite(satelliteNodes.Get(i), i, loader->GetSatelliteName(i));
+        const uint32_t satelliteId = selectedSatelliteIds[i];
+        mobilityHelper.InstallSatellite(satelliteNodes.Get(i),
+                                        satelliteId,
+                                        loader->GetSatelliteName(satelliteId));
     }
     for (uint32_t i = 0; i < numServers; ++i)
     {
@@ -974,6 +1364,8 @@ main(int argc, char* argv[])
     accessChannelHelper.SetMinElevationAngle(minElevation);
     accessChannelHelper.SetMaxLinkDistance(accessMaxDistance);
     accessChannelHelper.SetMaxGroundLinksPerNode(maxAccessSatellites);
+    accessChannelHelper.SetGroundAccessPlanningWindow(Seconds(simTime),
+                                                      Seconds(accessCandidateSampleInterval));
     accessChannelHelper.SetUpdateInterval(Seconds(1.0));
     accessChannelHelper.SetVerbose(verbose);
     Ptr<LeoSimChannelModel> accessChannel =
@@ -1149,10 +1541,40 @@ main(int argc, char* argv[])
     allNodes.Add(serverNodes);
     allNodes.Add(ueNodes);
 
+    std::vector<std::pair<uint32_t, uint32_t>> uePingPairIndices;
+    if (enablePreHandoverPing && preHandoverPingTargetUe >= ueNodes.GetN())
+    {
+        NS_FATAL_ERROR("preHandoverPingTargetUe " << preHandoverPingTargetUe
+                                                   << " is outside the loaded UE subset");
+    }
+    if (enableUePing)
+    {
+        if (uePingStartIndex >= ueNodes.GetN())
+        {
+            NS_FATAL_ERROR("uePingStartIndex " << uePingStartIndex
+                                                << " is outside the loaded UE subset");
+        }
+        const uint32_t pairCount =
+            std::min(uePingPairs, (ueNodes.GetN() - uePingStartIndex) / 2);
+        uePingPairIndices.reserve(pairCount);
+        for (uint32_t pair = 0; pair < pairCount; ++pair)
+        {
+            const uint32_t source = uePingStartIndex + pair * 2;
+            uePingPairIndices.emplace_back(source, source + 1);
+        }
+        if (pairCount == 0)
+        {
+            NS_FATAL_ERROR("UE ping requires at least two loaded UEs");
+        }
+    }
+
     NodeContainer routingDestinations;
     NodeContainer routingSources;
     NodeContainer statisticsRouteSources;
     NodeContainer statisticsRouteDestinations;
+    // Satellites need forwarding entries for endpoint destinations, but
+    // unrelated ground nodes do not need routes in single-flow mode.
+    routingSources.Add(satelliteNodes);
     if (allToAllTraffic)
     {
         routingDestinations.Add(serverNodes);
@@ -1172,6 +1594,28 @@ main(int argc, char* argv[])
         routingSources.Add(ueNodes.Get(ueId));
         statisticsRouteSources.Add(ueNodes.Get(ueId));
         statisticsRouteDestinations.Add(serverNodes.Get(serverId));
+    }
+    if (enableUePing && !allToAllTraffic)
+    {
+        std::set<uint32_t> addedNodeIds = {serverNodes.Get(serverId)->GetId(),
+                                           ueNodes.Get(ueId)->GetId()};
+        for (const auto& [sourceIndex, destinationIndex] : uePingPairIndices)
+        {
+            for (uint32_t ueIndex : {sourceIndex, destinationIndex})
+            {
+                Ptr<Node> endpoint = ueNodes.Get(ueIndex);
+                if (addedNodeIds.insert(endpoint->GetId()).second)
+                {
+                    routingDestinations.Add(endpoint);
+                    routingSources.Add(endpoint);
+                }
+            }
+        }
+    }
+    if (enablePreHandoverPing && !allToAllTraffic && preHandoverPingTargetUe != ueId)
+    {
+        routingDestinations.Add(ueNodes.Get(preHandoverPingTargetUe));
+        routingSources.Add(ueNodes.Get(preHandoverPingTargetUe));
     }
 
     LeoSimRoutingCalculatorHelper routingHelper;
@@ -1195,6 +1639,21 @@ main(int argc, char* argv[])
                                                combinedMinSnr,
                                                combinedGoodSnr,
                                                combinedCriticalUtilization);
+    if (!allToAllTraffic)
+    {
+        std::set<uint32_t> routableIds = {serverNodes.Get(serverId)->GetId(),
+                                         ueNodes.Get(ueId)->GetId()};
+        for (const auto& [sourceIndex, destinationIndex] : uePingPairIndices)
+        {
+            routableIds.insert(ueNodes.Get(sourceIndex)->GetId());
+            routableIds.insert(ueNodes.Get(destinationIndex)->GetId());
+        }
+        if (enablePreHandoverPing)
+        {
+            routableIds.insert(ueNodes.Get(preHandoverPingTargetUe)->GetId());
+        }
+        routingCalculator->SetRoutableGroundNodes(routableIds);
+    }
     timer.Log("routing calculator construction");
 
     // === Beam Management & Handover (3GPP NTN CHO) ===
@@ -1221,6 +1680,16 @@ main(int argc, char* argv[])
     beamHelper.SetTopsisWeights(0.30, 0.25, 0.20, 0.15, 0.10, 0.05, 0.05);
     beamHelper.SetMaxCandidates(maxCandidates);
     beamHelper.SetUpdateInterval(MilliSeconds(beamUpdateIntervalMs));
+    if (enableDynamicGroundNodes)
+    {
+        beamHelper.SetGroundNodeActivationTimes(groundNodeActivationTimes);
+        if (enableGroundNodeLifecycleLogging)
+        {
+            const std::string lifecycleFile = outputPrefix + "-ground-node-lifecycle.csv";
+            beamHelper.EnableGroundNodeLifecycleLogging(lifecycleFile);
+            std::cout << "Ground-node lifecycle data: " << lifecycleFile << std::endl;
+        }
+    }
     beamHelper.EnableLoadBalancing(enableLoadBalancing);
     beamHelper.EnableHandoverBuffering(enableHoBuffering);
     beamHelper.SetMaxHandoverBufferSize(hoBufferSize);
@@ -1254,18 +1723,55 @@ main(int argc, char* argv[])
     Ptr<LeoSimBeamManager> beamManager =
         beamHelper.Install(allGroundNodes, satelliteNodes, Seconds(simTime));
     beamManager->SetOperatorModel(operatorModel);
-    for (uint32_t i = 0; i < ueNodes.GetN(); ++i)
+    if (enablePreHandoverPing && preHandoverPingTargetUe >= ueNodes.GetN())
     {
-        beamManager->SetHandoverValidationPeers(ueNodes.Get(i)->GetId(), serverNodes);
+        NS_FATAL_ERROR("preHandoverPingTargetUe " << preHandoverPingTargetUe
+                                                   << " is outside the loaded UE subset");
     }
-    for (uint32_t i = 0; i < serverNodes.GetN(); ++i)
+    if (allToAllTraffic)
     {
-        beamManager->SetHandoverValidationPeers(serverNodes.Get(i)->GetId(), ueNodes);
+        for (uint32_t i = 0; i < ueNodes.GetN(); ++i)
+        {
+            beamManager->SetHandoverValidationPeers(ueNodes.Get(i)->GetId(), serverNodes);
+        }
+        for (uint32_t i = 0; i < serverNodes.GetN(); ++i)
+        {
+            beamManager->SetHandoverValidationPeers(serverNodes.Get(i)->GetId(), ueNodes);
+        }
+    }
+    else
+    {
+        NodeContainer selectedServer;
+        selectedServer.Add(serverNodes.Get(serverId));
+        NodeContainer selectedUe;
+        selectedUe.Add(ueNodes.Get(ueId));
+        if (enablePreHandoverPing && preHandoverPingTargetUe != ueId)
+        {
+            selectedUe.Add(ueNodes.Get(preHandoverPingTargetUe));
+        }
+        beamManager->SetHandoverValidationPeers(ueNodes.Get(ueId)->GetId(), selectedServer);
+        beamManager->SetHandoverValidationPeers(serverNodes.Get(serverId)->GetId(), selectedUe);
     }
     routingCalculator->SetBeamManager(beamManager);
     if (enableVisualization || enableHandoverLogging)
     {
         visualizationHelper.SetBeamManager(beamManager);
+    }
+    std::unique_ptr<PreHandoverPingController> preHandoverPingController;
+    if (enablePreHandoverPing)
+    {
+        const std::string pingFile = outputPrefix + "-pre-handover-ping.csv";
+        preHandoverPingController = std::make_unique<PreHandoverPingController>(
+            serverNodes.Get(serverId),
+            ueNodes.Get(preHandoverPingTargetUe),
+            preHandoverPingPacketSize,
+            preHandoverPingCount,
+            MilliSeconds(preHandoverPingIntervalMs),
+            pingFile);
+        beamManager->SetHandoverStartCallback(
+            MakeCallback(&PreHandoverPingController::OnHandoverStart,
+                         preHandoverPingController.get()));
+        std::cout << "Pre-handover ping data: " << pingFile << std::endl;
     }
     timer.Log("beam manager installation");
 
@@ -1387,7 +1893,11 @@ main(int argc, char* argv[])
         }
         routeTreeHelper.SetMetric(treeMetric);
         routeTreeHelper.SetMaxRouteRequests(routeTreeMaxEntries);
-        routeTreeHelper.SetDestinationTreeAllNodes(true);
+        // routingSources already contains every satellite required for
+        // forwarding plus only the application endpoints. Requesting the
+        // entire graph here would also calculate and install routes for UEs
+        // that never generate application traffic.
+        routeTreeHelper.SetDestinationTreeAllNodes(false);
         routeTreeHelper.SetStatisticsEndpoints(statisticsRouteSources,
                                                statisticsRouteDestinations);
         if (enableRouteLogging)
@@ -1430,12 +1940,13 @@ main(int argc, char* argv[])
                          &routeTreeHelper));
         std::cout << "[routing] Destination-tree cache enabled: "
                   << routingDestinations.GetN() << " trees for "
-                  << allNodes.GetN() << " graph nodes" << std::endl;
+                  << routingSources.GetN() << " route sources ("
+                  << allNodes.GetN() << " graph nodes)" << std::endl;
     }
     else if (enableDynamicRouting)
     {
         routingHelper.EnableDynamicRouting(routingCalculator,
-                                           allNodes,
+                                           routingSources,
                                            routingDestinations,
                                            Seconds(routingUpdateInterval),
                                            simTime,
@@ -1445,7 +1956,7 @@ main(int argc, char* argv[])
     else
     {
         routingHelper.SetStaticRoutes(routingCalculator,
-                                      allNodes,
+                                      routingSources,
                                       routingDestinations,
                                       verbose,
                                       routingMetric);
@@ -1457,7 +1968,7 @@ main(int argc, char* argv[])
         // Match the destination-tree event coalescing above for in-process routing.
         routingHelper.EnableReactiveLinkTriggeredRouting(
             routingCalculator,
-            allNodes,
+            routingSources,
             routingDestinations,
             accessChannel,
             enableIsl ? islChannel : nullptr,
@@ -1481,20 +1992,41 @@ main(int argc, char* argv[])
                                          appStart,
                                          appStop,
                                          tcpRate,
-                                         tcpPacketSize);
+                                         tcpPacketSize,
+                                         ueActivationTimes);
     }
     else
     {
+        const double selectedUeStart =
+            std::max(appStart, ueActivationTimes.at(ueId));
+        if (selectedUeStart >= appStop)
+        {
+            NS_FATAL_ERROR("Selected UE activates at "
+                           << selectedUeStart << "s, which is not before appStop=" << appStop
+                           << "s");
+        }
         trafficApps = InstallSingleTcpFlow(ueNodes,
                                            serverNodes,
                                            beamManager,
                                            ueId,
                                            serverId,
                                            port,
-                                           appStart,
+                                           selectedUeStart,
                                            appStop,
                                            tcpRate,
                                            tcpPacketSize);
+    }
+    ApplicationContainer uePingApps;
+    if (enableUePing)
+    {
+        uePingApps = InstallBoundedUePings(ueNodes,
+                                           uePingPairIndices,
+                                           ueActivationTimes,
+                                           appStart,
+                                           appStop,
+                                           uePingInterval,
+                                           uePingPacketSize,
+                                           uePingStaggerWindow);
     }
     timer.Log("traffic application installation");
 

@@ -237,6 +237,12 @@ class LeoSimRoutingCalculator : public Object
     bool IsAccessAuthorityEnabled() const;
 
     /**
+     * \brief Restrict routing graph access links to selected ground nodes.
+     * \param nodeIds Ground-node IDs admitted to the routing graph. An empty set admits all.
+     */
+    void SetRoutableGroundNodes(const std::set<uint32_t>& nodeIds);
+
+    /**
      * \brief Set the route provider used by ComputeRoute.
      * \param provider Route provider implementation. Null restores the default Dijkstra provider.
      */
@@ -605,6 +611,7 @@ class LeoSimRoutingCalculator : public Object
     AccessLinkPolicy m_accessLinkPolicy;
     uint32_t m_multiConnectivityMaxLinks;
     bool m_accessAuthorityEnabled;
+    std::set<uint32_t> m_routableGroundNodeIds;
 
     // Configuration
     bool m_verbose;  //!< Enable verbose logging

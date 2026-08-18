@@ -202,6 +202,13 @@ LeoSimBeamManager::SetHandoverCallback(Callback<void, LeoSimHandoverEvent> callb
 }
 
 void
+LeoSimBeamManager::SetHandoverStartCallback(Callback<void, LeoSimHandoverEvent> callback)
+{
+    NS_LOG_FUNCTION(this);
+    m_handoverStartCallback = callback;
+}
+
+void
 LeoSimBeamManager::SetBeamStateCallback(Callback<void, uint32_t, LeoSimBeamRecord, double> callback)
 {
     NS_LOG_FUNCTION(this);
@@ -378,6 +385,44 @@ LeoSimBeamManager::SetUpdateInterval(Time interval)
 {
     NS_ABORT_MSG_IF(!interval.IsStrictlyPositive(), "Beam update interval must be positive");
     m_updateInterval = interval;
+}
+
+void
+LeoSimBeamManager::SetGroundNodeActivationTimes(
+    const std::map<uint32_t, Time>& activationTimes)
+{
+    m_groundNodeActivationTimes = activationTimes;
+}
+
+void
+LeoSimBeamManager::EnableGroundNodeLifecycleLogging(const std::string& filename)
+{
+    if (m_groundNodeLifecycleCsv.is_open())
+    {
+        m_groundNodeLifecycleCsv.close();
+    }
+    if (filename.empty())
+    {
+        return;
+    }
+    m_groundNodeLifecycleCsv.open(filename, std::ios::out | std::ios::trunc);
+    NS_ABORT_MSG_IF(!m_groundNodeLifecycleCsv.is_open(),
+                    "Cannot open ground-node lifecycle CSV: " << filename);
+    m_groundNodeLifecycleCsv
+        << "time_s,batch_id,introduced_nodes,total_active_scheduled_nodes,"
+           "total_active_ground_nodes\n";
+}
+
+bool
+LeoSimBeamManager::IsGroundNodeActive(uint32_t groundNodeId) const
+{
+    return m_activeGroundNodes.count(groundNodeId) != 0;
+}
+
+uint32_t
+LeoSimBeamManager::GetNumActiveGroundNodes() const
+{
+    return static_cast<uint32_t>(m_activeGroundNodes.size());
 }
 
 // ============================================================================
@@ -2113,6 +2158,25 @@ LeoSimBeamManager::ExecuteChoHandover(uint32_t ueNodeId,
         m_beamStateCallback(ueNodeId, beamIt->second, 0.0);
     }
 
+    if (!m_handoverStartCallback.IsNull())
+    {
+        LeoSimHandoverEvent event{};
+        event.ueNodeId = ueNodeId;
+        event.sourceSatId = sourceSatId;
+        event.targetSatId = targetSatId;
+        event.sourceBeamId = beamIt->second.beamId;
+        event.targetBeamId = std::numeric_limits<uint32_t>::max();
+        event.sourceCellId = beamIt->second.cellId;
+        event.targetCellId = std::numeric_limits<uint32_t>::max();
+        event.mode = LEOSIM_HO_MODE_CHO;
+        event.type = LEOSIM_HO_INTER_SATELLITE;
+        event.trigger = trigger;
+        event.initiatedAt = Simulator::Now();
+        event.completedAt = Simulator::Now();
+        event.sinrBefore = FiniteRadioQuality(beamIt->second.sinr, beamIt->second.snr);
+        m_handoverStartCallback(event);
+    }
+
     // Step 2: Log NS_LOG_DEBUG with UE ID, target satellite, and trigger type
     std::string triggerStr;
     switch (trigger)
@@ -2199,6 +2263,25 @@ LeoSimBeamManager::ExecuteBhoHandover(uint32_t ueNodeId,
     if (!m_beamStateCallback.IsNull())
     {
         m_beamStateCallback(ueNodeId, beamIt->second, 0.0);
+    }
+
+    if (!m_handoverStartCallback.IsNull())
+    {
+        LeoSimHandoverEvent event{};
+        event.ueNodeId = ueNodeId;
+        event.sourceSatId = sourceSatId;
+        event.targetSatId = targetSatId;
+        event.sourceBeamId = beamIt->second.beamId;
+        event.targetBeamId = std::numeric_limits<uint32_t>::max();
+        event.sourceCellId = beamIt->second.cellId;
+        event.targetCellId = std::numeric_limits<uint32_t>::max();
+        event.mode = LEOSIM_HO_MODE_BHO;
+        event.type = LEOSIM_HO_INTER_SATELLITE;
+        event.trigger = trigger;
+        event.initiatedAt = Simulator::Now();
+        event.completedAt = Simulator::Now();
+        event.sinrBefore = FiniteRadioQuality(beamIt->second.sinr, beamIt->second.snr);
+        m_handoverStartCallback(event);
     }
 
     NS_LOG_DEBUG("BHO execution initiated for UE "
@@ -2855,6 +2938,25 @@ LeoSimBeamManager::ExecuteIntraBeamHandover(uint32_t ueNodeId,
         m_beamStateCallback(ueNodeId, rec, 0.0);
     }
 
+    if (!m_handoverStartCallback.IsNull())
+    {
+        LeoSimHandoverEvent event{};
+        event.ueNodeId = ueNodeId;
+        event.sourceSatId = satId;
+        event.targetSatId = satId;
+        event.sourceBeamId = sourceBeamId;
+        event.targetBeamId = targetBeamId;
+        event.sourceCellId = sourceCellId;
+        event.targetCellId = targetBeamId;
+        event.mode = m_hoMode;
+        event.type = LEOSIM_HO_INTRA_BEAM;
+        event.trigger = trigger;
+        event.initiatedAt = Simulator::Now();
+        event.completedAt = Simulator::Now();
+        event.sinrBefore = FiniteRadioQuality(rec.sinr, rec.snr);
+        m_handoverStartCallback(event);
+    }
+
     Time delay = MilliSeconds(m_intraBeamHoDelayMs);
     auto complete = [this,
                      ueNodeId,
@@ -3168,6 +3270,10 @@ LeoSimBeamManager::UpdateCycle()
         }
 
         uint32_t ueNodeId = groundNode->GetId();
+        if (!IsGroundNodeActive(ueNodeId))
+        {
+            continue;
+        }
 
         // Ensure each UE has an initial serving beam assignment.
         auto beamIt = m_currentBeams.find(ueNodeId);
@@ -3520,7 +3626,8 @@ LeoSimBeamManager::ComputeEndToEndLatency(uint32_t ueNodeId, uint32_t satNodeId)
         for (uint32_t i = 0; i < m_groundNodes.GetN(); ++i)
         {
             Ptr<Node> groundNode = m_groundNodes.Get(i);
-            if (!groundNode || groundNode->GetId() == ueNodeId)
+            if (!groundNode || groundNode->GetId() == ueNodeId ||
+                !IsGroundNodeActive(groundNode->GetId()))
             {
                 continue;
             }
@@ -3654,6 +3761,78 @@ LeoSimBeamManager::IsPingPong(uint32_t ueNodeId, uint32_t sourceSatId, uint32_t 
 }
 
 void
+LeoSimBeamManager::LogGroundNodeActivationBatch(uint32_t introducedNodes)
+{
+    if (!m_groundNodeLifecycleCsv.is_open())
+    {
+        return;
+    }
+
+    uint32_t activeScheduledNodes = 0;
+    for (const auto& [nodeId, activationTime] : m_groundNodeActivationTimes)
+    {
+        (void)activationTime;
+        activeScheduledNodes += IsGroundNodeActive(nodeId) ? 1 : 0;
+    }
+    m_groundNodeLifecycleCsv << Simulator::Now().GetSeconds() << ','
+                             << m_groundNodeActivationBatchId++ << ',' << introducedNodes << ','
+                             << activeScheduledNodes << ',' << m_activeGroundNodes.size() << '\n';
+    m_groundNodeLifecycleCsv.flush();
+}
+
+void
+LeoSimBeamManager::ActivateGroundNodeBatch(std::vector<uint32_t> groundNodeIds)
+{
+    NS_LOG_FUNCTION(this << groundNodeIds.size());
+    m_visibleScanCache.clear();
+    m_gatewayRouteCache.clear();
+
+    uint32_t introducedNodes = 0;
+    uint32_t associatedNodes = 0;
+    for (uint32_t groundNodeId : groundNodeIds)
+    {
+        if (!m_activeGroundNodes.insert(groundNodeId).second)
+        {
+            continue;
+        }
+        ++introducedNodes;
+
+        std::vector<LeoSimBeamRecord> visible = ScanVisibleSatellites(groundNodeId);
+        std::vector<LeoSimTopsisCandidate> ranked = RankByTopsis(visible, groundNodeId);
+        if (ranked.empty())
+        {
+            NS_LOG_WARN("No visible satellites to attach newly active ground node "
+                        << groundNodeId << " at time " << Simulator::Now().GetSeconds() << "s");
+            continue;
+        }
+
+        LeoSimBeamRecord serving = ranked[0].beamRecord;
+        serving.state = LEOSIM_BEAM_CONNECTED;
+        serving.associationTime = Simulator::Now();
+        m_currentBeams[groundNodeId] = serving;
+        ++associatedNodes;
+        if (!m_beamStateCallback.IsNull())
+        {
+            m_beamStateCallback(groundNodeId, serving, ranked[0].topsisScore);
+        }
+    }
+
+    if (introducedNodes == 0)
+    {
+        return;
+    }
+    if (m_hoMode == LEOSIM_HO_MODE_CHO && associatedNodes > 0)
+    {
+        PreScheduleEphemerisHandovers(Seconds(600));
+    }
+    LogGroundNodeActivationBatch(introducedNodes);
+    NotifyAccessStateChanged();
+    NS_LOG_INFO("Activated ground-node batch: introduced="
+                << introducedNodes << ", associated=" << associatedNodes
+                << ", totalActive=" << m_activeGroundNodes.size());
+}
+
+void
 LeoSimBeamManager::Start(NodeContainer groundNodes,
                          NodeContainer satellites,
                          Time simStart,
@@ -3666,6 +3845,65 @@ LeoSimBeamManager::Start(NodeContainer groundNodes,
     m_satellites = satellites;
     m_simStart = simStart;
     m_simDuration = simDuration;
+    m_activeGroundNodes.clear();
+    m_groundNodeActivationBatchId = 0;
+    for (auto& event : m_groundNodeActivationEvents)
+    {
+        if (event.IsPending())
+        {
+            event.Cancel();
+        }
+    }
+    m_groundNodeActivationEvents.clear();
+
+    std::set<uint32_t> managedGroundNodeIds;
+    std::map<Time, std::vector<uint32_t>> activationBatches;
+    uint32_t initiallyActivatedScheduledNodes = 0;
+    for (uint32_t i = 0; i < groundNodes.GetN(); ++i)
+    {
+        Ptr<Node> groundNode = groundNodes.Get(i);
+        if (!groundNode)
+        {
+            continue;
+        }
+        const uint32_t groundNodeId = groundNode->GetId();
+        managedGroundNodeIds.insert(groundNodeId);
+        const auto activation = m_groundNodeActivationTimes.find(groundNodeId);
+        if (activation == m_groundNodeActivationTimes.end() || activation->second <= simStart)
+        {
+            m_activeGroundNodes.insert(groundNodeId);
+            initiallyActivatedScheduledNodes +=
+                activation != m_groundNodeActivationTimes.end() ? 1 : 0;
+            continue;
+        }
+        if (activation->second <= simStart + simDuration)
+        {
+            activationBatches[activation->second].push_back(groundNodeId);
+        }
+        else
+        {
+            NS_LOG_WARN("Ground node " << groundNodeId << " activation time "
+                                        << activation->second.GetSeconds()
+                                        << "s is outside the simulation window");
+        }
+    }
+    for (const auto& [groundNodeId, activationTime] : m_groundNodeActivationTimes)
+    {
+        (void)activationTime;
+        if (managedGroundNodeIds.count(groundNodeId) == 0)
+        {
+            NS_LOG_WARN("Activation schedule references unmanaged ground node " << groundNodeId);
+        }
+    }
+    for (const auto& [activationTime, groundNodeIds] : activationBatches)
+    {
+        const Time delay = std::max(Time(0), activationTime - Simulator::Now());
+        m_groundNodeActivationEvents.push_back(
+            Simulator::Schedule(delay,
+                                &LeoSimBeamManager::ActivateGroundNodeBatch,
+                                this,
+                                groundNodeIds));
+    }
 
     // SINR engine is required by ScanVisibleSatellites and intra-beam evaluation.
     // Initialize it lazily so callers do not need a separate wiring step.
@@ -3730,6 +3968,10 @@ LeoSimBeamManager::Start(NodeContainer groundNodes,
         }
 
         uint32_t ueNodeId = ueNode->GetId();
+        if (!IsGroundNodeActive(ueNodeId))
+        {
+            continue;
+        }
         std::vector<LeoSimBeamRecord> visible = ScanVisibleSatellites(ueNodeId);
         std::vector<LeoSimTopsisCandidate> ranked = RankByTopsis(visible, ueNodeId);
 
@@ -3750,6 +3992,8 @@ LeoSimBeamManager::Start(NodeContainer groundNodes,
         }
 
     }
+
+    LogGroundNodeActivationBatch(initiallyActivatedScheduledNodes);
 
     // Kick off ephemeris-based pre-scheduling once we have an initial serving beam.
     // Without this, TIME_BASED (TTE) handovers will only be scheduled after a
@@ -4312,6 +4556,19 @@ LeoSimBeamManager::Stop()
     {
         Simulator::Cancel(m_beamGeometryEventId);
         NS_LOG_DEBUG("Cancelled pending beam geometry update event");
+    }
+
+    for (auto& event : m_groundNodeActivationEvents)
+    {
+        if (event.IsPending())
+        {
+            event.Cancel();
+        }
+    }
+    m_groundNodeActivationEvents.clear();
+    if (m_groundNodeLifecycleCsv.is_open())
+    {
+        m_groundNodeLifecycleCsv.close();
     }
 
     // Cancel all TTT events

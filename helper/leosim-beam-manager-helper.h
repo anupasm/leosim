@@ -30,6 +30,7 @@
 #include "ns3/ipv4-flow-classifier.h"
 
 #include <array>
+#include <map>
 #include <string>
 
 namespace ns3
@@ -249,6 +250,12 @@ class LeoSimBeamManagerHelper
      */
     void SetUpdateInterval(Time interval);
 
+    /** Configure per-node activation times before Install(). */
+    void SetGroundNodeActivationTimes(const std::map<uint32_t, Time>& activationTimes);
+
+    /** Enable activation-batch lifecycle CSV output. */
+    void EnableGroundNodeLifecycleLogging(const std::string& filename);
+
     /** @} */
 
     /**
@@ -423,6 +430,8 @@ class LeoSimBeamManagerHelper
     Time m_choPreparationDelay;
     Time m_choExecutionDelay;
     Time m_updateInterval;
+    std::map<uint32_t, Time> m_groundNodeActivationTimes;
+    std::string m_groundNodeLifecycleFile;
 
     // Load balancing and buffering
     bool m_loadBalancingEnabled;
