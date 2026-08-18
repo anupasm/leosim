@@ -46,6 +46,17 @@ PING_PACKET_SIZE="${LEOSIM_PING_PACKET_SIZE:-1400}"
 PING_COUNT="${LEOSIM_PING_COUNT:-20}"
 PING_INTERVAL_MS="${LEOSIM_PING_INTERVAL_MS:-10}"
 
+# Preprocessing / coverage selection
+allocated_cpus="${SLURM_CPUS_PER_TASK:-1}"
+TLE_TIMESTEP="${LEOSIM_TLE_TIMESTEP:-5}"
+# alpha_ue_South_India = Chennai (13.0827 N, 80.2707 E); used to require that the
+# selected constellation also covers the South-India UE location.
+SOUTH_INDIA_LAT="${LEOSIM_SOUTH_INDIA_LAT:-13.0827}"
+SOUTH_INDIA_LON="${LEOSIM_SOUTH_INDIA_LON:-80.2707}"
+# 0 = use every satellite that covers the UE area or the South-India location;
+# otherwise cap the selection file to the first N IDs (sorted numerically).
+SELECTION_COUNT="${LEOSIM_SELECTION_COUNT:-0}"
+
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ns3_dir="${LEOSIM_NS3_ROOT:-}"
 if [[ -n "${ns3_dir}" ]]; then
@@ -112,25 +123,152 @@ elif [[ -d "${repo_root}/contrib/leosim/data" ]]; then
 else
     data_dir="${PWD}/data"
 fi
-satellite_trace="${data_dir}/prepro/satellite_mobility.tcl"
+
+# Python runner used for TLE -> ns-3 trace preprocessing and for the coverage-
+# based satellite selection. Host mode uses the repo virtualenv when present
+# (NumPy/Skyfield required for tle_to_positions.py); otherwise the Apptainer
+# image provides /opt/venv/bin/python.
+if [[ -n "${LEOSIM_PYTHON:-}" ]]; then
+    python_cmd=("${LEOSIM_PYTHON}")
+    python_scripts_dir="${repo_root}/contrib/leosim/utils"
+elif [[ -x "${ns3_dir}/ns3" ]]; then
+    python_cmd=()
+    for candidate in "${repo_root}/.venv/bin/python" /opt/venv/bin/python python3; do
+        if command -v "${candidate}" >/dev/null 2>&1 || [[ -x "${candidate}" ]]; then
+            if "${candidate}" -c 'import numpy, skyfield' >/dev/null 2>&1; then
+                python_cmd=("${candidate}")
+                break
+            fi
+        fi
+    done
+    if [[ ${#python_cmd[@]} -eq 0 ]]; then
+        echo "Host mode requires Python with NumPy and Skyfield for trace preprocessing." >&2
+        echo "Set LEOSIM_PYTHON to a suitable interpreter or use the Apptainer image." >&2
+        exit 2
+    fi
+    python_scripts_dir="${repo_root}/contrib/leosim/utils"
+else
+    if ! command -v apptainer >/dev/null 2>&1; then
+        echo "Apptainer is unavailable; no containerized runtime for preprocessing." >&2
+        exit 2
+    fi
+    if [[ ! -f "${SIF}" ]]; then
+        echo "Container image missing: ${SIF}" >&2
+        echo "Build it with utils/sonic/build_leosim_container.sh or set SIF explicitly." >&2
+        exit 2
+    fi
+    python_cmd=(apptainer exec --cleanenv \
+        --bind "${repo_root}:${repo_root}" \
+        --bind "${results_root}:${results_root}" \
+        "${SIF}" /opt/venv/bin/python)
+    python_scripts_dir="${CONTAINER_NS3_ROOT}/contrib/leosim/utils"
+fi
+
+# Preprocessed ns-3 mobility trace, generated per job from the data-b TLEs when a
+# valid copy is not already present. The repo's data-b/prepro trace is reused
+# (copied) when it is present and long enough.
+prepro_dir="${results_root}/_preprocessed"
+mkdir -p "${prepro_dir}"
+repo_trace="${data_dir}/prepro/satellite_mobility.tcl"
+repo_names="${repo_trace}.names.csv"
+satellite_trace="${prepro_dir}/satellite_mobility.tcl"
 satellite_names="${satellite_trace}.names.csv"
-if [[ ! -s "${satellite_trace}" || ! -s "${satellite_names}" ]]; then
-    echo "Missing preprocessed mobility trace: ${satellite_trace}" >&2
-    echo "Generate it with utils/tle_to_positions.py --ns3-format for ${SIM_TIME}s." >&2
-    exit 2
-fi
-prepared_satellites=$(awk 'END { print (NR > 0 ? NR - 1 : 0) }' "${satellite_names}")
-if [[ "${prepared_satellites}" -lt "${SATELLITE_COUNT}" ]]; then
-    echo "Mobility trace contains ${prepared_satellites} satellites; ${SATELLITE_COUNT} required." >&2
-    exit 2
-fi
-trace_duration=$(awk '
+
+trace_duration_awk='
     { for (i = 1; i <= NF; ++i) { if ($i == "at" && $(i+1) ~ /^[0-9.]+$/) { v = $(i+1) + 0; if (v > max) max = v } } }
-    END { print (max + 0) }' "${satellite_trace}")
-if [[ -z "${trace_duration}" || $(awk 'BEGIN { print ('"${trace_duration}"' < '"${SIM_TIME}"') ? 1 : 0 }') -eq 1 ]]; then
-    echo "Mobility trace covers ${trace_duration}s but ${SIM_TIME}s are required." >&2
-    exit 2
+    END { print (max + 0) }'
+
+prepare_trace() {
+    if [[ -s "${satellite_trace}" && -s "${satellite_names}" ]]; then
+        prepared_satellites=$(awk 'END { print (NR > 0 ? NR - 1 : 0) }' "${satellite_names}")
+        trace_duration=$(awk "${trace_duration_awk}" "${satellite_trace}")
+        if [[ "${prepared_satellites}" -ge "${SATELLITE_COUNT}" && -n "${trace_duration}" &&
+              $(awk 'BEGIN { print ('"${trace_duration}"' >= '"${SIM_TIME}"') ? 1 : 0 }') -eq 1 ]]; then
+            echo "Reusing prepared trace: ${satellite_trace} (${prepared_satellites} sats, ${trace_duration}s)"
+            return 0
+        fi
+    fi
+    if [[ -s "${repo_trace}" && -s "${repo_names}" ]]; then
+        repo_prepared=$(awk 'END { print (NR > 0 ? NR - 1 : 0) }' "${repo_names}")
+        repo_duration=$(awk "${trace_duration_awk}" "${repo_trace}")
+        if [[ "${repo_prepared}" -ge "${SATELLITE_COUNT}" && -n "${repo_duration}" &&
+              $(awk 'BEGIN { print ('"${repo_duration}"' >= '"${SIM_TIME}"') ? 1 : 0 }') -eq 1 ]]; then
+            echo "Copying repo mobility trace into ${prepro_dir} (${repo_prepared} sats, ${repo_duration}s)"
+            cp -f "${repo_trace}" "${satellite_trace}"
+            cp -f "${repo_names}" "${satellite_names}"
+            prepared_satellites="${repo_prepared}"
+            trace_duration="${repo_duration}"
+            return 0
+        fi
+    fi
+    if [[ ! -d "${data_dir}/tles" ]]; then
+        echo "No TLE directory for preprocessing: ${data_dir}/tles" >&2
+        exit 2
+    fi
+    echo "Generating ${SIM_TIME}s mobility trace from ${data_dir}/tles ..."
+    "${python_cmd[@]}" "${python_scripts_dir}/tle_to_positions.py" \
+        --input "${data_dir}/tles" \
+        --output "${prepro_dir}" \
+        --duration "${SIM_TIME}" \
+        --timestep "${TLE_TIMESTEP}" \
+        --workers "${allocated_cpus}" \
+        --ns3-format
+    if [[ ! -s "${satellite_trace}" || ! -s "${satellite_names}" ]]; then
+        echo "Trace generation did not produce the expected ns-3 outputs in ${prepro_dir}." >&2
+        exit 3
+    fi
+    prepared_satellites=$(awk 'END { print (NR > 0 ? NR - 1 : 0) }' "${satellite_names}")
+    trace_duration=$(awk "${trace_duration_awk}" "${satellite_trace}")
+}
+prepare_trace
+if [[ "${prepared_satellites}" -lt "${SATELLITE_COUNT}" ]]; then
+    echo "Prepared trace has ${prepared_satellites} satellites; ${SATELLITE_COUNT} required." >&2
+    exit 3
 fi
+if [[ -z "${trace_duration}" || $(awk 'BEGIN { print ('"${trace_duration}"' < '"${SIM_TIME}"') ? 1 : 0 }') -eq 1 ]]; then
+    echo "Prepared trace covers ${trace_duration}s but ${SIM_TIME}s are required." >&2
+    exit 3
+fi
+
+# Select the satellites that cover the UE area (data-b/ues) and the South-India
+# UE location (alpha_ue_South_India), then use their union as the constellation.
+coverage_ue_csv="${prepro_dir}/coverage-ue-area.csv"
+coverage_si_csv="${prepro_dir}/coverage-south-india.csv"
+satellite_selection="${prepro_dir}/satellite-selection.txt"
+echo "Selecting satellites covering the UE area and the South-India UE location ..."
+"${python_cmd[@]}" "${python_scripts_dir}/find_satellites_covering_ue_area.py" \
+    --data-dir "${data_dir}" \
+    --trace "${satellite_trace}" \
+    --names "${satellite_names}" \
+    --start 0 --duration "${SIM_TIME}" \
+    --sample-interval "${TLE_TIMESTEP}" \
+    --num-satellites 0 \
+    --mode any \
+    --output "${coverage_ue_csv}"
+"${python_cmd[@]}" "${python_scripts_dir}/find_satellites_covering_ue_area.py" \
+    --data-dir "${data_dir}" \
+    --trace "${satellite_trace}" \
+    --names "${satellite_names}" \
+    --location "${SOUTH_INDIA_LAT}" "${SOUTH_INDIA_LON}" \
+    --start 0 --duration "${SIM_TIME}" \
+    --sample-interval "${TLE_TIMESTEP}" \
+    --num-satellites 0 \
+    --mode any \
+    --output "${coverage_si_csv}"
+cat "${coverage_ue_csv}" "${coverage_si_csv}" \
+    | awk -F, 'NR>1 && $1 ~ /^[0-9]+$/ { print $1 }' \
+    | sort -n -u > "${satellite_selection}"
+selection_count=$(wc -l < "${satellite_selection}")
+if [[ "${selection_count}" -eq 0 ]]; then
+    echo "Coverage selection produced no satellites (check UE/TLE data)." >&2
+    exit 3
+fi
+if [[ "${SELECTION_COUNT}" -gt 0 && "${selection_count}" -gt "${SELECTION_COUNT}" ]]; then
+    head -n "${SELECTION_COUNT}" "${satellite_selection}" > "${satellite_selection}.tmp"
+    mv -f "${satellite_selection}.tmp" "${satellite_selection}"
+    selection_count="${SELECTION_COUNT}"
+fi
+echo "Coverage selection: ${selection_count} satellites cover the UE area and the South-India location."
 
 # Host ns-3 if available, otherwise the Apptainer image.
 if [[ -x "${ns3_dir}/ns3" ]]; then
@@ -175,7 +313,7 @@ else
     fi
 fi
 
-export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
+export OMP_NUM_THREADS="${allocated_cpus}"
 export NS_GLOBAL_VALUE="RngSeed=${RNG_SEED};RngRun=${RNG_RUN}"
 
 command_line="leosim-experiments \
@@ -183,7 +321,8 @@ command_line="leosim-experiments \
 --satellites=${satellite_trace} \
 --useTrace=1 \
 --simTime=${SIM_TIME} \
---numSatellites=${SATELLITE_COUNT} \
+--numSatellites=${selection_count} \
+--satelliteSelectionFile=${satellite_selection} \
 --numServers=${NUM_SERVERS} \
 --numUes=${NUM_UES} \
 --allToAllTraffic=0 \
@@ -197,7 +336,7 @@ command_line="leosim-experiments \
 --preHandoverPingIntervalMs=${PING_INTERVAL_MS} \
 --enableIsl=1 --maxIslNeighbors=4 \
 --enableDynamicRouting=1 --routingUpdateInterval=${UPDATE_INTERVAL} \
---useRouteTreeCache=1 --routeTreeWorkers=${SLURM_CPUS_PER_TASK:-1} \
+--useRouteTreeCache=1 --routeTreeWorkers=${allocated_cpus} \
 --routeTreeEngine=${route_tree_engine} \
 --routeTreeWorkDir=${route_tree_dir} \
 --hoMode=CHO --maxCandidates=3 --enableHoBuffering=1 --hoBufferSize=1024 \
@@ -218,6 +357,13 @@ command_line="leosim-experiments \
     echo "started_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "sim_time_s=${SIM_TIME}"
     echo "satellites=${SATELLITE_COUNT}"
+    echo "selected_satellites=${selection_count}"
+    echo "satellite_selection_file=${satellite_selection}"
+    echo "coverage_ue_area_csv=${coverage_ue_csv}"
+    echo "coverage_south_india_csv=${coverage_si_csv}"
+    echo "south_india_lat=${SOUTH_INDIA_LAT}"
+    echo "south_india_lon=${SOUTH_INDIA_LON}"
+    echo "tle_timestep=${TLE_TIMESTEP}"
     echo "num_servers=${NUM_SERVERS}"
     echo "num_ues=${NUM_UES}"
     echo "server_id=${SERVER_ID}"
@@ -234,6 +380,7 @@ command_line="leosim-experiments \
     echo "ns_global_value=${NS_GLOBAL_VALUE}"
     echo "data_dir=${data_dir}"
     echo "satellite_trace=${satellite_trace}"
+    echo "prepared_satellites=${prepared_satellites}"
     echo "trace_duration_s=${trace_duration}"
     echo "command=${command_line}"
     git -C "${repo_root}" rev-parse HEAD 2>/dev/null || echo "commit=unavailable"
