@@ -1,8 +1,21 @@
 #!/usr/bin/env bash
 
-# Submit all 37 tasks with one common eligibility time. Routing consists only
-# of the 27-task ALDSR campaign. The combined request is 46 CPUs:
-# scalability 3x4, ALDSR 27x1, handover 6x1, and alpha-GS handover-ping 1x1.
+# Submit one or more LeoSim campaigns with a common eligibility time.
+#
+# Usage:
+#   submit-all-experiments.sh [campaign[,campaign...]]
+#
+# campaign is one of: all | scalability | aldsr | handover | alpha-gs
+# (a comma-separated list selects several; the default is "all").
+#
+# Examples:
+#   submit-all-experiments.sh               # submit every campaign (37 tasks, 46 CPUs)
+#   submit-all-experiments.sh alpha-gs      # run ONLY the alpha-GS handover-ping experiment
+#   submit-all-experiments.sh handover,alpha-gs
+#   LEOSIM_CAMPAIGNS=alpha-gs submit-all-experiments.sh   # same via env
+#
+# CPU budget (47 total): scalability 3x4=12, ALDSR 27x1=27,
+# handover 6x1=6, alpha-gs 1x1=1.
 
 set -euo pipefail
 
@@ -17,21 +30,54 @@ submit() {
     sbatch --parsable --begin="${start_time}" "${node_args[@]}" "$@"
 }
 
-scalability_job=$(submit "${script_dir}/sonic-hop-scalability.sbatch")
-aldsr_job=$(submit "${script_dir}/run_aldsr_weight_search.sbatch")
-handover_job=$(submit \
-    --export="ALL,LEOSIM_RESULTS_ROOT=/scratch/adesilva/results/leosim-handover" \
-    "${script_dir}/sonic-handover-paper.sbatch")
-alpha_gs_job=$(submit \
-    --export="ALL,LEOSIM_RESULTS_ROOT=/scratch/adesilva/results/leosim-alpha-gs-handover-ping" \
-    "${script_dir}/sonic-alpha-gs-handover-ping.sbatch")
+# campaign -> "sbatch_file|tasks|cpus_per_task|export_args"
+declare -A CAMPAIGN_SPEC=(
+    [scalability]="sonic-hop-scalability.sbatch|3|4|"
+    [aldsr]="run_aldsr_weight_search.sbatch|27|1|"
+    [handover]="sonic-handover-paper.sbatch|6|1|LEOSIM_RESULTS_ROOT=/scratch/adesilva/results/leosim-handover"
+    [alpha-gs]="sonic-alpha-gs-handover-ping.sbatch|1|1|LEOSIM_RESULTS_ROOT=/scratch/adesilva/results/leosim-alpha-gs-handover-ping"
+)
 
-echo "Submitted all campaigns for ${start_time}:"
-echo "  scalability=${scalability_job} (3 tasks x 4 CPUs = 12)"
-echo "  routing/ALDSR=${aldsr_job} (27 tasks x 1 CPU = 27)"
-echo "  handover=${handover_job} (6 tasks x 1 CPU = 6)"
-echo "  alpha-gs-handover-ping=${alpha_gs_job} (1 task x 1 CPU = 1)"
-echo "  total=37 tasks, 46 CPUs; 1 of 47 CPUs remain free"
+requested="${1:-all}"
+if [[ -n "${LEOSIM_CAMPAIGNS:-}" ]]; then
+    requested="${LEOSIM_CAMPAIGNS}"
+fi
+
+if [[ "${requested}" == "all" ]]; then
+    selected=(scalability aldsr handover alpha-gs)
+else
+    IFS=',' read -r -a selected <<< "${requested}"
+    if [[ " ${selected[*]} " == *" all "* ]]; then
+        selected=(scalability aldsr handover alpha-gs)
+    fi
+fi
+
+campaign_jobs=()
+labels=()
+tasks=0
+cpus=0
+for campaign in "${selected[@]}"; do
+    [[ -z "${campaign}" ]] && continue
+    if [[ -z "${CAMPAIGN_SPEC[${campaign}]+x}" ]]; then
+        echo "Unknown campaign: ${campaign} (valid: all, scalability, aldsr, handover, alpha-gs)" >&2
+        exit 2
+    fi
+    IFS='|' read -r sbatch_file campaign_tasks campaign_cpus export_args <<< "${CAMPAIGN_SPEC[${campaign}]}"
+    if [[ -n "${export_args}" ]]; then
+        job=$(submit --export="ALL,${export_args}" "${script_dir}/${sbatch_file}")
+    else
+        job=$(submit "${script_dir}/${sbatch_file}")
+    fi
+    labels+=("${campaign}=${job} (${campaign_tasks} tasks x ${campaign_cpus} CPUs = $((campaign_tasks * campaign_cpus)))")
+    tasks=$((tasks + campaign_tasks))
+    cpus=$((cpus + campaign_tasks * campaign_cpus))
+done
+
+echo "Submitted ${#labels[@]} campaign(s) for ${start_time}:"
+for label in "${labels[@]}"; do
+    echo "  ${label}"
+done
+echo "  total=${tasks} tasks, ${cpus} CPUs; $((47 - cpus)) of 47 CPUs remain free"
 if [[ -z "${LEOSIM_NODE:-}" ]]; then
     echo "Set LEOSIM_NODE=<hostname> to pin all arrays to one specific server."
 fi
