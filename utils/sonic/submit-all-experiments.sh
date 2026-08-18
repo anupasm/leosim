@@ -21,6 +21,10 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 start_time=${LEOSIM_START_TIME:-now+2minutes}
+# CPUs for the alpha-GS job; used by its parallel TLE/route-tree stages. The
+# default keeps the full-campaign budget at 46 CPUs; raise it when running the
+# alpha-GS campaign alone (up to 47).
+alpha_gs_cpus=${LEOSIM_ALPHA_GS_CPUS:-1}
 node_args=()
 if [[ -n "${LEOSIM_NODE:-}" ]]; then
     node_args=(--nodelist="${LEOSIM_NODE}")
@@ -35,7 +39,7 @@ declare -A CAMPAIGN_SPEC=(
     [scalability]="sonic-hop-scalability.sbatch|3|4|"
     [aldsr]="run_aldsr_weight_search.sbatch|27|1|"
     [handover]="sonic-handover-paper.sbatch|6|1|LEOSIM_RESULTS_ROOT=/scratch/adesilva/results/leosim-handover"
-    [alpha-gs]="sonic-alpha-gs-handover-ping.sbatch|1|1|LEOSIM_RESULTS_ROOT=/scratch/adesilva/results/leosim-alpha-gs-handover-ping"
+    [alpha-gs]="sonic-alpha-gs-handover-ping.sbatch|1|${alpha_gs_cpus}|LEOSIM_RESULTS_ROOT=/scratch/adesilva/results/leosim-alpha-gs-handover-ping"
 )
 
 requested="${1:-all}"
@@ -64,9 +68,10 @@ for campaign in "${selected[@]}"; do
     fi
     IFS='|' read -r sbatch_file campaign_tasks campaign_cpus export_args <<< "${CAMPAIGN_SPEC[${campaign}]}"
     if [[ -n "${export_args}" ]]; then
-        job=$(submit --export="ALL,${export_args}" "${script_dir}/${sbatch_file}")
+        job=$(submit --cpus-per-task="${campaign_cpus}" \
+            --export="ALL,${export_args}" "${script_dir}/${sbatch_file}")
     else
-        job=$(submit "${script_dir}/${sbatch_file}")
+        job=$(submit --cpus-per-task="${campaign_cpus}" "${script_dir}/${sbatch_file}")
     fi
     labels+=("${campaign}=${job} (${campaign_tasks} tasks x ${campaign_cpus} CPUs = $((campaign_tasks * campaign_cpus)))")
     tasks=$((tasks + campaign_tasks))

@@ -2,7 +2,7 @@
 #SBATCH --job-name=leosim-alpha-gs
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=1
+#SBATCH --cpus-per-task=8
 #SBATCH --time=48:00:00
 #SBATCH --output=/scratch/adesilva/logs/leosim-alpha-gs-%A.out
 #SBATCH --error=/scratch/adesilva/logs/leosim-alpha-gs-%A.err
@@ -12,8 +12,10 @@
 # and an ICMP pre-handover ping burst (20 x 1400 B @ 10 ms) fired on every
 # alpha-GS handover.  SIM_TIME defaults to 1800 s.  The scenario is faithful
 # to the 200 s local pilot (leosim-alpha-gs-handover-ping-*) except for the
-# longer duration.  The batch deliberately uses --no-build so it never
-# modifies the shared ns-3 build tree.
+# longer duration.  The ns-3 core loop is single-threaded; the CPUs allocated
+# here are used by the parallel pre-simulation stages (TLE preprocessing and
+# route-tree cache build via --routeTreeWorkers).  The batch deliberately uses
+# --no-build so it never modifies the shared ns-3 build tree.
 
 set -euo pipefail
 
@@ -47,7 +49,7 @@ PING_COUNT="${LEOSIM_PING_COUNT:-20}"
 PING_INTERVAL_MS="${LEOSIM_PING_INTERVAL_MS:-10}"
 
 # Preprocessing / coverage selection
-allocated_cpus="${SLURM_CPUS_PER_TASK:-1}"
+allocated_cpus="${SLURM_CPUS_PER_TASK:-8}"
 TLE_TIMESTEP="${LEOSIM_TLE_TIMESTEP:-5}"
 # alpha_ue_South_India = Chennai (13.0827 N, 80.2707 E); used to require that the
 # selected constellation also covers the South-India UE location.
@@ -161,7 +163,17 @@ else
         --bind "${repo_root}:${repo_root}" \
         --bind "${results_root}:${results_root}" \
         "${SIF}" /opt/venv/bin/python)
-    python_scripts_dir="${CONTAINER_NS3_ROOT}/contrib/leosim/utils"
+    # Python utilities come from the bound host repo, NOT the image, so the SIF
+    # only needs the compiled leosim-experiments binary and /opt/venv. This
+    # avoids stale in-image copies (e.g. missing find_satellites_covering_ue_area.py).
+    python_scripts_dir="${repo_root}/contrib/leosim/utils"
+fi
+
+if [[ ! -f "${python_scripts_dir}/find_satellites_covering_ue_area.py" || \
+      ! -f "${python_scripts_dir}/tle_to_positions.py" ]]; then
+    echo "Missing LeoSim Python utilities in ${python_scripts_dir}" >&2
+    echo "Sync the repo (rsync) so contrib/leosim/utils is present on this host." >&2
+    exit 2
 fi
 
 # Preprocessed ns-3 mobility trace, generated per job from the data-b TLEs when a
@@ -295,6 +307,13 @@ else
         --pwd /opt/leosim/ns3 "${SIF}" ./ns3 run --no-build)
     route_tree_engine="${CONTAINER_NS3_ROOT}/contrib/leosim/utils/rengine/leosim-rengine"
     echo "Using containerized ns-3 from ${SIF}"
+    if ! apptainer exec --cleanenv --pwd /opt/leosim/ns3 "${SIF}" \
+        ./ns3 run "leosim-experiments --PrintHelp" --no-build 2>/dev/null \
+        | grep -q -- "--enablePreHandoverPing"; then
+        echo "Container leosim-experiments is missing --enablePreHandoverPing; rebuild the SIF." >&2
+        echo "Run utils/sonic/build_leosim_container.sh from the current repo." >&2
+        exit 2
+    fi
 fi
 
 if [[ -x "${ns3_dir}/ns3" ]]; then
