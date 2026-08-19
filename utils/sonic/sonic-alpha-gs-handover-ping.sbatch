@@ -49,28 +49,31 @@ RNG_SEED="${LEOSIM_RNG_SEED:-20260803}"
 RNG_RUN="${LEOSIM_RNG_RUN:-1}"
 UDP_RATE="${LEOSIM_UDP_RATE:-1Mbps}"
 UDP_PACKET_SIZE="${LEOSIM_UDP_PACKET_SIZE:-1400}"
-# Shared access/beam capacity and per-link access rate. For the neighbor-load
-# study, lower the beam capacity so the satellite pings + GS<->UE-0 contend for
-# the same beam; lower the per-UE access rate to tighten the access bottleneck.
+# Shared access/beam capacity and per-link access rate. Defaults are set to
+# the upper-realistic Starlink-V2 range (per beam ~0.5-3 Gbps DL / 100-500 Mbps
+# UL; per satellite ~20-80 Gbps DL / 5-10 Gbps UL; per-user ~100 Mbps access).
+# For a neighbor-load stress study, LOWER the beam capacity so the satellite
+# pings + GS<->UE-0 contend for the same beam (e.g. LEOSIM_BEAM_DOWNLINK_CAPACITY=10Mbps).
 ACCESS_DATA_RATE="${LEOSIM_ACCESS_DATA_RATE:-100Mbps}"
-BEAM_UL_CAP="${LEOSIM_BEAM_UPLINK_CAPACITY:-250Mbps}"
-BEAM_DL_CAP="${LEOSIM_BEAM_DOWNLINK_CAPACITY:-1Gbps}"
-SAT_UL_CAP="${LEOSIM_SATELLITE_UPLINK_CAPACITY:-5Gbps}"
-SAT_DL_CAP="${LEOSIM_SATELLITE_DOWNLINK_CAPACITY:-20Gbps}"
+BEAM_UL_CAP="${LEOSIM_BEAM_UPLINK_CAPACITY:-500Mbps}"
+BEAM_DL_CAP="${LEOSIM_BEAM_DOWNLINK_CAPACITY:-2Gbps}"
+SAT_UL_CAP="${LEOSIM_SATELLITE_UPLINK_CAPACITY:-10Gbps}"
+SAT_DL_CAP="${LEOSIM_SATELLITE_DOWNLINK_CAPACITY:-40Gbps}"
 # UE -> serving-satellite ICMP pings: every UE with index >= SAT_PING_START_INDEX
 # continuously pings whichever satellite it is currently connected to, following
 # handovers (the beam manager retargets each UE's ping on handover). UE-0 (index
-# 0) is skipped because it carries the GS<->UE UDP flows. Optionally ramp the
-# per-UE ping rate upward over the simulation (SAT_PING_LOAD_RAMP pings/sec per
-# second, capped at SAT_PING_MAX_RATE) so the aggregate access-link load grows
-# with time -- used to study how neighbor load affects the GS<->UE traffic.
+# 0) is skipped because it carries the GS<->UE UDP flows. The per-UE ping rate
+# ramps upward over the simulation (rate(t) = 1/interval + SAT_PING_LOAD_RAMP*t,
+# capped at SAT_PING_MAX_RATE) so the aggregate access-link load grows with time
+# -- used to study how neighbor load affects the GS<->UE traffic. Set
+# LEOSIM_SATELLITE_PING_LOAD_RAMP=0 for a constant ping load.
 SAT_PING_ENABLE="${LEOSIM_SATELLITE_PING_ENABLE:-1}"
 SAT_PING_START_INDEX="${LEOSIM_SATELLITE_PING_START_INDEX:-1}"
 SAT_PING_INTERVAL="${LEOSIM_SATELLITE_PING_INTERVAL:-1}"
 SAT_PING_PACKET_SIZE="${LEOSIM_SATELLITE_PING_PACKET_SIZE:-56}"
 SAT_PING_STAGGER="${LEOSIM_SATELLITE_PING_STAGGER_WINDOW:-1}"
-SAT_PING_LOAD_RAMP="${LEOSIM_SATELLITE_PING_LOAD_RAMP:-0}"
-SAT_PING_MAX_RATE="${LEOSIM_SATELLITE_PING_MAX_RATE:-50}"
+SAT_PING_LOAD_RAMP="${LEOSIM_SATELLITE_PING_LOAD_RAMP:-1}"
+SAT_PING_MAX_RATE="${LEOSIM_SATELLITE_PING_MAX_RATE:-200}"
 SAT_PING_RAMP_INTERVAL="${LEOSIM_SATELLITE_PING_RAMP_INTERVAL:-1}"
 # UE introduction: by default ALL UEs (UE-0 plus the 1,000 near-alpha_gs UEs)
 # are active from t=0 -- no batched introduction. To enable periodic batches
