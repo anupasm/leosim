@@ -41,6 +41,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -591,6 +592,266 @@ InstallBoundedUePings(NodeContainer ueNodes,
     return apps;
 }
 
+/**
+ * \brief Per-UE ICMP pinger that targets each UE's currently-connected satellite.
+ *
+ * Every UE with index >= satellitePingStartIndex keeps a continuous ICMP ping
+ * running to the satellite it is currently associated with (its serving beam).
+ * The destination follows handovers: whenever the beam manager reports a new
+ * serving satellite for a UE (via the per-UE beam-state callback), the previous
+ * ping is disposed and a fresh one is aimed at the new satellite's access-link
+ * address. Each ping runs in QUIET mode, so one aggregate delivery/RTT report is
+ * printed per (UE, serving-satellite) association. Pings are single-hop over the
+ * UE<->satellite access link, so they measure the direct access-link latency and
+ * do not require constellation route trees.
+ */
+class SatellitePinger
+{
+  public:
+    SatellitePinger(Ptr<LeoSimBeamManager> beamManager,
+                    LeoSimDeviceInstaller* accessInstaller,
+                    const NodeContainer& ueNodes,
+                    const NodeContainer& satelliteNodes,
+                    double interval,
+                    uint32_t packetSize,
+                    double stopTime,
+                    double rateRamp,
+                    double maxRate,
+                    double rampStep)
+        : m_beamManager(beamManager),
+          m_accessInstaller(accessInstaller),
+          m_interval(interval),
+          m_packetSize(packetSize),
+          m_stopTime(stopTime),
+          m_rateRamp(rateRamp),
+          m_maxRate(maxRate),
+          m_rampStep(rampStep),
+          m_rampStart(Simulator::Now())
+    {
+        for (uint32_t i = 0; i < ueNodes.GetN(); ++i)
+        {
+            Ptr<Node> ueNode = ueNodes.Get(i);
+            m_ueNodeById[ueNode->GetId()] = ueNode;
+        }
+        for (uint32_t i = 0; i < satelliteNodes.GetN(); ++i)
+        {
+            Ptr<Node> satellite = satelliteNodes.Get(i);
+            m_satNodeById[satellite->GetId()] = satellite;
+        }
+    }
+
+    /**
+     * Schedule a per-UE initial ping at each UE's (staggered) activation time.
+     * UEs already connected at that time get a ping immediately; UEs introduced
+     * later are handled by OnBeamState() when they first attach to a satellite.
+     */
+    void ScheduleInitialPings(NodeContainer ueNodes,
+                              uint32_t startIndex,
+                              double startTime,
+                              double stopTime,
+                              double staggerWindow,
+                              const std::vector<double>& ueActivationTimes)
+    {
+        const uint32_t count = ueNodes.GetN();
+        for (uint32_t i = startIndex; i < count; ++i)
+        {
+            const uint32_t ueNodeId = ueNodes.Get(i)->GetId();
+            const double activation = std::max(startTime, ueActivationTimes.at(i));
+            const double stagger = count > startIndex
+                                       ? staggerWindow * static_cast<double>(i - startIndex) /
+                                             static_cast<double>(count - startIndex)
+                                       : 0.0;
+            const double pingStart = activation + stagger;
+            if (pingStart >= stopTime)
+            {
+                continue;
+            }
+            Simulator::Schedule(Seconds(pingStart), [this, ueNodeId]() {
+                const LeoSimBeamRecord beam = m_beamManager->GetCurrentBeam(ueNodeId);
+                if (beam.satelliteNodeId != std::numeric_limits<uint32_t>::max())
+                {
+                    OnBeamState(ueNodeId, beam, 0.0);
+                }
+            });
+        }
+
+        // Optional: ramp the per-UE ping rate upward over the simulation so the
+        // aggregate access-link load grows with time (used to study how neighbor
+        // load affects the GS<->UE traffic).
+        if (m_rateRamp > 0.0)
+        {
+            m_rampEventId =
+                Simulator::Schedule(Seconds(m_rampStep), &SatellitePinger::RampLoad, this);
+        }
+    }
+
+    /** Current per-UE ping rate (pings/sec), grown by the load ramp. */
+    double CurrentRate() const
+    {
+        const double rate0 = 1.0 / m_interval;
+        const double elapsed = Simulator::Now().GetSeconds() - m_rampStart.GetSeconds();
+        return std::min(m_maxRate, std::max(rate0, rate0 + m_rateRamp * elapsed));
+    }
+
+    /** Current ping interval (seconds) corresponding to CurrentRate(). */
+    double CurrentInterval() const
+    {
+        return 1.0 / CurrentRate();
+    }
+
+    /**
+     * Periodic re-application of the ramped ping rate to every active ping.
+     * Ping::Send() re-reads its Interval attribute before each transmission, so
+     * updating it here raises the rate from the next request onward.
+     */
+    void RampLoad()
+    {
+        const double interval = CurrentInterval();
+        for (const auto& [ueNodeId, app] : m_pingApplications)
+        {
+            (void)ueNodeId;
+            if (app)
+            {
+                app->SetAttribute("Interval", TimeValue(Seconds(interval)));
+            }
+        }
+        m_rampEventId =
+            Simulator::Schedule(Seconds(m_rampStep), &SatellitePinger::RampLoad, this);
+    }
+
+    /** Called by the beam manager whenever a UE's serving beam changes. */
+    void OnBeamState(uint32_t ueNodeId, LeoSimBeamRecord beam, double /*score*/)
+    {
+        // GetCurrentBeam() uses UINT32_MAX (not 0) as the "no serving satellite"
+        // sentinel; satellite node id 0 is a real satellite in the container.
+        if (beam.satelliteNodeId == std::numeric_limits<uint32_t>::max())
+        {
+            return;
+        }
+        const auto target = m_targetSatellite.find(ueNodeId);
+        if (target != m_targetSatellite.end() && target->second == beam.satelliteNodeId)
+        {
+            return;
+        }
+        InstallPing(ueNodeId, beam.satelliteNodeId);
+    }
+
+  private:
+    Ipv4Address ResolveSatelliteLinkAddress(uint32_t ueNodeId, uint32_t satelliteNodeId) const
+    {
+        const auto ueIt = m_ueNodeById.find(ueNodeId);
+        const auto satIt = m_satNodeById.find(satelliteNodeId);
+        if (ueIt == m_ueNodeById.end() || satIt == m_satNodeById.end())
+        {
+            return Ipv4Address::GetAny();
+        }
+        Ptr<Ipv4> satIpv4 = satIt->second->GetObject<Ipv4>();
+        if (!satIpv4)
+        {
+            return Ipv4Address::GetAny();
+        }
+        const NetDeviceContainer linkDevices =
+            m_accessInstaller->GetDevicesForLink(ueIt->second, satIt->second);
+        for (uint32_t d = 0; d < linkDevices.GetN(); ++d)
+        {
+            Ptr<NetDevice> device = linkDevices.Get(d);
+            if (device->GetNode() != satIt->second)
+            {
+                continue;
+            }
+            const int32_t interface = satIpv4->GetInterfaceForDevice(device);
+            if (interface >= 0 && satIpv4->GetNAddresses(interface) > 0)
+            {
+                return satIpv4->GetAddress(interface, 0).GetLocal();
+            }
+        }
+        return Ipv4Address::GetAny();
+    }
+
+    void InstallPing(uint32_t ueNodeId, uint32_t satelliteNodeId)
+    {
+        // Never create a ping after the application window ends. A ping created
+        // so close to Simulator::Stop might never have its StartApplication event
+        // run; its report (Ping::PrintReport) then divides by m_seq == 0 and the
+        // process dies with SIGFPE at Simulator::Destroy.
+        if (Simulator::Now().GetSeconds() >= m_stopTime)
+        {
+            return;
+        }
+        const auto ueIt = m_ueNodeById.find(ueNodeId);
+        if (ueIt == m_ueNodeById.end())
+        {
+            return;
+        }
+        const Ipv4Address target = ResolveSatelliteLinkAddress(ueNodeId, satelliteNodeId);
+        if (target == Ipv4Address::GetAny())
+        {
+            return;
+        }
+
+        // Retire the previous ping to the old satellite, if any. A ping that was
+        // installed at this exact sim time has not started yet (its Initialize and
+        // Start events are still queued): disposing it there would leave those
+        // events pending (a stale ping to the old satellite) and call
+        // Ping::PrintReport with zero packets sent. Stopping it instead lets it
+        // send at most one stray ping and then stop cleanly.
+        const auto previous = m_pingApplications.find(ueNodeId);
+        if (previous != m_pingApplications.end() && previous->second)
+        {
+            const auto startIt = m_pingStartTime.find(ueNodeId);
+            if (startIt == m_pingStartTime.end() || Simulator::Now() > startIt->second)
+            {
+                previous->second->Dispose();
+            }
+            else
+            {
+                previous->second->SetStopTime(Simulator::Now());
+            }
+        }
+
+        PingHelper ping(target);
+        ping.SetAttribute("Interval", TimeValue(Seconds(CurrentInterval())));
+        ping.SetAttribute("Size", UintegerValue(m_packetSize));
+        ping.SetAttribute("Count", UintegerValue(0));
+        // QUIET emits one aggregate delivery/RTT report at shutdown, avoiding
+        // per-packet console overhead while keeping RTT to the serving satellite
+        // observable for each (UE, serving-satellite) association.
+        ping.SetAttribute("VerboseMode", EnumValue(Ping::QUIET));
+        ApplicationContainer apps = ping.Install(ueIt->second);
+        // Application::DoInitialize feeds m_startTime/m_stopTime into
+        // Simulator::Schedule, which treats its first argument as a RELATIVE delay
+        // (tAbsolute = delay + currentTs), while Ping::StartApplication reads
+        // m_stopTime as an ABSOLUTE time (delta = m_stopTime - Now()). The two only
+        // agree for apps created at setup (currentTs == 0). For mid-sim pings the
+        // only value satisfying both is a zero start (relative -> Start fires at
+        // Now()) plus an absolute stop (m_stopTime) so delta stays positive and
+        // Ping::PrintReport never divides by m_seq == 0. The Stop event that
+        // DoInitialize schedules at Now() + m_stopTime lands after Simulator::Stop,
+        // so it never fires and is harmless.
+        apps.Start(Seconds(0));
+        apps.Stop(Seconds(m_stopTime));
+        m_pingApplications[ueNodeId] = apps.Get(0);
+        m_targetSatellite[ueNodeId] = satelliteNodeId;
+        m_pingStartTime[ueNodeId] = Simulator::Now();
+    }
+
+    Ptr<LeoSimBeamManager> m_beamManager;
+    LeoSimDeviceInstaller* m_accessInstaller;
+    std::map<uint32_t, Ptr<Node>> m_ueNodeById;
+    std::map<uint32_t, Ptr<Node>> m_satNodeById;
+    std::map<uint32_t, uint32_t> m_targetSatellite;
+    std::map<uint32_t, Ptr<Application>> m_pingApplications;
+    std::map<uint32_t, Time> m_pingStartTime;
+    double m_interval;
+    uint32_t m_packetSize;
+    double m_stopTime;
+    double m_rateRamp;
+    double m_maxRate;
+    double m_rampStep;
+    Time m_rampStart;
+    EventId m_rampEventId;
+};
+
 void
 PrintFlowMonitorSummary(Ptr<FlowMonitor> monitor, Ptr<Ipv4FlowClassifier> classifier)
 {
@@ -657,7 +918,7 @@ main(int argc, char* argv[])
     bool beamDemandAware = true;
     double beamActiveUserTimeoutMs = 200.0;
     double beamCapacityUpdateIntervalMs = 100.0;
-    bool enableBeamCapacityLogging = true;
+    bool enableBeamCapacityLogging = false;
     std::string accessDelay = "1ms";
     std::string delayMode = "geometry";
     double delayUpdateInterval = 1.0;
@@ -720,6 +981,14 @@ main(int argc, char* argv[])
     double uePingInterval = 1.0;
     uint32_t uePingPacketSize = 56;
     double uePingStaggerWindow = 1.0;
+    bool enableSatellitePing = false;
+    uint32_t satellitePingStartIndex = 1;
+    double satellitePingInterval = 1.0;
+    uint32_t satellitePingPacketSize = 56;
+    double satellitePingStaggerWindow = 1.0;
+    double satellitePingLoadRamp = 0.0;
+    double satellitePingMaxRate = 50.0;
+    double satellitePingRampInterval = 1.0;
     bool enableDynamicGroundNodes = false;
     uint32_t initialUes = 0;
     double ueIntroductionStart = 30.0;
@@ -915,6 +1184,29 @@ main(int argc, char* argv[])
     cmd.AddValue("uePingStaggerWindow",
                  "Seconds over which UE-pair ping starts are evenly staggered",
                  uePingStaggerWindow);
+    cmd.AddValue("enableSatellitePing",
+                 "Install per-UE ICMP pings to each UE's currently-connected serving satellite",
+                 enableSatellitePing);
+    cmd.AddValue("satellitePingStartIndex",
+                 "First UE index that pings its serving satellite (1 skips the UE-0 traffic endpoint)",
+                 satellitePingStartIndex);
+    cmd.AddValue("satellitePingInterval",
+                 "Seconds between ICMP ping requests a UE sends to its serving satellite",
+                 satellitePingInterval);
+    cmd.AddValue("satellitePingPacketSize", "ICMP ping payload bytes for satellite pings",
+                 satellitePingPacketSize);
+    cmd.AddValue("satellitePingStaggerWindow",
+                 "Seconds over which per-UE satellite-ping starts are evenly staggered",
+                 satellitePingStaggerWindow);
+    cmd.AddValue("satellitePingLoadRamp",
+                 "Per-UE ping-rate growth in pings/sec per second of simulation (0 = constant)",
+                 satellitePingLoadRamp);
+    cmd.AddValue("satellitePingMaxRate",
+                 "Cap on per-UE ping rate (pings/sec) applied while the load ramp is active",
+                 satellitePingMaxRate);
+    cmd.AddValue("satellitePingRampInterval",
+                 "Seconds between ping-load ramp re-applications",
+                 satellitePingRampInterval);
     cmd.AddValue("udpRate", "Per-direction UDP CBR offered rate, e.g. 1Mbps", udpRate);
     cmd.AddValue("udpPacketSize", "UDP application packet size in bytes", udpPacketSize);
     cmd.AddValue("enableDynamicGroundNodes",
@@ -1029,6 +1321,15 @@ main(int argc, char* argv[])
     {
         NS_FATAL_ERROR("UE ping requires positive pair count/interval, payload >=16 bytes, and "
                        "non-negative stagger window");
+    }
+    if (enableSatellitePing &&
+        (satellitePingInterval <= 0.0 || satellitePingPacketSize < 16 ||
+         satellitePingStaggerWindow < 0.0 || satellitePingLoadRamp < 0.0 ||
+         satellitePingMaxRate <= 0.0 || satellitePingRampInterval <= 0.0))
+    {
+        NS_FATAL_ERROR("Satellite ping requires positive interval, payload >=16 bytes, "
+                       "non-negative stagger window, non-negative load ramp, and positive "
+                       "max rate and ramp interval");
     }
     if (uniqueOutputPrefix)
     {
@@ -1708,6 +2009,39 @@ main(int argc, char* argv[])
         visualizationHelper.SetBeamManager(beamManager);
     }
     timer.Log("beam manager installation");
+
+    // Optional: every UE except the UE-0 GS traffic endpoint continuously pings
+    // whichever satellite it is currently connected to, retargeted on handover.
+    // Declared here (outside the gate) so the beam-state callback and the
+    // scheduled initial pings stay valid for the whole Simulator::Run below.
+    SatellitePinger satellitePinger(beamManager,
+                                    &accessInstaller,
+                                    ueNodes,
+                                    satelliteNodes,
+                                    satellitePingInterval,
+                                    satellitePingPacketSize,
+                                    appStop,
+                                    satellitePingLoadRamp,
+                                    satellitePingMaxRate,
+                                    satellitePingRampInterval);
+    if (enableSatellitePing)
+    {
+        if (satellitePingStartIndex >= numUes)
+        {
+            NS_FATAL_ERROR("satellitePingStartIndex " << satellitePingStartIndex
+                                                      << " is outside the loaded UE subset ("
+                                                      << numUes << ")");
+        }
+        beamManager->SetBeamStateCallback(
+            MakeCallback(&SatellitePinger::OnBeamState, &satellitePinger));
+        satellitePinger.ScheduleInitialPings(ueNodes,
+                                             satellitePingStartIndex,
+                                             appStart,
+                                             appStop,
+                                             satellitePingStaggerWindow,
+                                             ueActivationTimes);
+    }
+    timer.Log("satellite ping setup");
 
     Ptr<LeoSimBeamCapacityManager> beamCapacityManager;
     if (enableSharedBeamCapacity)

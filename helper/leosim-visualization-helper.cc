@@ -1762,12 +1762,6 @@ LeoSimVisualizationHelper::LogHandoverEvent(const LeoSimHandoverEvent& evt)
     std::string routeChange = (evt.type == LEOSIM_HO_INTER_SATELLITE || evt.type == LEOSIM_HO_INTER_ORBIT)
                                   ? "true"
                                   : "false";
-    std::cout << "Logging handover event: time=" << timeMs << "ms, ue=" << evt.ueNodeId
-              << ", srcSat=" << evt.sourceSatId << ", tgtSat=" << evt.targetSatId
-              << ", srcBeam=" << evt.sourceBeamId << ", tgtBeam=" << evt.targetBeamId
-              << ", mode=" << mode << ", type=" << type << ", trigger=" << trigger
-              << ", latency=" << evt.handoverLatencyMs << "ms, success=" << evt.success
-              << std::endl;
     m_handoverFileStream << std::fixed << std::setprecision(1)
                          << timeMs << ","
                          << evt.ueNodeId << ","

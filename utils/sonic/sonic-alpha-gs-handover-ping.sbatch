@@ -7,16 +7,18 @@
 #SBATCH --output=/scratch/adesilva/logs/leosim-alpha-gs-%A.out
 #SBATCH --error=/scratch/adesilva/logs/leosim-alpha-gs-%A.err
 
-# Single-task LeoSim run for the alpha-GS UDP scenario: 500
-# satellites, 1 ground station server, 5000 UEs, and continuous bidirectional
-# CBR UDP flows (UE-0 <-> Server-0) replacing the old GS->UE ICMP ping bursts
-# and the single TCP flow.  SIM_TIME defaults to 1800 s.  The scenario is
-# faithful
-# to the 200 s local pilot (leosim-alpha-gs-handover-ping-*) except for the
-# longer duration.  The ns-3 core loop is single-threaded; the CPUs allocated
-# here are used by the parallel pre-simulation stages (TLE preprocessing and
-# route-tree cache build via --routeTreeWorkers).  The batch deliberately uses
-# --no-build so it never modifies the shared ns-3 build tree.
+# Single-task LeoSim run for the alpha-GS UDP scenario: the satellites that
+# cover the Sri-Lankan UE area are selected from the full constellation, giving
+# 1 ground station server, 1,001 UEs (alpha_ue_0 plus 1,000 UEs within 50 km of
+# alpha_gs, all active from t=0), continuous bidirectional CBR UDP between
+# UE-0 <-> Server-0, and every other UE continuously pinging its currently-
+# connected serving satellite (optionally with a ramped ping load). SIM_TIME
+# defaults to 1800 s; the scenario is faithful to the 200 s local pilot
+# (leosim-alpha-gs-sat-ping-*) except for the longer duration. The ns-3 core
+# loop is single-threaded; the CPUs allocated here are used by the parallel
+# pre-simulation stages (TLE preprocessing and route-tree cache build via
+# --routeTreeWorkers). The batch deliberately uses --no-build so it never
+# modifies the shared ns-3 build tree.
 
 set -euo pipefail
 
@@ -35,10 +37,9 @@ fi
 SIM_TIME="${LEOSIM_SIM_TIME:-1800}"
 SATELLITE_COUNT="${LEOSIM_SATELLITES:-500}"
 NUM_SERVERS="${LEOSIM_NUM_SERVERS:-1}"
-NUM_UES="${LEOSIM_NUM_UES:-3000}"
+NUM_UES="${LEOSIM_NUM_UES:-1001}"
 # Maximum candidate satellite access links per ground node per trajectory epoch.
-# 8 captures every simultaneously-visible satellite for the 500-sat coverage
-# selection; 4 keeps 2x handover redundancy at half the access-device/IP cost.
+# 4 keeps 2x handover redundancy at half the access-device/IP cost.
 MAX_ACCESS_SATS="${LEOSIM_MAX_ACCESS_SATS:-4}"
 SERVER_ID="${LEOSIM_SERVER_ID:-0}"
 UE_ID="${LEOSIM_UE_ID:-0}"
@@ -48,23 +49,43 @@ RNG_SEED="${LEOSIM_RNG_SEED:-20260803}"
 RNG_RUN="${LEOSIM_RNG_RUN:-1}"
 UDP_RATE="${LEOSIM_UDP_RATE:-1Mbps}"
 UDP_PACKET_SIZE="${LEOSIM_UDP_PACKET_SIZE:-1400}"
-# UE-to-UE ICMP pings between disjoint UE pairs (1 skips the UE-0 endpoint used
-# by the GS<->UE UDP flows).
-UE_PING_ENABLE="${LEOSIM_UE_PING_ENABLE:-1}"
-UE_PING_PAIRS="${LEOSIM_UE_PING_PAIRS:-100}"
-UE_PING_INTERVAL="${LEOSIM_UE_PING_INTERVAL:-1}"
-UE_PING_PACKET_SIZE="${LEOSIM_UE_PING_PACKET_SIZE:-56}"
-UE_PING_STAGGER="${LEOSIM_UE_PING_STAGGER_WINDOW:-1}"
+# Shared access/beam capacity and per-link access rate. For the neighbor-load
+# study, lower the beam capacity so the satellite pings + GS<->UE-0 contend for
+# the same beam; lower the per-UE access rate to tighten the access bottleneck.
+ACCESS_DATA_RATE="${LEOSIM_ACCESS_DATA_RATE:-100Mbps}"
+BEAM_UL_CAP="${LEOSIM_BEAM_UPLINK_CAPACITY:-250Mbps}"
+BEAM_DL_CAP="${LEOSIM_BEAM_DOWNLINK_CAPACITY:-1Gbps}"
+SAT_UL_CAP="${LEOSIM_SATELLITE_UPLINK_CAPACITY:-5Gbps}"
+SAT_DL_CAP="${LEOSIM_SATELLITE_DOWNLINK_CAPACITY:-20Gbps}"
+# UE -> serving-satellite ICMP pings: every UE with index >= SAT_PING_START_INDEX
+# continuously pings whichever satellite it is currently connected to, following
+# handovers (the beam manager retargets each UE's ping on handover). UE-0 (index
+# 0) is skipped because it carries the GS<->UE UDP flows. Optionally ramp the
+# per-UE ping rate upward over the simulation (SAT_PING_LOAD_RAMP pings/sec per
+# second, capped at SAT_PING_MAX_RATE) so the aggregate access-link load grows
+# with time -- used to study how neighbor load affects the GS<->UE traffic.
+SAT_PING_ENABLE="${LEOSIM_SATELLITE_PING_ENABLE:-1}"
+SAT_PING_START_INDEX="${LEOSIM_SATELLITE_PING_START_INDEX:-1}"
+SAT_PING_INTERVAL="${LEOSIM_SATELLITE_PING_INTERVAL:-1}"
+SAT_PING_PACKET_SIZE="${LEOSIM_SATELLITE_PING_PACKET_SIZE:-56}"
+SAT_PING_STAGGER="${LEOSIM_SATELLITE_PING_STAGGER_WINDOW:-1}"
+SAT_PING_LOAD_RAMP="${LEOSIM_SATELLITE_PING_LOAD_RAMP:-0}"
+SAT_PING_MAX_RATE="${LEOSIM_SATELLITE_PING_MAX_RATE:-50}"
+SAT_PING_RAMP_INTERVAL="${LEOSIM_SATELLITE_PING_RAMP_INTERVAL:-1}"
+# UE introduction: by default ALL UEs (UE-0 plus the 1,000 near-alpha_gs UEs)
+# are active from t=0 -- no batched introduction. To enable periodic batches
+# instead, override LEOSIM_INITIAL_UES to a smaller value (must be >= 1).
+UE_DYNAMIC_ENABLE="${LEOSIM_ENABLE_DYNAMIC_GROUND_NODES:-1}"
+UE_INITIAL="${LEOSIM_INITIAL_UES:-${NUM_UES}}"
+UE_INTRO_START="${LEOSIM_UE_INTRODUCTION_START:-30}"
+UE_INTRO_INTERVAL="${LEOSIM_UE_INTRODUCTION_INTERVAL:-10}"
+UE_INTRO_BATCH="${LEOSIM_UES_PER_INTRODUCTION:-100}"
 
 # Preprocessing / coverage selection
 allocated_cpus="${SLURM_CPUS_PER_TASK:-8}"
 TLE_TIMESTEP="${LEOSIM_TLE_TIMESTEP:-5}"
-# alpha_ue_South_India = Chennai (13.0827 N, 80.2707 E); used to require that the
-# selected constellation also covers the South-India UE location.
-SOUTH_INDIA_LAT="${LEOSIM_SOUTH_INDIA_LAT:-13.0827}"
-SOUTH_INDIA_LON="${LEOSIM_SOUTH_INDIA_LON:-80.2707}"
-# 0 = use every satellite that covers the UE area or the South-India location;
-# otherwise cap the selection file to the first N IDs (sorted numerically).
+# 0 = use every satellite that covers the UE area; otherwise cap the selection
+# file to the first N IDs (sorted numerically).
 SELECTION_COUNT="${LEOSIM_SELECTION_COUNT:-0}"
 
 # --- Diagnostics -------------------------------------------------------------
@@ -270,12 +291,11 @@ if [[ -z "${trace_duration}" || $(awk 'BEGIN { print ('"${trace_duration}"' < '"
 fi
 stage "trace ready: ${prepared_satellites} sats over ${trace_duration}s -> ${satellite_trace}"
 
-# Select the satellites that cover the UE area (data-b/ues) and the South-India
-# UE location (alpha_ue_South_India), then use their union as the constellation.
+# Select the satellites that cover the UE area (data-b/ues) and use them as the
+# constellation (matches the local pilot's satellite-selection.txt).
 coverage_ue_csv="${prepro_dir}/coverage-ue-area.csv"
-coverage_si_csv="${prepro_dir}/coverage-south-india.csv"
 satellite_selection="${prepro_dir}/satellite-selection.txt"
-echo "Selecting satellites covering the UE area and the South-India UE location ..."
+echo "Selecting satellites covering the UE area ..."
 "${python_cmd[@]}" "${python_scripts_dir}/find_satellites_covering_ue_area.py" \
     --data-dir "${data_dir}" \
     --trace "${satellite_trace}" \
@@ -285,18 +305,7 @@ echo "Selecting satellites covering the UE area and the South-India UE location 
     --num-satellites 0 \
     --mode any \
     --output "${coverage_ue_csv}"
-"${python_cmd[@]}" "${python_scripts_dir}/find_satellites_covering_ue_area.py" \
-    --data-dir "${data_dir}" \
-    --trace "${satellite_trace}" \
-    --names "${satellite_names}" \
-    --location "${SOUTH_INDIA_LAT}" "${SOUTH_INDIA_LON}" \
-    --start 0 --duration "${SIM_TIME}" \
-    --sample-interval "${TLE_TIMESTEP}" \
-    --num-satellites 0 \
-    --mode any \
-    --output "${coverage_si_csv}"
-cat "${coverage_ue_csv}" "${coverage_si_csv}" \
-    | awk -F, 'NR>1 && $1 ~ /^[0-9]+$/ { print $1 }' \
+awk -F, 'NR>1 && $1 ~ /^[0-9]+$/ { print $1 }' "${coverage_ue_csv}" \
     | sort -n -u > "${satellite_selection}"
 selection_count=$(wc -l < "${satellite_selection}")
 if [[ "${selection_count}" -eq 0 ]]; then
@@ -308,7 +317,7 @@ if [[ "${SELECTION_COUNT}" -gt 0 && "${selection_count}" -gt "${SELECTION_COUNT}
     mv -f "${satellite_selection}.tmp" "${satellite_selection}"
     selection_count="${SELECTION_COUNT}"
 fi
-echo "Coverage selection: ${selection_count} satellites cover the UE area and the South-India location."
+echo "Coverage selection: ${selection_count} satellites cover the UE area."
 stage "selection ready: ${selection_count} sats -> ${satellite_selection}"
 
 # Host ns-3 if available, otherwise the Apptainer image.
@@ -378,9 +387,21 @@ command_line="leosim-experiments \
 --serverId=${SERVER_ID} --ueId=${UE_ID} \
 --appStart=1 --appStop=$((SIM_TIME - 1)) \
 --udpRate=${UDP_RATE} --udpPacketSize=${UDP_PACKET_SIZE} \
---enableUePing=${UE_PING_ENABLE} --uePingPairs=${UE_PING_PAIRS} \
---uePingInterval=${UE_PING_INTERVAL} --uePingPacketSize=${UE_PING_PACKET_SIZE} \
---uePingStaggerWindow=${UE_PING_STAGGER} \
+--accessDataRate=${ACCESS_DATA_RATE} \
+--beamUplinkCapacity=${BEAM_UL_CAP} --beamDownlinkCapacity=${BEAM_DL_CAP} \
+--satelliteUplinkCapacity=${SAT_UL_CAP} --satelliteDownlinkCapacity=${SAT_DL_CAP} \
+--enableBeamCapacityLogging=0 \
+--enableSatellitePing=${SAT_PING_ENABLE} \
+--satellitePingStartIndex=${SAT_PING_START_INDEX} \
+--satellitePingInterval=${SAT_PING_INTERVAL} \
+--satellitePingPacketSize=${SAT_PING_PACKET_SIZE} \
+--satellitePingStaggerWindow=${SAT_PING_STAGGER} \
+--satellitePingLoadRamp=${SAT_PING_LOAD_RAMP} \
+--satellitePingMaxRate=${SAT_PING_MAX_RATE} \
+--satellitePingRampInterval=${SAT_PING_RAMP_INTERVAL} \
+--enableDynamicGroundNodes=${UE_DYNAMIC_ENABLE} --initialUes=${UE_INITIAL} \
+--ueIntroductionStart=${UE_INTRO_START} --ueIntroductionInterval=${UE_INTRO_INTERVAL} \
+--uesPerIntroduction=${UE_INTRO_BATCH} --enableGroundNodeLifecycleLogging=1 \
 --enableIsl=1 --maxIslNeighbors=4 --maxAccessSatellites=${MAX_ACCESS_SATS} \
 --enableSyntheticIslLoad=0 --enableIslLoadLogging=0 \
 --enableDynamicRouting=1 --routingUpdateInterval=${UPDATE_INTERVAL} \
@@ -408,9 +429,6 @@ command_line="leosim-experiments \
     echo "selected_satellites=${selection_count}"
     echo "satellite_selection_file=${satellite_selection}"
     echo "coverage_ue_area_csv=${coverage_ue_csv}"
-    echo "coverage_south_india_csv=${coverage_si_csv}"
-    echo "south_india_lat=${SOUTH_INDIA_LAT}"
-    echo "south_india_lon=${SOUTH_INDIA_LON}"
     echo "tle_timestep=${TLE_TIMESTEP}"
     echo "num_servers=${NUM_SERVERS}"
     echo "num_ues=${NUM_UES}"
@@ -420,10 +438,25 @@ command_line="leosim-experiments \
     echo "all_to_all_traffic=0"
     echo "udp_rate=${UDP_RATE}"
     echo "udp_packet_size=${UDP_PACKET_SIZE}"
-    echo "ue_ping_enabled=${UE_PING_ENABLE}"
-    echo "ue_ping_pairs=${UE_PING_PAIRS}"
-    echo "ue_ping_interval=${UE_PING_INTERVAL}"
-    echo "synthetic_isl_load=0"
+    echo "access_data_rate=${ACCESS_DATA_RATE}"
+    echo "beam_uplink_capacity=${BEAM_UL_CAP}"
+    echo "beam_downlink_capacity=${BEAM_DL_CAP}"
+    echo "satellite_uplink_capacity=${SAT_UL_CAP}"
+    echo "satellite_downlink_capacity=${SAT_DL_CAP}"
+    echo "beam_capacity_logging=0"
+    echo "satellite_ping_enabled=${SAT_PING_ENABLE}"
+    echo "satellite_ping_start_index=${SAT_PING_START_INDEX}"
+    echo "satellite_ping_interval=${SAT_PING_INTERVAL}"
+    echo "satellite_ping_packet_size=${SAT_PING_PACKET_SIZE}"
+    echo "satellite_ping_stagger_window=${SAT_PING_STAGGER}"
+    echo "satellite_ping_load_ramp_pps_per_s=${SAT_PING_LOAD_RAMP}"
+    echo "satellite_ping_max_rate_pps=${SAT_PING_MAX_RATE}"
+    echo "satellite_ping_ramp_interval_s=${SAT_PING_RAMP_INTERVAL}"
+    echo "dynamic_ue_introduction=${UE_DYNAMIC_ENABLE}"
+    echo "initial_ues=${UE_INITIAL}"
+    echo "ue_introduction_start=${UE_INTRO_START}"
+    echo "ue_introduction_interval=${UE_INTRO_INTERVAL}"
+    echo "ues_per_introduction=${UE_INTRO_BATCH}"
     echo "routing_update_interval_s=${UPDATE_INTERVAL}"
     echo "beam_update_interval_ms=${BEAM_UPDATE_INTERVAL_MS}"
     echo "ns_global_value=${NS_GLOBAL_VALUE}"
