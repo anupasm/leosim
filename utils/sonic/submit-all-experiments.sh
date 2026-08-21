@@ -9,22 +9,22 @@
 # (a comma-separated list selects several; the default is "all").
 #
 # Examples:
-#   submit-all-experiments.sh               # submit every campaign (37 tasks, 46 CPUs)
+#   submit-all-experiments.sh               # submit every campaign (Slurm schedules to capacity)
 #   submit-all-experiments.sh alpha-gs      # run ONLY the alpha-GS handover-ping experiment
 #   submit-all-experiments.sh handover,alpha-gs
 #   LEOSIM_CAMPAIGNS=alpha-gs submit-all-experiments.sh   # same via env
 #
-# CPU budget (47 total): scalability 3x4=12, ALDSR 27x1=27,
-# handover 6x1=6, alpha-gs 1x1=1.
+# CPU requests (47 CPUs available): scalability 3x4=12, ALDSR 27x1=27,
+# handover 6x1=6, alpha-gs 2x23=46. When several campaigns are selected,
+# Slurm queues whichever jobs cannot run concurrently on the server.
 
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 start_time=${LEOSIM_START_TIME:-now+2minutes}
-# CPUs for the alpha-GS job; used by its parallel TLE/route-tree stages. The
-# default keeps the full-campaign budget at 46 CPUs; raise it when running the
-# alpha-GS campaign alone (up to 47).
-alpha_gs_cpus=${LEOSIM_ALPHA_GS_CPUS:-1}
+# CPUs per task for the two parallel alpha-GS variants (ping and control).
+# Two tasks x 23 CPUs use 46 of the server's 47 CPUs.
+alpha_gs_cpus=${LEOSIM_ALPHA_GS_CPUS:-23}
 node_args=()
 if [[ -n "${LEOSIM_NODE:-}" ]]; then
     node_args=(--nodelist="${LEOSIM_NODE}")
@@ -39,7 +39,7 @@ declare -A CAMPAIGN_SPEC=(
     [scalability]="sonic-hop-scalability.sbatch|3|4|"
     [aldsr]="run_aldsr_weight_search.sbatch|27|1|"
     [handover]="sonic-handover-paper.sbatch|6|1|LEOSIM_RESULTS_ROOT=/scratch/adesilva/results/leosim-handover"
-    [alpha-gs]="sonic-alpha-gs-handover-ping.sbatch|1|${alpha_gs_cpus}|LEOSIM_RESULTS_ROOT=/scratch/adesilva/results/leosim-alpha-gs-handover-ping"
+    [alpha-gs]="sonic-alpha-gs-handover-ping.sbatch|2|${alpha_gs_cpus}|LEOSIM_RESULTS_ROOT=/scratch/adesilva/results/leosim-alpha-gs-handover-ping,LEOSIM_SIM_TIME=1200"
 )
 
 requested="${1:-all}"
@@ -82,7 +82,12 @@ echo "Submitted ${#labels[@]} campaign(s) for ${start_time}:"
 for label in "${labels[@]}"; do
     echo "  ${label}"
 done
-echo "  total=${tasks} tasks, ${cpus} CPUs; $((47 - cpus)) of 47 CPUs remain free"
+if [[ "${cpus}" -le 47 ]]; then
+    echo "  total=${tasks} tasks, ${cpus} CPUs; $((47 - cpus)) of 47 CPUs remain free"
+else
+    echo "  total=${tasks} tasks, ${cpus} CPUs requested across campaigns"
+    echo "  request exceeds 47 concurrent CPUs by $((cpus - 47)); Slurm will queue jobs to fit"
+fi
 if [[ -z "${LEOSIM_NODE:-}" ]]; then
     echo "Set LEOSIM_NODE=<hostname> to pin all arrays to one specific server."
 fi

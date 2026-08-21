@@ -1,24 +1,25 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=leosim-alpha-gs
 #SBATCH --nodes=1
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
+#SBATCH --ntasks=2
+#SBATCH --cpus-per-task=23
 #SBATCH --time=48:00:00
 #SBATCH --output=/scratch/adesilva/logs/leosim-alpha-gs-%A.out
 #SBATCH --error=/scratch/adesilva/logs/leosim-alpha-gs-%A.err
 
-# Single-task LeoSim run for the alpha-GS UDP scenario: the satellites that
+# Paired LeoSim run for the alpha-GS UDP scenario: the satellites that
 # cover the Sri-Lankan UE area are selected from the full constellation, giving
 # 1 ground station server, 1,001 UEs (alpha_ue_0 plus 1,000 UEs within 50 km of
 # alpha_gs, all active from t=0), continuous bidirectional CBR UDP between
-# UE-0 <-> Server-0, and every other UE continuously pinging its currently-
-# connected serving satellite (optionally with a ramped ping load). SIM_TIME
-# defaults to 1800 s; the scenario is faithful to the 200 s local pilot
-# (leosim-alpha-gs-sat-ping-*) except for the longer duration. The ns-3 core
-# loop is single-threaded; the CPUs allocated here are used by the parallel
-# pre-simulation stages (TLE preprocessing and route-tree cache build via
-# --routeTreeWorkers). The batch deliberately uses --no-build so it never
-# modifies the shared ns-3 build tree.
+# UE-0 <-> Server-0, and two matched simulations running concurrently:
+#   1) ping: UEs 1..N continuously ping their serving satellite, with the
+#      per-UE rate ramped across the application window to 250 pings/s;
+#   2) control: no ICMP pings, only the UE-0 <-> Server-0 UDP traffic.
+# Both simulations use the same trace, selected satellites, topology, traffic,
+# and RNG seed/run, but have isolated result and route-tree directories. The
+# ns-3 core loop is single-threaded; each Slurm task also receives CPUs for the
+# parallel route-tree cache build. The batch deliberately uses --no-build so it
+# never modifies the shared ns-3 build tree.
 
 set -euo pipefail
 
@@ -34,7 +35,7 @@ if command -v module >/dev/null 2>&1; then
 fi
 
 # --- Configuration (all overridable via environment) -------------------------
-SIM_TIME="${LEOSIM_SIM_TIME:-1800}"
+SIM_TIME="${LEOSIM_SIM_TIME:-1200}"
 SATELLITE_COUNT="${LEOSIM_SATELLITES:-500}"
 NUM_SERVERS="${LEOSIM_NUM_SERVERS:-1}"
 NUM_UES="${LEOSIM_NUM_UES:-1001}"
@@ -59,21 +60,25 @@ BEAM_UL_CAP="${LEOSIM_BEAM_UPLINK_CAPACITY:-500Mbps}"
 BEAM_DL_CAP="${LEOSIM_BEAM_DOWNLINK_CAPACITY:-2Gbps}"
 SAT_UL_CAP="${LEOSIM_SATELLITE_UPLINK_CAPACITY:-10Gbps}"
 SAT_DL_CAP="${LEOSIM_SATELLITE_DOWNLINK_CAPACITY:-40Gbps}"
-# UE -> serving-satellite ICMP pings: every UE with index >= SAT_PING_START_INDEX
+# UE -> serving-satellite ICMP pings in the ping experiment: every UE with index
+# >= SAT_PING_START_INDEX
 # continuously pings whichever satellite it is currently connected to, following
 # handovers (the beam manager retargets each UE's ping on handover). UE-0 (index
-# 0) is skipped because it carries the GS<->UE UDP flows. The per-UE ping rate
-# ramps upward over the simulation (rate(t) = 1/interval + SAT_PING_LOAD_RAMP*t,
-# capped at SAT_PING_MAX_RATE) so the aggregate access-link load grows with time
-# -- used to study how neighbor load affects the GS<->UE traffic. Set
-# LEOSIM_SATELLITE_PING_LOAD_RAMP=0 for a constant ping load.
-SAT_PING_ENABLE="${LEOSIM_SATELLITE_PING_ENABLE:-1}"
+# 0) is skipped because it carries the GS<->UE UDP flows. By default, the
+# per-UE rate increases linearly from 1 ping/s to 250 pings/s at appStop, so the
+# load is distributed across the full simulation rather than reaching its cap
+# near the beginning. LEOSIM_SATELLITE_PING_LOAD_RAMP can override the computed
+# slope; set it to 0 for a constant one-ping/s load.
 SAT_PING_START_INDEX="${LEOSIM_SATELLITE_PING_START_INDEX:-1}"
 SAT_PING_INTERVAL="${LEOSIM_SATELLITE_PING_INTERVAL:-1}"
 SAT_PING_PACKET_SIZE="${LEOSIM_SATELLITE_PING_PACKET_SIZE:-56}"
 SAT_PING_STAGGER="${LEOSIM_SATELLITE_PING_STAGGER_WINDOW:-1}"
-SAT_PING_LOAD_RAMP="${LEOSIM_SATELLITE_PING_LOAD_RAMP:-1}"
-SAT_PING_MAX_RATE="${LEOSIM_SATELLITE_PING_MAX_RATE:-200}"
+SAT_PING_MAX_RATE="${LEOSIM_SATELLITE_PING_MAX_RATE:-250}"
+ping_app_stop=$((SIM_TIME - 1))
+default_ping_ramp=$(awk -v max_rate="${SAT_PING_MAX_RATE}" \
+    -v interval="${SAT_PING_INTERVAL}" -v stop="${ping_app_stop}" \
+    'BEGIN { base = 1.0 / interval; ramp = (max_rate > base && stop > 0) ? (max_rate - base) / stop : 0; printf "%.12g\n", ramp }')
+SAT_PING_LOAD_RAMP="${LEOSIM_SATELLITE_PING_LOAD_RAMP:-${default_ping_ramp}}"
 SAT_PING_RAMP_INTERVAL="${LEOSIM_SATELLITE_PING_RAMP_INTERVAL:-1}"
 # UE introduction: by default ALL UEs (UE-0 plus the 1,000 near-alpha_gs UEs)
 # are active from t=0 -- no batched introduction. To enable periodic batches
@@ -85,7 +90,7 @@ UE_INTRO_INTERVAL="${LEOSIM_UE_INTRODUCTION_INTERVAL:-10}"
 UE_INTRO_BATCH="${LEOSIM_UES_PER_INTRODUCTION:-100}"
 
 # Preprocessing / coverage selection
-allocated_cpus="${SLURM_CPUS_PER_TASK:-8}"
+allocated_cpus="${SLURM_CPUS_PER_TASK:-23}"
 TLE_TIMESTEP="${LEOSIM_TLE_TIMESTEP:-5}"
 # 0 = use every satellite that covers the UE area; otherwise cap the selection
 # file to the first N IDs (sorted numerically).
@@ -168,13 +173,19 @@ case "${base_results_root}" in
     *) echo "LEOSIM_RESULTS_ROOT must be under /scratch/adesilva: ${base_results_root}" >&2; exit 2 ;;
 esac
 results_root="${base_results_root}/${SLURM_JOB_ID}"
-run_id="alpha-gs-udp_sats-${SATELLITE_COUNT}_ues-${NUM_UES}_gss-${NUM_SERVERS}_duration-${SIM_TIME}s"
-run_dir="${results_root}/${run_id}"
+run_id="alpha-gs-udp-paired_sats-${SATELLITE_COUNT}_ues-${NUM_UES}_gss-${NUM_SERVERS}_duration-${SIM_TIME}s"
+pair_dir="${results_root}/${run_id}"
+ping_run_dir="${pair_dir}/ping"
+control_run_dir="${pair_dir}/control"
 output_stem="result-job${SLURM_JOB_ID}-restart${SLURM_RESTART_COUNT:-0}-pid$$"
-output_prefix="${run_dir}/${output_stem}"
-route_tree_dir="/scratch/adesilva/tmp/leosim-route-trees-${SLURM_JOB_ID}"
-mkdir -p "${run_dir}" "${route_tree_dir}"
-stage "job preparing: run_dir=${run_dir}, cpus=${allocated_cpus}"
+ping_output_prefix="${ping_run_dir}/${output_stem}"
+control_output_prefix="${control_run_dir}/${output_stem}"
+route_tree_root="/scratch/adesilva/tmp/leosim-route-trees-${SLURM_JOB_ID}"
+ping_route_tree_dir="${route_tree_root}/ping"
+control_route_tree_dir="${route_tree_root}/control"
+mkdir -p "${ping_run_dir}" "${control_run_dir}" \
+    "${ping_route_tree_dir}" "${control_route_tree_dir}"
+stage "job preparing: pair_dir=${pair_dir}, tasks=2, cpus_per_task=${allocated_cpus}"
 
 # Data directory: prefer the data-b dataset used by the local pilot.
 if [[ -d "${leo_module_root}/data-b" ]]; then
@@ -344,7 +355,7 @@ else
     ns3_cmd=(apptainer exec --cleanenv \
         --bind "${repo_root}:${repo_root}" \
         --bind "${results_root}:${results_root}" \
-        --bind "${route_tree_dir}:${route_tree_dir}" \
+        --bind "${route_tree_root}:${route_tree_root}" \
         --pwd /opt/leosim/ns3 "${SIF}" ./ns3 run --no-build)
     route_tree_engine="${CONTAINER_NS3_ROOT}/contrib/leosim/utils/rengine/leosim-rengine"
     echo "Using containerized ns-3 from ${SIF}"
@@ -365,7 +376,7 @@ if [[ -x "${ns3_dir}/ns3" ]]; then
     fi
 else
     if ! apptainer exec --cleanenv \
-        --bind "${route_tree_dir}:${route_tree_dir}" \
+        --bind "${route_tree_root}:${route_tree_root}" \
         --pwd /opt/leosim/ns3 "${SIF}" \
         "${route_tree_engine}" --self-test >/dev/null; then
         echo "Container routing engine failed its self-test: ${route_tree_engine}" >&2
@@ -373,11 +384,11 @@ else
     fi
 fi
 
-stage "ns-3 and routing engine ready; command_line built"
+stage "ns-3 and routing engine ready; paired command lines built"
 export OMP_NUM_THREADS="${allocated_cpus}"
 export NS_GLOBAL_VALUE="RngSeed=${RNG_SEED};RngRun=${RNG_RUN}"
 
-command_line="leosim-experiments \
+common_command_line="leosim-experiments \
 --dataDir=${data_dir} \
 --satellites=${satellite_trace} \
 --useTrace=1 \
@@ -388,13 +399,31 @@ command_line="leosim-experiments \
 --numUes=${NUM_UES} \
 --allToAllTraffic=0 \
 --serverId=${SERVER_ID} --ueId=${UE_ID} \
---appStart=1 --appStop=$((SIM_TIME - 1)) \
+--appStart=1 --appStop=${ping_app_stop} \
 --udpRate=${UDP_RATE} --udpPacketSize=${UDP_PACKET_SIZE} \
 --accessDataRate=${ACCESS_DATA_RATE} \
 --beamUplinkCapacity=${BEAM_UL_CAP} --beamDownlinkCapacity=${BEAM_DL_CAP} \
 --satelliteUplinkCapacity=${SAT_UL_CAP} --satelliteDownlinkCapacity=${SAT_DL_CAP} \
 --enableBeamCapacityLogging=0 \
---enableSatellitePing=${SAT_PING_ENABLE} \
+--enableDynamicGroundNodes=${UE_DYNAMIC_ENABLE} --initialUes=${UE_INITIAL} \
+--ueIntroductionStart=${UE_INTRO_START} --ueIntroductionInterval=${UE_INTRO_INTERVAL} \
+--uesPerIntroduction=${UE_INTRO_BATCH} --enableGroundNodeLifecycleLogging=0 \
+--enableIsl=1 --maxIslNeighbors=4 --maxAccessSatellites=${MAX_ACCESS_SATS} \
+--enableSyntheticIslLoad=0 --enableIslLoadLogging=0 \
+--enableDynamicRouting=1 --routingUpdateInterval=${UPDATE_INTERVAL} \
+--useRouteTreeCache=1 --routeTreeWorkers=${allocated_cpus} \
+--routeTreeEngine=${route_tree_engine} \
+--hoMode=CHO --maxCandidates=3 --enableHoBuffering=1 --hoBufferSize=1024 \
+--ttt=1 --t310=1 --n310=3 --n311=3 \
+--a3Offset=3 --a4Threshold=-110 --tteTrigger=30 \
+--choPrep=100 --choExec=150 --beamUpdateIntervalMs=${BEAM_UPDATE_INTERVAL_MS} \
+--enableStatistics=1 --statisticsInterval=1 \
+--enableHandoverLogging=1 --writeFlowMonitor=1 \
+--enableTaskProfiler=1 --progressLogInterval=120 \
+--enableVisualization=0 --verbose=0"
+
+ping_command_line="${common_command_line} \
+--enableSatellitePing=1 \
 --satellitePingStartIndex=${SAT_PING_START_INDEX} \
 --satellitePingInterval=${SAT_PING_INTERVAL} \
 --satellitePingPacketSize=${SAT_PING_PACKET_SIZE} \
@@ -402,143 +431,197 @@ command_line="leosim-experiments \
 --satellitePingLoadRamp=${SAT_PING_LOAD_RAMP} \
 --satellitePingMaxRate=${SAT_PING_MAX_RATE} \
 --satellitePingRampInterval=${SAT_PING_RAMP_INTERVAL} \
---enableDynamicGroundNodes=${UE_DYNAMIC_ENABLE} --initialUes=${UE_INITIAL} \
---ueIntroductionStart=${UE_INTRO_START} --ueIntroductionInterval=${UE_INTRO_INTERVAL} \
---uesPerIntroduction=${UE_INTRO_BATCH} --enableGroundNodeLifecycleLogging=1 \
---enableIsl=1 --maxIslNeighbors=4 --maxAccessSatellites=${MAX_ACCESS_SATS} \
---enableSyntheticIslLoad=0 --enableIslLoadLogging=0 \
---enableDynamicRouting=1 --routingUpdateInterval=${UPDATE_INTERVAL} \
---useRouteTreeCache=1 --routeTreeWorkers=${allocated_cpus} \
---routeTreeEngine=${route_tree_engine} \
---routeTreeWorkDir=${route_tree_dir} \
---hoMode=CHO --maxCandidates=3 --enableHoBuffering=1 --hoBufferSize=1024 \
---ttt=1 --t310=1 --n310=3 --n311=3 \
---a3Offset=3 --a4Threshold=-110 --tteTrigger=30 \
---choPrep=100 --choExec=150 --beamUpdateIntervalMs=${BEAM_UPDATE_INTERVAL_MS} \
---enableStatistics=1 --statisticsInterval=1 \
---enableHandoverLogging=1 --writeFlowMonitor=1 \
---enableTaskProfiler=1 --progressLogInterval=30 \
---enableVisualization=0 --verbose=1 \
---outputPrefix=${output_prefix} --uniqueOutputPrefix=0"
+--routeTreeWorkDir=${ping_route_tree_dir} \
+--outputPrefix=${ping_output_prefix} --uniqueOutputPrefix=0"
 
-{
-    echo "run_id=${run_id}"
-    echo "output_prefix=${output_prefix}"
-    echo "job_id=${SLURM_JOB_ID}"
-    echo "hostname=$(hostname)"
-    echo "started_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    echo "sim_time_s=${SIM_TIME}"
-    echo "satellites=${SATELLITE_COUNT}"
-    echo "selected_satellites=${selection_count}"
-    echo "satellite_selection_file=${satellite_selection}"
-    echo "coverage_ue_area_csv=${coverage_ue_csv}"
-    echo "tle_timestep=${TLE_TIMESTEP}"
-    echo "num_servers=${NUM_SERVERS}"
-    echo "num_ues=${NUM_UES}"
-    echo "max_access_satellites=${MAX_ACCESS_SATS}"
-    echo "server_id=${SERVER_ID}"
-    echo "ue_id=${UE_ID}"
-    echo "all_to_all_traffic=0"
-    echo "udp_rate=${UDP_RATE}"
-    echo "udp_packet_size=${UDP_PACKET_SIZE}"
-    echo "access_data_rate=${ACCESS_DATA_RATE}"
-    echo "beam_uplink_capacity=${BEAM_UL_CAP}"
-    echo "beam_downlink_capacity=${BEAM_DL_CAP}"
-    echo "satellite_uplink_capacity=${SAT_UL_CAP}"
-    echo "satellite_downlink_capacity=${SAT_DL_CAP}"
-    echo "beam_capacity_logging=0"
-    echo "satellite_ping_enabled=${SAT_PING_ENABLE}"
-    echo "satellite_ping_start_index=${SAT_PING_START_INDEX}"
-    echo "satellite_ping_interval=${SAT_PING_INTERVAL}"
-    echo "satellite_ping_packet_size=${SAT_PING_PACKET_SIZE}"
-    echo "satellite_ping_stagger_window=${SAT_PING_STAGGER}"
-    echo "satellite_ping_load_ramp_pps_per_s=${SAT_PING_LOAD_RAMP}"
-    echo "satellite_ping_max_rate_pps=${SAT_PING_MAX_RATE}"
-    echo "satellite_ping_ramp_interval_s=${SAT_PING_RAMP_INTERVAL}"
-    echo "dynamic_ue_introduction=${UE_DYNAMIC_ENABLE}"
-    echo "initial_ues=${UE_INITIAL}"
-    echo "ue_introduction_start=${UE_INTRO_START}"
-    echo "ue_introduction_interval=${UE_INTRO_INTERVAL}"
-    echo "ues_per_introduction=${UE_INTRO_BATCH}"
-    echo "routing_update_interval_s=${UPDATE_INTERVAL}"
-    echo "beam_update_interval_ms=${BEAM_UPDATE_INTERVAL_MS}"
-    echo "ns_global_value=${NS_GLOBAL_VALUE}"
-    echo "data_dir=${data_dir}"
-    echo "satellite_trace=${satellite_trace}"
-    echo "prepared_satellites=${prepared_satellites}"
-    echo "trace_duration_s=${trace_duration}"
-    echo "command=${command_line}"
-    git -C "${repo_root}" rev-parse HEAD 2>/dev/null || echo "commit=unavailable"
-    if [[ -f "${satellite_trace}" ]]; then
-        sha256sum "${satellite_trace}"
-    else
-        echo "artifact_sha256=unavailable"
+control_command_line="${common_command_line} \
+--enableSatellitePing=0 \
+--routeTreeWorkDir=${control_route_tree_dir} \
+--outputPrefix=${control_output_prefix} --uniqueOutputPrefix=0"
+
+write_metadata() {
+    local variant="$1"
+    local ping_enabled="$2"
+    local variant_dir="$3"
+    local variant_output_prefix="$4"
+    local variant_command="$5"
+    {
+        echo "run_id=${run_id}"
+        echo "variant=${variant}"
+        echo "paired_control=1"
+        echo "output_prefix=${variant_output_prefix}"
+        echo "job_id=${SLURM_JOB_ID}"
+        echo "hostname=$(hostname)"
+        echo "started_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        echo "sim_time_s=${SIM_TIME}"
+        echo "satellites=${SATELLITE_COUNT}"
+        echo "selected_satellites=${selection_count}"
+        echo "satellite_selection_file=${satellite_selection}"
+        echo "coverage_ue_area_csv=${coverage_ue_csv}"
+        echo "tle_timestep=${TLE_TIMESTEP}"
+        echo "num_servers=${NUM_SERVERS}"
+        echo "num_ues=${NUM_UES}"
+        echo "max_access_satellites=${MAX_ACCESS_SATS}"
+        echo "server_id=${SERVER_ID}"
+        echo "ue_id=${UE_ID}"
+        echo "all_to_all_traffic=0"
+        echo "udp_rate=${UDP_RATE}"
+        echo "udp_packet_size=${UDP_PACKET_SIZE}"
+        echo "access_data_rate=${ACCESS_DATA_RATE}"
+        echo "beam_uplink_capacity=${BEAM_UL_CAP}"
+        echo "beam_downlink_capacity=${BEAM_DL_CAP}"
+        echo "satellite_uplink_capacity=${SAT_UL_CAP}"
+        echo "satellite_downlink_capacity=${SAT_DL_CAP}"
+        echo "beam_capacity_logging=0"
+        echo "satellite_ping_enabled=${ping_enabled}"
+        echo "satellite_ping_start_index=${SAT_PING_START_INDEX}"
+        echo "satellite_ping_interval=${SAT_PING_INTERVAL}"
+        echo "satellite_ping_packet_size=${SAT_PING_PACKET_SIZE}"
+        echo "satellite_ping_stagger_window=${SAT_PING_STAGGER}"
+        echo "satellite_ping_load_ramp_pps_per_s=${SAT_PING_LOAD_RAMP}"
+        echo "satellite_ping_max_rate_pps=${SAT_PING_MAX_RATE}"
+        echo "satellite_ping_ramp_interval_s=${SAT_PING_RAMP_INTERVAL}"
+        echo "dynamic_ue_introduction=${UE_DYNAMIC_ENABLE}"
+        echo "initial_ues=${UE_INITIAL}"
+        echo "ue_introduction_start=${UE_INTRO_START}"
+        echo "ue_introduction_interval=${UE_INTRO_INTERVAL}"
+        echo "ues_per_introduction=${UE_INTRO_BATCH}"
+        echo "routing_update_interval_s=${UPDATE_INTERVAL}"
+        echo "beam_update_interval_ms=${BEAM_UPDATE_INTERVAL_MS}"
+        echo "ns_global_value=${NS_GLOBAL_VALUE}"
+        echo "data_dir=${data_dir}"
+        echo "satellite_trace=${satellite_trace}"
+        echo "prepared_satellites=${prepared_satellites}"
+        echo "trace_duration_s=${trace_duration}"
+        echo "command=${variant_command}"
+        git -C "${repo_root}" rev-parse HEAD 2>/dev/null || echo "commit=unavailable"
+        if [[ -f "${satellite_trace}" ]]; then
+            sha256sum "${satellite_trace}"
+        else
+            echo "artifact_sha256=unavailable"
+        fi
+    } > "${variant_dir}/metadata.txt"
+}
+
+write_metadata "ping" 1 "${ping_run_dir}" "${ping_output_prefix}" "${ping_command_line}"
+write_metadata "control" 0 "${control_run_dir}" "${control_output_prefix}" "${control_command_line}"
+
+if command -v srun >/dev/null 2>&1; then
+    step_prefix=(srun --exclusive --nodes=1 --ntasks=1 \
+        --cpus-per-task="${allocated_cpus}" --cpu-bind=cores)
+else
+    step_prefix=()
+    stage "warning: srun unavailable; launching both processes without Slurm CPU binding"
+fi
+if [[ -x /usr/bin/time ]]; then
+    time_prefix=(/usr/bin/time -v)
+else
+    time_prefix=()
+fi
+
+run_experiment() {
+    local variant_dir="$1"
+    local variant_command="$2"
+    OMP_NUM_THREADS="${allocated_cpus}" \
+        "${step_prefix[@]}" "${time_prefix[@]}" "${ns3_cmd[@]}" "${variant_command}" \
+        > "${variant_dir}/stdout.log" 2> "${variant_dir}/stderr.log"
+}
+
+log_progress() {
+    local variant="$1"
+    local variant_pid="$2"
+    local variant_dir="$3"
+    local state="finished"
+    if kill -0 "${variant_pid}" 2>/dev/null; then
+        state="running"
     fi
-} > "${run_dir}/metadata.txt"
+    local last_line
+    local loglines
+    last_line=$(tail -n 1 "${variant_dir}/stdout.log" 2>/dev/null || true)
+    loglines=$(wc -l < "${variant_dir}/stdout.log" 2>/dev/null || echo 0)
+    printf '[alpha-gs][%s] %s state=%s t+%ss pid=%s loglines=%s last=[%s]\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${variant}" "${state}" "${elapsed}" \
+        "${variant_pid}" "${loglines}" "${last_line}" | tee -a "${variant_dir}/watchdog.log"
+}
 
-stage "starting leosim-experiments (simTime=${SIM_TIME}s, ues=${NUM_UES}, sats=${selection_count}, workers=${allocated_cpus})"
+stage "starting paired simulations (simTime=${SIM_TIME}s, ues=${NUM_UES}, sats=${selection_count}, cpus_each=${allocated_cpus})"
 run_start_epoch=$(date +%s)
 set +e
-if command -v /usr/bin/time >/dev/null 2>&1; then
-    /usr/bin/time -v "${ns3_cmd[@]}" "${command_line}" \
-        > "${run_dir}/stdout.log" 2> "${run_dir}/stderr.log" &
-else
-    time "${ns3_cmd[@]}" "${command_line}" \
-        > "${run_dir}/stdout.log" 2> "${run_dir}/stderr.log" &
-fi
-run_pid=$!
-while kill -0 "${run_pid}" 2>/dev/null; do
+run_experiment "${ping_run_dir}" "${ping_command_line}" &
+ping_pid=$!
+run_experiment "${control_run_dir}" "${control_command_line}" &
+control_pid=$!
+
+while kill -0 "${ping_pid}" 2>/dev/null || kill -0 "${control_pid}" 2>/dev/null; do
     sleep "${WATCHDOG_INTERVAL}"
     elapsed=$(( $(date +%s) - run_start_epoch ))
-    last_line=$(tail -n 1 "${run_dir}/stdout.log" 2>/dev/null || true)
-    loglines=$(wc -l < "${run_dir}/stdout.log" 2>/dev/null || echo 0)
-    nproc=$(pgrep -fc "leosim-experiments|leosim-rengine" 2>/dev/null || echo 0)
-    printf '[alpha-gs][%s] sim t+%ss pid=%s live_procs=%s loglines=%s last=[%s]\n' \
-        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${elapsed}" "${run_pid}" "${nproc}" "${loglines}" "${last_line}" \
-        | tee -a "${run_dir}/watchdog.log"
+    log_progress "ping" "${ping_pid}" "${ping_run_dir}"
+    log_progress "control" "${control_pid}" "${control_run_dir}"
 done
-wait "${run_pid}"
-status=$?
+wait "${ping_pid}"
+ping_status=$?
+wait "${control_pid}"
+control_status=$?
 set -e
-stage "sim finished status=${status} after $(( $(date +%s) - run_start_epoch ))s"
 
-echo "${status}" > "${run_dir}/exit-status.txt"
-date -u +%Y-%m-%dT%H:%M:%SZ > "${run_dir}/finished-utc.txt"
+finished_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+echo "${ping_status}" > "${ping_run_dir}/exit-status.txt"
+echo "${control_status}" > "${control_run_dir}/exit-status.txt"
+echo "${finished_utc}" > "${ping_run_dir}/finished-utc.txt"
+echo "${finished_utc}" > "${control_run_dir}/finished-utc.txt"
+stage "paired simulations finished: ping=${ping_status}, control=${control_status}, elapsed=$(( $(date +%s) - run_start_epoch ))s"
 
-if [[ ${status} -ne 0 ]]; then
-    echo "LeoSim run failed with status ${status}; see ${run_dir}/stderr.log" >&2
-    exit "${status}"
-fi
-
-required=(
-    "${output_prefix}-statistics.csv"
-    "${output_prefix}-statistics.json"
-    "${output_prefix}-handovers.csv"
-    "${output_prefix}-cho-candidates.csv"
-    "${output_prefix}-flowmon.xml"
-)
-for output in "${required[@]}"; do
-    if [[ ! -s "${output}" ]]; then
-        echo "Required output missing or empty: ${output}" >&2
-        echo 3 > "${run_dir}/exit-status.txt"
-        exit 3
+if [[ ${ping_status} -ne 0 || ${control_status} -ne 0 ]]; then
+    echo "Paired run failed: ping=${ping_status}, control=${control_status}." >&2
+    echo "See ${ping_run_dir}/stderr.log and ${control_run_dir}/stderr.log." >&2
+    if [[ ${ping_status} -ne 0 ]]; then
+        exit "${ping_status}"
     fi
-done
+    exit "${control_status}"
+fi
 
-summary_json="${output_prefix}-statistics.json"
-tx_packets=$(sed -n 's/.*"network": {"tx_packets": \([0-9][0-9]*\).*/\1/p' "${summary_json}")
-sink_count=$(sed -n 's/.*"sink_count": \([0-9][0-9]*\).*/\1/p' "${summary_json}")
-sinks_with_rx=$(sed -n 's/.*"sinks_with_rx": \([0-9][0-9]*\).*/\1/p' "${summary_json}")
-if [[ -z "${tx_packets}" || -z "${sink_count}" || -z "${sinks_with_rx}" ]]; then
-    echo "Could not validate statistics summary: ${summary_json}" >&2
-    echo 4 > "${run_dir}/exit-status.txt"
-    exit 4
-fi
-if [[ "${tx_packets}" -eq 0 || "${sinks_with_rx}" -eq 0 ]]; then
-    echo "Invalid completed run: tx_packets=${tx_packets}, sinks_with_rx=${sinks_with_rx}." >&2
-    echo 4 > "${run_dir}/exit-status.txt"
-    exit 4
-fi
+validate_outputs() {
+    local variant="$1"
+    local variant_dir="$2"
+    local variant_output_prefix="$3"
+    local required_outputs=(
+        "${variant_output_prefix}-statistics.csv"
+        "${variant_output_prefix}-statistics.json"
+        "${variant_output_prefix}-handovers.csv"
+        "${variant_output_prefix}-cho-candidates.csv"
+        "${variant_output_prefix}-flowmon.xml"
+    )
+    local output
+    for output in "${required_outputs[@]}"; do
+        if [[ ! -s "${output}" ]]; then
+            echo "Required ${variant} output missing or empty: ${output}" >&2
+            echo 3 > "${variant_dir}/exit-status.txt"
+            return 3
+        fi
+    done
+
+    local summary_json="${variant_output_prefix}-statistics.json"
+    local tx_packets
+    local sink_count
+    local sinks_with_rx
+    tx_packets=$(sed -n 's/.*"network": {"tx_packets": \([0-9][0-9]*\).*/\1/p' "${summary_json}")
+    sink_count=$(sed -n 's/.*"sink_count": \([0-9][0-9]*\).*/\1/p' "${summary_json}")
+    sinks_with_rx=$(sed -n 's/.*"sinks_with_rx": \([0-9][0-9]*\).*/\1/p' "${summary_json}")
+    if [[ -z "${tx_packets}" || -z "${sink_count}" || -z "${sinks_with_rx}" ]]; then
+        echo "Could not validate ${variant} statistics summary: ${summary_json}" >&2
+        echo 4 > "${variant_dir}/exit-status.txt"
+        return 4
+    fi
+    if [[ "${tx_packets}" -eq 0 || "${sinks_with_rx}" -eq 0 ]]; then
+        echo "Invalid ${variant} run: tx_packets=${tx_packets}, sinks_with_rx=${sinks_with_rx}." >&2
+        echo 4 > "${variant_dir}/exit-status.txt"
+        return 4
+    fi
+}
+
+validate_outputs "ping" "${ping_run_dir}" "${ping_output_prefix}"
+validate_outputs "control" "${control_run_dir}" "${control_output_prefix}"
 
 stage "COMPLETE: ${run_id}"
-echo "Completed ${run_id}: ${run_dir}"
+echo "Completed ping experiment: ${ping_run_dir}"
+echo "Completed no-ping control: ${control_run_dir}"

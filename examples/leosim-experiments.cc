@@ -600,10 +600,11 @@ InstallBoundedUePings(NodeContainer ueNodes,
  * The destination follows handovers: whenever the beam manager reports a new
  * serving satellite for a UE (via the per-UE beam-state callback), the previous
  * ping is disposed and a fresh one is aimed at the new satellite's access-link
- * address. Each ping runs in QUIET mode, so one aggregate delivery/RTT report is
- * printed per (UE, serving-satellite) association. Pings are single-hop over the
- * UE<->satellite access link, so they measure the direct access-link latency and
- * do not require constellation route trees.
+ * address. Each ping runs in QUIET mode. Long associations are split into
+ * wrap-safe segments, so one aggregate delivery/RTT report is printed per
+ * segment rather than allowing ns-3's 16-bit Ping counter to wrap. Pings are
+ * single-hop over the UE<->satellite access link, so they measure the direct
+ * access-link latency and do not require constellation route trees.
  */
 class SatellitePinger
 {
@@ -653,6 +654,11 @@ class SatellitePinger
                               const std::vector<double>& ueActivationTimes)
     {
         const uint32_t count = ueNodes.GetN();
+        m_eligibleUeNodeIds.clear();
+        for (uint32_t i = startIndex; i < count; ++i)
+        {
+            m_eligibleUeNodeIds.insert(ueNodes.Get(i)->GetId());
+        }
         for (uint32_t i = startIndex; i < count; ++i)
         {
             const uint32_t ueNodeId = ueNodes.Get(i)->GetId();
@@ -722,6 +728,13 @@ class SatellitePinger
     /** Called by the beam manager whenever a UE's serving beam changes. */
     void OnBeamState(uint32_t ueNodeId, LeoSimBeamRecord beam, double /*score*/)
     {
+        // The beam-state callback is global, so it also reports UEs below
+        // satellitePingStartIndex. Keep the configured selection authoritative
+        // for initial attachment and every later handover.
+        if (m_eligibleUeNodeIds.find(ueNodeId) == m_eligibleUeNodeIds.end())
+        {
+            return;
+        }
         // GetCurrentBeam() uses UINT32_MAX (not 0) as the "no serving satellite"
         // sentinel; satellite node id 0 is a real satellite in the container.
         if (beam.satelliteNodeId == std::numeric_limits<uint32_t>::max())
@@ -737,6 +750,13 @@ class SatellitePinger
     }
 
   private:
+    // ns-3 Ping uses a 16-bit sequence number for both its wire header and its
+    // internal request lookup. Keep every LeoSim-created Ping comfortably below
+    // the 65,536-request wrap boundary, then replace it with a fresh segment.
+    // This leaves the ns-3 core untouched while keeping each printed RTT/loss
+    // summary valid.
+    static constexpr uint32_t PING_SEGMENT_REQUEST_LIMIT = 60000;
+
     Ipv4Address ResolveSatelliteLinkAddress(uint32_t ueNodeId, uint32_t satelliteNodeId) const
     {
         const auto ueIt = m_ueNodeById.find(ueNodeId);
@@ -809,13 +829,21 @@ class SatellitePinger
             }
         }
 
+        // A handover or a scheduled segment rollover supersedes the previous
+        // rollover event. Cancel it before installing the replacement ping.
+        const auto rollover = m_pingRolloverEvents.find(ueNodeId);
+        if (rollover != m_pingRolloverEvents.end() && rollover->second.IsPending())
+        {
+            rollover->second.Cancel();
+        }
+
         PingHelper ping(target);
         ping.SetAttribute("Interval", TimeValue(Seconds(CurrentInterval())));
         ping.SetAttribute("Size", UintegerValue(m_packetSize));
-        ping.SetAttribute("Count", UintegerValue(0));
+        ping.SetAttribute("Count", UintegerValue(PING_SEGMENT_REQUEST_LIMIT));
         // QUIET emits one aggregate delivery/RTT report at shutdown, avoiding
         // per-packet console overhead while keeping RTT to the serving satellite
-        // observable for each (UE, serving-satellite) association.
+        // observable for each wrap-safe association segment.
         ping.SetAttribute("VerboseMode", EnumValue(Ping::QUIET));
         ApplicationContainer apps = ping.Install(ueIt->second);
         // Application::DoInitialize feeds m_startTime/m_stopTime into
@@ -833,15 +861,47 @@ class SatellitePinger
         m_pingApplications[ueNodeId] = apps.Get(0);
         m_targetSatellite[ueNodeId] = satelliteNodeId;
         m_pingStartTime[ueNodeId] = Simulator::Now();
+
+        // CurrentRate() is always bounded by m_maxRate, so this replacement is
+        // scheduled no later than the time needed to send the segment limit.
+        // Count is also capped as a second line of defence. A report emitted at
+        // rollover describes only this wrap-safe segment.
+        const double rolloverDelay =
+            static_cast<double>(PING_SEGMENT_REQUEST_LIMIT) / m_maxRate;
+        if (Simulator::Now().GetSeconds() + rolloverDelay < m_stopTime)
+        {
+            m_pingRolloverEvents[ueNodeId] =
+                Simulator::Schedule(Seconds(rolloverDelay),
+                                    &SatellitePinger::RolloverPing,
+                                    this,
+                                    ueNodeId,
+                                    satelliteNodeId);
+        }
+    }
+
+    void RolloverPing(uint32_t ueNodeId, uint32_t expectedSatelliteNodeId)
+    {
+        if (Simulator::Now().GetSeconds() >= m_stopTime)
+        {
+            return;
+        }
+        const auto target = m_targetSatellite.find(ueNodeId);
+        if (target == m_targetSatellite.end() || target->second != expectedSatelliteNodeId)
+        {
+            return;
+        }
+        InstallPing(ueNodeId, expectedSatelliteNodeId);
     }
 
     Ptr<LeoSimBeamManager> m_beamManager;
     LeoSimDeviceInstaller* m_accessInstaller;
     std::map<uint32_t, Ptr<Node>> m_ueNodeById;
     std::map<uint32_t, Ptr<Node>> m_satNodeById;
+    std::set<uint32_t> m_eligibleUeNodeIds;
     std::map<uint32_t, uint32_t> m_targetSatellite;
     std::map<uint32_t, Ptr<Application>> m_pingApplications;
     std::map<uint32_t, Time> m_pingStartTime;
+    std::map<uint32_t, EventId> m_pingRolloverEvents;
     double m_interval;
     uint32_t m_packetSize;
     double m_stopTime;
