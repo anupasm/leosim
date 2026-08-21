@@ -15,7 +15,7 @@
 #   LEOSIM_CAMPAIGNS=alpha-gs submit-all-experiments.sh   # same via env
 #
 # CPU requests (47 CPUs available): scalability 3x4=12, ALDSR 27x1=27,
-# handover 6x1=6, alpha-gs 2x23=46. When several campaigns are selected,
+# handover 6x1=6, alpha-gs 2x8=16. When several campaigns are selected,
 # Slurm queues whichever jobs cannot run concurrently on the server.
 
 set -euo pipefail
@@ -23,8 +23,8 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 start_time=${LEOSIM_START_TIME:-now+2minutes}
 # CPUs per task for the two parallel alpha-GS variants (ping and control).
-# Two tasks x 23 CPUs use 46 of the server's 47 CPUs.
-alpha_gs_cpus=${LEOSIM_ALPHA_GS_CPUS:-23}
+# Two tasks x 8 CPUs use 16 CPUs in total.
+alpha_gs_cpus=${LEOSIM_ALPHA_GS_CPUS:-8}
 node_args=()
 if [[ -n "${LEOSIM_NODE:-}" ]]; then
     node_args=(--nodelist="${LEOSIM_NODE}")

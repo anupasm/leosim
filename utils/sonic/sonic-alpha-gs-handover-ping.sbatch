@@ -2,7 +2,7 @@
 #SBATCH --job-name=leosim-alpha-gs
 #SBATCH --nodes=1
 #SBATCH --ntasks=2
-#SBATCH --cpus-per-task=23
+#SBATCH --cpus-per-task=8
 #SBATCH --time=48:00:00
 #SBATCH --output=/scratch/adesilva/logs/leosim-alpha-gs-%A.out
 #SBATCH --error=/scratch/adesilva/logs/leosim-alpha-gs-%A.err
@@ -90,7 +90,7 @@ UE_INTRO_INTERVAL="${LEOSIM_UE_INTRODUCTION_INTERVAL:-10}"
 UE_INTRO_BATCH="${LEOSIM_UES_PER_INTRODUCTION:-100}"
 
 # Preprocessing / coverage selection
-allocated_cpus="${SLURM_CPUS_PER_TASK:-23}"
+allocated_cpus="${SLURM_CPUS_PER_TASK:-8}"
 TLE_TIMESTEP="${LEOSIM_TLE_TIMESTEP:-5}"
 # 0 = use every satellite that covers the UE area; otherwise cap the selection
 # file to the first N IDs (sorted numerically).
