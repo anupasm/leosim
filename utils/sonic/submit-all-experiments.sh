@@ -15,15 +15,14 @@
 #   LEOSIM_CAMPAIGNS=alpha-gs submit-all-experiments.sh   # same via env
 #
 # CPU requests (47 CPUs available): scalability 3x4=12, ALDSR 27x1=27,
-# handover 6x1=6, alpha-gs 2x8=16. When several campaigns are selected,
+# handover 6x1=6, alpha-gs 3x8=24. When several campaigns are selected,
 # Slurm queues whichever jobs cannot run concurrently on the server.
 
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 start_time=${LEOSIM_START_TIME:-now+2minutes}
-# CPUs per task for the two parallel alpha-GS variants (ping and control).
-# Two tasks x 8 CPUs use 16 CPUs in total.
+# CPUs for each of the three alpha-GS policy runs.
 alpha_gs_cpus=${LEOSIM_ALPHA_GS_CPUS:-8}
 node_args=()
 if [[ -n "${LEOSIM_NODE:-}" ]]; then
@@ -39,7 +38,7 @@ declare -A CAMPAIGN_SPEC=(
     [scalability]="sonic-hop-scalability.sbatch|3|4|"
     [aldsr]="run_aldsr_weight_search.sbatch|27|1|"
     [handover]="sonic-handover-paper.sbatch|6|1|LEOSIM_RESULTS_ROOT=/scratch/adesilva/results/leosim-handover"
-    [alpha-gs]="sonic-alpha-gs-handover-ping.sbatch|2|${alpha_gs_cpus}|LEOSIM_RESULTS_ROOT=/scratch/adesilva/results/leosim-alpha-gs-handover-ping,LEOSIM_SIM_TIME=1200"
+    [alpha-gs]="sonic-alpha-gs-handover-ping.sbatch|3|${alpha_gs_cpus}|LEOSIM_RESULTS_ROOT=/scratch/adesilva/results/leosim-alpha-gs-handover-ping,LEOSIM_SIM_TIME=1200"
 )
 
 requested="${1:-all}"

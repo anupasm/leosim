@@ -3660,6 +3660,73 @@ class LeoSimTestDemandAwareProportionalFairBeam : public TestCase
     }
 };
 
+class LeoSimTestBeamCapacityCsvThrottle : public TestCase
+{
+  public:
+    LeoSimTestBeamCapacityCsvThrottle()
+        : TestCase("beam capacity CSV throttling preserves the first nonempty and "
+                   "boundary snapshots")
+    {
+    }
+
+  private:
+    void DoRun() override
+    {
+        Ptr<Node> satellite = CreateObject<Node>();
+        Ptr<Node> ground = CreateObject<Node>();
+        PointToPointHelper p2p;
+        p2p.SetDeviceAttribute("DataRate", StringValue("100Mbps"));
+        NetDeviceContainer link = p2p.Install(ground, satellite);
+
+        Ptr<LeoSimBeamCapacityManager> manager = CreateObject<LeoSimBeamCapacityManager>();
+        NS_TEST_ASSERT_MSG_EQ(manager->RegisterAccessLink(ground,
+                                                          satellite,
+                                                          link.Get(0),
+                                                          link.Get(1)),
+                              true,
+                              "Valid point-to-point access link was rejected");
+        const std::string csv = CreateTempDirFilename("beam-capacity-throttle.csv");
+        manager->SetCsvOutputInterval(Seconds(1));
+        manager->EnableCsvOutput(csv);
+
+        // An empty allocation must not consume the first logging interval.
+        manager->ApplyAssociations({});
+        const LeoSimBeamCapacityAssociation association{
+            ground->GetId(), satellite->GetId(), 7};
+        Simulator::Schedule(Seconds(0.1), [manager, association]() {
+            manager->ApplyAssociations({association});
+        });
+        Simulator::Schedule(Seconds(0.5), [manager, association]() {
+            manager->ApplyAssociations({association});
+        });
+        // Equality with the one-second boundary must permit the next snapshot.
+        Simulator::Schedule(Seconds(1.1), [manager, association]() {
+            manager->ApplyAssociations({association});
+        });
+        Simulator::Stop(Seconds(1.2));
+        Simulator::Run();
+        manager->Stop();
+
+        std::ifstream input(csv);
+        std::vector<std::string> lines;
+        std::string lineText;
+        while (std::getline(input, lineText))
+        {
+            lines.push_back(lineText);
+        }
+        NS_TEST_ASSERT_MSG_EQ(lines.size(),
+                              3,
+                              "CSV should contain one header and two throttled snapshots");
+        NS_TEST_ASSERT_MSG_EQ(lines[1].rfind("0.1,", 0),
+                              0,
+                              "Empty allocation incorrectly suppressed the first snapshot");
+        NS_TEST_ASSERT_MSG_EQ(lines[2].rfind("1.1,", 0),
+                              0,
+                              "Snapshot at the exact throttle boundary was suppressed");
+        Simulator::Destroy();
+    }
+};
+
 class LeoSimTestHierarchicalAlphaFairCapacity : public TestCase
 {
   public:
@@ -3792,6 +3859,7 @@ LeoSimTestSuite::LeoSimTestSuite()
 {
     AddTestCase(new LeoSimTestSharedBeamCapacity, TestCase::Duration::QUICK);
     AddTestCase(new LeoSimTestDemandAwareProportionalFairBeam, TestCase::Duration::QUICK);
+    AddTestCase(new LeoSimTestBeamCapacityCsvThrottle, TestCase::Duration::QUICK);
     AddTestCase(new LeoSimTestHierarchicalAlphaFairCapacity, TestCase::Duration::QUICK);
     AddTestCase(new LeoSimTestPeriodicGroundNodeActivation, TestCase::Duration::QUICK);
     class DeterministicIslLoadTest : public TestCase

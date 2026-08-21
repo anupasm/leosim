@@ -109,6 +109,8 @@ class LeoSimBeamCapacityManager : public Object
     void SetDemandAware(bool enabled);
     void SetActiveUserTimeout(Time timeout);
     void SetUpdateInterval(Time interval);
+    /** Minimum interval between CSV snapshots; zero logs every allocation update. */
+    void SetCsvOutputInterval(Time interval);
     void SetUeServiceProfile(uint32_t groundNodeId, const LeoSimUeServiceProfile& profile);
     bool LoadUeServiceProfiles(const std::string& filename);
 
@@ -192,6 +194,9 @@ class LeoSimBeamCapacityManager : public Object
     DataRate m_satelliteDownlinkCapacity;
     Time m_updateInterval;
     Time m_activeUserTimeout;
+    Time m_csvOutputInterval;
+    Time m_lastCsvWrite;
+    bool m_hasCsvWrite;
     LeoSimBeamScheduler m_scheduler;
     double m_alphaFairness;
     double m_queueDelayWeight;

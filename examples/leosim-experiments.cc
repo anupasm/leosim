@@ -598,9 +598,9 @@ InstallBoundedUePings(NodeContainer ueNodes,
  * Every UE with index >= satellitePingStartIndex keeps a continuous ICMP ping
  * running to the satellite it is currently associated with (its serving beam).
  * The destination follows handovers: whenever the beam manager reports a new
- * serving satellite for a UE (via the per-UE beam-state callback), the previous
- * ping is disposed and a fresh one is aimed at the new satellite's access-link
- * address. Each ping runs in QUIET mode. Long associations are split into
+ * serving satellite for a UE (via the per-UE beam-state callback), the live
+ * Ping destination is retargeted without resetting its send clock. Each ping
+ * runs in QUIET mode. Long simulations are split into
  * wrap-safe segments, so one aggregate delivery/RTT report is printed per
  * segment rather than allowing ns-3's 16-bit Ping counter to wrap. Pings are
  * single-hop over the UE<->satellite access link, so they measure the direct
@@ -633,12 +633,101 @@ class SatellitePinger
         {
             Ptr<Node> ueNode = ueNodes.Get(i);
             m_ueNodeById[ueNode->GetId()] = ueNode;
+            m_ueIndexByNodeId[ueNode->GetId()] = i;
         }
         for (uint32_t i = 0; i < satelliteNodes.GetN(); ++i)
         {
             Ptr<Node> satellite = satelliteNodes.Get(i);
             m_satNodeById[satellite->GetId()] = satellite;
         }
+    }
+
+    /** Write compact per-UE totals and one-second aggregate time-series data. */
+    void WriteCsvOutputs(const std::string& perUeFilename,
+                         const std::string& timeSeriesFilename) const
+    {
+        std::ofstream perUe(perUeFilename, std::ios::out | std::ios::trunc);
+        NS_ABORT_MSG_IF(!perUe.is_open(), "Cannot open satellite-ping CSV: " << perUeFilename);
+        perUe << "ue_index,ue_node_id,expected_start_s,measurement_duration_s,tx_packets,"
+                 "rx_packets,lost_packets,drop_events,tx_payload_bytes,rx_payload_bytes,"
+                 "offered_payload_mbps,received_payload_mbps,delivery_ratio,rtt_samples,"
+                 "rtt_mean_ms,rtt_min_ms,rtt_max_ms,target_changes,last_satellite_id,"
+                 "first_tx_s,last_tx_s\n";
+        perUe << std::setprecision(10);
+
+        std::vector<uint32_t> ueNodeIds;
+        ueNodeIds.reserve(m_pingMetrics.size());
+        for (const auto& [ueNodeId, metrics] : m_pingMetrics)
+        {
+            (void)metrics;
+            ueNodeIds.push_back(ueNodeId);
+        }
+        std::sort(ueNodeIds.begin(), ueNodeIds.end(), [this](uint32_t lhs, uint32_t rhs) {
+            return m_pingMetrics.at(lhs).ueIndex < m_pingMetrics.at(rhs).ueIndex;
+        });
+        for (uint32_t ueNodeId : ueNodeIds)
+        {
+            const PingMetrics& metrics = m_pingMetrics.at(ueNodeId);
+            const uint64_t lost = metrics.txPackets >= metrics.rxPackets
+                                      ? metrics.txPackets - metrics.rxPackets
+                                      : 0;
+            const double duration =
+                std::max(0.0, m_stopTime - metrics.expectedStart.GetSeconds());
+            const double offeredMbps =
+                duration > 0.0 ? metrics.txPayloadBytes * 8.0 / duration / 1000000.0 : 0.0;
+            const double receivedMbps =
+                duration > 0.0 ? metrics.rxPayloadBytes * 8.0 / duration / 1000000.0 : 0.0;
+            const double deliveryRatio = metrics.txPackets > 0
+                                             ? static_cast<double>(metrics.rxPackets) /
+                                                   static_cast<double>(metrics.txPackets)
+                                             : 0.0;
+            const double rttMean = metrics.rttSamples > 0
+                                       ? metrics.rttSumMs /
+                                             static_cast<double>(metrics.rttSamples)
+                                       : 0.0;
+            perUe << metrics.ueIndex << ',' << ueNodeId << ','
+                  << metrics.expectedStart.GetSeconds() << ',' << duration << ','
+                  << metrics.txPackets << ',' << metrics.rxPackets << ',' << lost << ','
+                  << metrics.dropEvents << ',' << metrics.txPayloadBytes << ','
+                  << metrics.rxPayloadBytes << ',' << offeredMbps << ',' << receivedMbps << ','
+                  << deliveryRatio << ',' << metrics.rttSamples << ',' << rttMean << ','
+                  << (metrics.rttSamples > 0 ? metrics.rttMinMs : 0.0) << ','
+                  << (metrics.rttSamples > 0 ? metrics.rttMaxMs : 0.0) << ','
+                  << metrics.targetChanges << ',' << metrics.lastSatelliteNodeId << ','
+                  << (metrics.hasTx ? metrics.firstTx.GetSeconds() : -1.0) << ','
+                  << (metrics.hasTx ? metrics.lastTx.GetSeconds() : -1.0) << '\n';
+        }
+        perUe.flush();
+
+        std::ofstream timeSeries(timeSeriesFilename, std::ios::out | std::ios::trunc);
+        NS_ABORT_MSG_IF(!timeSeries.is_open(),
+                        "Cannot open satellite-ping time-series CSV: " << timeSeriesFilename);
+        timeSeries << "time_start_s,time_end_s,active_ues,tx_packets,rx_packets,drop_events,"
+                      "tx_payload_bytes,rx_payload_bytes,offered_payload_mbps,"
+                      "received_payload_mbps,delivery_ratio,rtt_samples,rtt_mean_ms,"
+                      "rtt_min_ms,rtt_max_ms\n";
+        timeSeries << std::setprecision(10);
+        for (const auto& [second, metrics] : m_timeSeriesMetrics)
+        {
+            const double deliveryRatio = metrics.txPackets > 0
+                                             ? static_cast<double>(metrics.rxPackets) /
+                                                   static_cast<double>(metrics.txPackets)
+                                             : 0.0;
+            const double rttMean = metrics.rttSamples > 0
+                                       ? metrics.rttSumMs /
+                                             static_cast<double>(metrics.rttSamples)
+                                       : 0.0;
+            timeSeries << second << ',' << second + 1 << ',' << metrics.activeUeNodeIds.size()
+                       << ',' << metrics.txPackets << ',' << metrics.rxPackets << ','
+                       << metrics.dropEvents << ',' << metrics.txPayloadBytes << ','
+                       << metrics.rxPayloadBytes << ','
+                       << metrics.txPayloadBytes * 8.0 / 1000000.0 << ','
+                       << metrics.rxPayloadBytes * 8.0 / 1000000.0 << ',' << deliveryRatio << ','
+                       << metrics.rttSamples << ',' << rttMean << ','
+                       << (metrics.rttSamples > 0 ? metrics.rttMinMs : 0.0) << ','
+                       << (metrics.rttSamples > 0 ? metrics.rttMaxMs : 0.0) << '\n';
+        }
+        timeSeries.flush();
     }
 
     /**
@@ -655,6 +744,10 @@ class SatellitePinger
     {
         const uint32_t count = ueNodes.GetN();
         m_eligibleUeNodeIds.clear();
+        m_eligibleStartTimes.clear();
+        m_pingMetrics.clear();
+        m_timeSeriesMetrics.clear();
+        m_rampStart = Seconds(startTime);
         for (uint32_t i = startIndex; i < count; ++i)
         {
             m_eligibleUeNodeIds.insert(ueNodes.Get(i)->GetId());
@@ -668,6 +761,10 @@ class SatellitePinger
                                              static_cast<double>(count - startIndex)
                                        : 0.0;
             const double pingStart = activation + stagger;
+            m_eligibleStartTimes[ueNodeId] = Seconds(pingStart);
+            PingMetrics& metrics = m_pingMetrics[ueNodeId];
+            metrics.ueIndex = m_ueIndexByNodeId.at(ueNodeId);
+            metrics.expectedStart = Seconds(pingStart);
             if (pingStart >= stopTime)
             {
                 continue;
@@ -682,12 +779,12 @@ class SatellitePinger
         }
 
         // Optional: ramp the per-UE ping rate upward over the simulation so the
-        // aggregate access-link load grows with time (used to study how neighbor
-        // load affects the GS<->UE traffic).
+        // aggregate serving-beam access load grows with time.
         if (m_rateRamp > 0.0)
         {
-            m_rampEventId =
-                Simulator::Schedule(Seconds(m_rampStep), &SatellitePinger::RampLoad, this);
+            m_rampEventId = Simulator::Schedule(Seconds(startTime + m_rampStep),
+                                                &SatellitePinger::RampLoad,
+                                                this);
         }
     }
 
@@ -695,7 +792,9 @@ class SatellitePinger
     double CurrentRate() const
     {
         const double rate0 = 1.0 / m_interval;
-        const double elapsed = Simulator::Now().GetSeconds() - m_rampStart.GetSeconds();
+        const double elapsed = std::max(0.0,
+                                        Simulator::Now().GetSeconds() -
+                                            m_rampStart.GetSeconds());
         return std::min(m_maxRate, std::max(rate0, rate0 + m_rateRamp * elapsed));
     }
 
@@ -735,6 +834,12 @@ class SatellitePinger
         {
             return;
         }
+        const auto eligibleStart = m_eligibleStartTimes.find(ueNodeId);
+        if (eligibleStart == m_eligibleStartTimes.end() ||
+            Simulator::Now() < eligibleStart->second)
+        {
+            return;
+        }
         // GetCurrentBeam() uses UINT32_MAX (not 0) as the "no serving satellite"
         // sentinel; satellite node id 0 is a real satellite in the container.
         if (beam.satelliteNodeId == std::numeric_limits<uint32_t>::max())
@@ -746,16 +851,137 @@ class SatellitePinger
         {
             return;
         }
+        const Ipv4Address targetAddress =
+            ResolveSatelliteLinkAddress(ueNodeId, beam.satelliteNodeId);
+        if (targetAddress == Ipv4Address::GetAny())
+        {
+            return;
+        }
+        auto metrics = m_pingMetrics.find(ueNodeId);
+        if (metrics != m_pingMetrics.end())
+        {
+            if (target != m_targetSatellite.end())
+            {
+                ++metrics->second.targetChanges;
+            }
+            metrics->second.lastSatelliteNodeId = beam.satelliteNodeId;
+        }
+        const auto existingPing = m_pingApplications.find(ueNodeId);
+        if (existingPing != m_pingApplications.end() && existingPing->second)
+        {
+            // Ping::Send reads Destination for every request. Retargeting the
+            // existing application preserves its send phase across policies.
+            existingPing->second->SetAttribute("Destination", AddressValue(targetAddress));
+            m_targetSatellite[ueNodeId] = beam.satelliteNodeId;
+            return;
+        }
         InstallPing(ueNodeId, beam.satelliteNodeId);
     }
 
   private:
+    struct PingMetrics
+    {
+        uint32_t ueIndex{0};
+        Time expectedStart{Seconds(0)};
+        uint64_t txPackets{0};
+        uint64_t rxPackets{0};
+        uint64_t dropEvents{0};
+        uint64_t txPayloadBytes{0};
+        uint64_t rxPayloadBytes{0};
+        uint64_t rttSamples{0};
+        double rttSumMs{0.0};
+        double rttMinMs{std::numeric_limits<double>::infinity()};
+        double rttMaxMs{0.0};
+        uint32_t targetChanges{0};
+        uint32_t lastSatelliteNodeId{std::numeric_limits<uint32_t>::max()};
+        bool hasTx{false};
+        Time firstTx{Seconds(0)};
+        Time lastTx{Seconds(0)};
+    };
+
+    struct TimeSeriesMetrics
+    {
+        uint64_t txPackets{0};
+        uint64_t rxPackets{0};
+        uint64_t dropEvents{0};
+        uint64_t txPayloadBytes{0};
+        uint64_t rxPayloadBytes{0};
+        uint64_t rttSamples{0};
+        double rttSumMs{0.0};
+        double rttMinMs{std::numeric_limits<double>::infinity()};
+        double rttMaxMs{0.0};
+        std::set<uint32_t> activeUeNodeIds;
+    };
+
     // ns-3 Ping uses a 16-bit sequence number for both its wire header and its
     // internal request lookup. Keep every LeoSim-created Ping comfortably below
     // the 65,536-request wrap boundary, then replace it with a fresh segment.
     // This leaves the ns-3 core untouched while keeping each printed RTT/loss
     // summary valid.
     static constexpr uint32_t PING_SEGMENT_REQUEST_LIMIT = 60000;
+
+    uint64_t CurrentTimeBin() const
+    {
+        return static_cast<uint64_t>(std::max(0.0, Simulator::Now().GetSeconds()));
+    }
+
+    void OnPingTx(uint32_t ueNodeId, uint16_t /*sequence*/, Ptr<Packet> /*packet*/)
+    {
+        auto metrics = m_pingMetrics.find(ueNodeId);
+        if (metrics == m_pingMetrics.end())
+        {
+            return;
+        }
+        ++metrics->second.txPackets;
+        metrics->second.txPayloadBytes += m_packetSize;
+        metrics->second.lastTx = Simulator::Now();
+        if (!metrics->second.hasTx)
+        {
+            metrics->second.hasTx = true;
+            metrics->second.firstTx = Simulator::Now();
+        }
+        TimeSeriesMetrics& timeSeries = m_timeSeriesMetrics[CurrentTimeBin()];
+        ++timeSeries.txPackets;
+        timeSeries.txPayloadBytes += m_packetSize;
+        timeSeries.activeUeNodeIds.insert(ueNodeId);
+    }
+
+    void OnPingRtt(uint32_t ueNodeId, uint16_t /*sequence*/, Time rtt)
+    {
+        auto metrics = m_pingMetrics.find(ueNodeId);
+        if (metrics == m_pingMetrics.end())
+        {
+            return;
+        }
+        const double rttMs = rtt.GetSeconds() * 1000.0;
+        ++metrics->second.rxPackets;
+        metrics->second.rxPayloadBytes += m_packetSize;
+        ++metrics->second.rttSamples;
+        metrics->second.rttSumMs += rttMs;
+        metrics->second.rttMinMs = std::min(metrics->second.rttMinMs, rttMs);
+        metrics->second.rttMaxMs = std::max(metrics->second.rttMaxMs, rttMs);
+
+        TimeSeriesMetrics& timeSeries = m_timeSeriesMetrics[CurrentTimeBin()];
+        ++timeSeries.rxPackets;
+        timeSeries.rxPayloadBytes += m_packetSize;
+        ++timeSeries.rttSamples;
+        timeSeries.rttSumMs += rttMs;
+        timeSeries.rttMinMs = std::min(timeSeries.rttMinMs, rttMs);
+        timeSeries.rttMaxMs = std::max(timeSeries.rttMaxMs, rttMs);
+    }
+
+    void OnPingDrop(uint32_t ueNodeId,
+                    uint16_t /*sequence*/,
+                    Ping::DropReason /*reason*/)
+    {
+        auto metrics = m_pingMetrics.find(ueNodeId);
+        if (metrics == m_pingMetrics.end())
+        {
+            return;
+        }
+        ++metrics->second.dropEvents;
+        ++m_timeSeriesMetrics[CurrentTimeBin()].dropEvents;
+    }
 
     Ipv4Address ResolveSatelliteLinkAddress(uint32_t ueNodeId, uint32_t satelliteNodeId) const
     {
@@ -809,7 +1035,8 @@ class SatellitePinger
             return;
         }
 
-        // Retire the previous ping to the old satellite, if any. A ping that was
+        // Retire the previous wrap-safe segment, if any. Handovers retarget the
+        // live Ping in OnBeamState() and never enter this replacement path. A Ping that was
         // installed at this exact sim time has not started yet (its Initialize and
         // Start events are still queued): disposing it there would leave those
         // events pending (a stale ping to the old satellite) and call
@@ -829,8 +1056,8 @@ class SatellitePinger
             }
         }
 
-        // A handover or a scheduled segment rollover supersedes the previous
-        // rollover event. Cancel it before installing the replacement ping.
+        // A scheduled segment rollover supersedes the previous rollover event.
+        // Cancel it before installing the replacement ping.
         const auto rollover = m_pingRolloverEvents.find(ueNodeId);
         if (rollover != m_pingRolloverEvents.end() && rollover->second.IsPending())
         {
@@ -846,19 +1073,23 @@ class SatellitePinger
         // observable for each wrap-safe association segment.
         ping.SetAttribute("VerboseMode", EnumValue(Ping::QUIET));
         ApplicationContainer apps = ping.Install(ueIt->second);
-        // Application::DoInitialize feeds m_startTime/m_stopTime into
-        // Simulator::Schedule, which treats its first argument as a RELATIVE delay
-        // (tAbsolute = delay + currentTs), while Ping::StartApplication reads
-        // m_stopTime as an ABSOLUTE time (delta = m_stopTime - Now()). The two only
-        // agree for apps created at setup (currentTs == 0). For mid-sim pings the
-        // only value satisfying both is a zero start (relative -> Start fires at
-        // Now()) plus an absolute stop (m_stopTime) so delta stays positive and
-        // Ping::PrintReport never divides by m_seq == 0. The Stop event that
-        // DoInitialize schedules at Now() + m_stopTime lands after Simulator::Stop,
-        // so it never fires and is harmless.
+        Ptr<Ping> pingApplication = DynamicCast<Ping>(apps.Get(0));
+        NS_ABORT_MSG_IF(!pingApplication, "Satellite PingHelper installed a non-Ping application");
+        pingApplication->TraceConnectWithoutContext(
+            "Tx",
+            MakeCallback(&SatellitePinger::OnPingTx, this, ueNodeId));
+        pingApplication->TraceConnectWithoutContext(
+            "Rtt",
+            MakeCallback(&SatellitePinger::OnPingRtt, this, ueNodeId));
+        pingApplication->TraceConnectWithoutContext(
+            "Drop",
+            MakeCallback(&SatellitePinger::OnPingDrop, this, ueNodeId));
+        // Applications added after Simulator::Run begins schedule start/stop
+        // values as relative delays. Start now and stop at the remaining part
+        // of the common absolute application window.
         apps.Start(Seconds(0));
-        apps.Stop(Seconds(m_stopTime));
-        m_pingApplications[ueNodeId] = apps.Get(0);
+        apps.Stop(Seconds(m_stopTime - Simulator::Now().GetSeconds()));
+        m_pingApplications[ueNodeId] = pingApplication;
         m_targetSatellite[ueNodeId] = satelliteNodeId;
         m_pingStartTime[ueNodeId] = Simulator::Now();
 
@@ -874,34 +1105,37 @@ class SatellitePinger
                 Simulator::Schedule(Seconds(rolloverDelay),
                                     &SatellitePinger::RolloverPing,
                                     this,
-                                    ueNodeId,
-                                    satelliteNodeId);
+                                    ueNodeId);
         }
     }
 
-    void RolloverPing(uint32_t ueNodeId, uint32_t expectedSatelliteNodeId)
+    void RolloverPing(uint32_t ueNodeId)
     {
         if (Simulator::Now().GetSeconds() >= m_stopTime)
         {
             return;
         }
         const auto target = m_targetSatellite.find(ueNodeId);
-        if (target == m_targetSatellite.end() || target->second != expectedSatelliteNodeId)
+        if (target == m_targetSatellite.end())
         {
             return;
         }
-        InstallPing(ueNodeId, expectedSatelliteNodeId);
+        InstallPing(ueNodeId, target->second);
     }
 
     Ptr<LeoSimBeamManager> m_beamManager;
     LeoSimDeviceInstaller* m_accessInstaller;
     std::map<uint32_t, Ptr<Node>> m_ueNodeById;
+    std::map<uint32_t, uint32_t> m_ueIndexByNodeId;
     std::map<uint32_t, Ptr<Node>> m_satNodeById;
     std::set<uint32_t> m_eligibleUeNodeIds;
+    std::map<uint32_t, Time> m_eligibleStartTimes;
     std::map<uint32_t, uint32_t> m_targetSatellite;
     std::map<uint32_t, Ptr<Application>> m_pingApplications;
     std::map<uint32_t, Time> m_pingStartTime;
     std::map<uint32_t, EventId> m_pingRolloverEvents;
+    std::map<uint32_t, PingMetrics> m_pingMetrics;
+    std::map<uint64_t, TimeSeriesMetrics> m_timeSeriesMetrics;
     double m_interval;
     uint32_t m_packetSize;
     double m_stopTime;
@@ -978,6 +1212,7 @@ main(int argc, char* argv[])
     bool beamDemandAware = true;
     double beamActiveUserTimeoutMs = 200.0;
     double beamCapacityUpdateIntervalMs = 100.0;
+    double beamCapacityLogIntervalMs = 0.0;
     bool enableBeamCapacityLogging = false;
     std::string accessDelay = "1ms";
     std::string delayMode = "geometry";
@@ -1034,7 +1269,9 @@ main(int argc, char* argv[])
     uint32_t tcpPacketSize = 1024;
     std::string udpRate = "1Mbps";
     uint32_t udpPacketSize = 1400;
+    bool enableDataTraffic = true;
     bool allToAllTraffic = true;
+    bool enableGroundStations = true;
     bool enableUePing = false;
     uint32_t uePingStartIndex = 1;
     uint32_t uePingPairs = 100;
@@ -1049,6 +1286,7 @@ main(int argc, char* argv[])
     double satellitePingLoadRamp = 0.0;
     double satellitePingMaxRate = 50.0;
     double satellitePingRampInterval = 1.0;
+    uint32_t satellitePingMetricsVersion = 1;
     bool enableDynamicGroundNodes = false;
     uint32_t initialUes = 0;
     double ueIntroductionStart = 30.0;
@@ -1136,6 +1374,10 @@ main(int argc, char* argv[])
     cmd.AddValue("beamCapacityUpdateIntervalMs",
                  "Beam capacity allocation refresh interval in milliseconds",
                  beamCapacityUpdateIntervalMs);
+    cmd.AddValue("beamCapacityLogIntervalMs",
+                 "Minimum interval between capacity CSV snapshots in milliseconds; "
+                 "0 logs every update",
+                 beamCapacityLogIntervalMs);
     cmd.AddValue("enableBeamCapacityLogging",
                  "Write per-user beam capacity allocations to CSV",
                  enableBeamCapacityLogging);
@@ -1227,9 +1469,16 @@ main(int argc, char* argv[])
     cmd.AddValue("appStop", "Traffic application stop time in seconds", appStop);
     cmd.AddValue("tcpRate", "TCP OnOff offered rate, e.g. 1Mbps", tcpRate);
     cmd.AddValue("tcpPacketSize", "TCP application packet size in bytes", tcpPacketSize);
+    cmd.AddValue("enableDataTraffic",
+                 "Install TCP/UDP data applications (ping applications are controlled separately)",
+                 enableDataTraffic);
     cmd.AddValue("allToAllTraffic",
                  "Install one TCP flow from every UE to every server/GSS",
                  allToAllTraffic);
+    cmd.AddValue("enableGroundStations",
+                 "Load and simulate ground stations (servers); disable for a UE-only "
+                 "ping-to-serving-satellite scenario with no data traffic",
+                 enableGroundStations);
     cmd.AddValue("enableUePing",
                  "Install scalable ICMP ping traffic between bounded disjoint UE pairs",
                  enableUePing);
@@ -1267,6 +1516,9 @@ main(int argc, char* argv[])
     cmd.AddValue("satellitePingRampInterval",
                  "Seconds between ping-load ramp re-applications",
                  satellitePingRampInterval);
+    cmd.AddValue("satellitePingMetricsVersion",
+                 "Required structured satellite-ping metrics schema version (currently 1)",
+                 satellitePingMetricsVersion);
     cmd.AddValue("udpRate", "Per-direction UDP CBR offered rate, e.g. 1Mbps", udpRate);
     cmd.AddValue("udpPacketSize", "UDP application packet size in bytes", udpPacketSize);
     cmd.AddValue("enableDynamicGroundNodes",
@@ -1363,7 +1615,8 @@ main(int argc, char* argv[])
     {
         NS_FATAL_ERROR("beamScheduler must be alpha-fair, pf, or equal");
     }
-    if (beamCapacityUpdateIntervalMs <= 0.0 || beamActiveUserTimeoutMs < 0.0 ||
+    if (beamCapacityUpdateIntervalMs <= 0.0 || beamCapacityLogIntervalMs < 0.0 ||
+        beamActiveUserTimeoutMs < 0.0 ||
         alphaFairness < 0.0 || queuePressureWeight < 0.0)
     {
         NS_FATAL_ERROR("Invalid beam capacity scheduler timing configuration");
@@ -1375,21 +1628,28 @@ main(int argc, char* argv[])
         NS_FATAL_ERROR("Dynamic UE introduction requires a non-negative start time, positive "
                        "interval, and non-zero batch size");
     }
+    constexpr uint32_t MAX_IPV4_ICMP_PAYLOAD = 65507;
     if (enableUePing &&
         (uePingPairs == 0 || uePingInterval <= 0.0 || uePingPacketSize < 16 ||
+         uePingPacketSize > MAX_IPV4_ICMP_PAYLOAD ||
          uePingStaggerWindow < 0.0))
     {
-        NS_FATAL_ERROR("UE ping requires positive pair count/interval, payload >=16 bytes, and "
-                       "non-negative stagger window");
+        NS_FATAL_ERROR("UE ping requires positive pair count/interval, a 16..65507-byte IPv4 "
+                       "payload, and non-negative stagger window");
     }
     if (enableSatellitePing &&
         (satellitePingInterval <= 0.0 || satellitePingPacketSize < 16 ||
+         satellitePingPacketSize > MAX_IPV4_ICMP_PAYLOAD ||
          satellitePingStaggerWindow < 0.0 || satellitePingLoadRamp < 0.0 ||
          satellitePingMaxRate <= 0.0 || satellitePingRampInterval <= 0.0))
     {
-        NS_FATAL_ERROR("Satellite ping requires positive interval, payload >=16 bytes, "
-                       "non-negative stagger window, non-negative load ramp, and positive "
-                       "max rate and ramp interval");
+        NS_FATAL_ERROR("Satellite ping requires positive interval, a 16..65507-byte IPv4 "
+                       "payload, non-negative stagger window/load ramp, and positive max "
+                       "rate and ramp interval");
+    }
+    if (satellitePingMetricsVersion != 1)
+    {
+        NS_FATAL_ERROR("satellitePingMetricsVersion must be 1");
     }
     if (uniqueOutputPrefix)
     {
@@ -1433,6 +1693,13 @@ main(int argc, char* argv[])
     Ptr<LeoSimLoader> loader = loaderHelper.GetLoader();
     auto serverDeviceIds = loader->GetGroundDeviceIdsByType("SERVER");
     auto ueDeviceIds = loader->GetGroundDeviceIdsByType("UE");
+    if (!enableGroundStations)
+    {
+        // Ground stations are disabled: drop every loaded server so the
+        // scenario is UE-only (servers would drive no traffic and are not
+        // simulated at all).
+        serverDeviceIds.clear();
+    }
     if (groundDevicesPerOperator > 0)
     {
         auto selectPerOperator = [&](const std::vector<uint32_t>& deviceIds,
@@ -1474,9 +1741,11 @@ main(int argc, char* argv[])
             return 1;
         }
     }
-    if (loader->GetNumSatellites() == 0 || serverDeviceIds.empty() || ueDeviceIds.empty())
+    if (loader->GetNumSatellites() == 0 || ueDeviceIds.empty() ||
+        (enableGroundStations && serverDeviceIds.empty()))
     {
-        std::cerr << "Error: need at least 1 satellite, 1 server, and 1 UE." << std::endl;
+        std::cerr << "Error: need at least 1 satellite and 1 UE"
+                  << (enableGroundStations ? ", and 1 server" : "") << "." << std::endl;
         return 1;
     }
 
@@ -1542,7 +1811,9 @@ main(int argc, char* argv[])
                   << ueDeviceIds.size() << " were loaded." << std::endl;
         return 1;
     }
-    if (serverId >= numServers || ueId >= numUes)
+    // With no ground stations (numServers == 0) no server/UE data endpoint is
+    // selected, so the endpoint bounds check is skipped entirely.
+    if (numServers > 0 && (serverId >= numServers || ueId >= numUes))
     {
         std::cerr << "Error: selected endpoint is outside loaded subset: serverId=" << serverId
                   << "/" << numServers << ", ueId=" << ueId << "/" << numUes << std::endl;
@@ -1916,18 +2187,28 @@ main(int argc, char* argv[])
     else
     {
         // TCP data and acknowledgements require both selected endpoints, but
-        // unrelated ground nodes do not need trees or host routes.
-        routingDestinations.Add(serverNodes.Get(serverId));
+        // unrelated ground nodes do not need trees or host routes. With ground
+        // stations disabled there is no server endpoint; the selected UE is the
+        // only application endpoint (satellite pings traverse the serving access
+        // link directly and need no ISL destination trees).
+        if (numServers > 0)
+        {
+            routingDestinations.Add(serverNodes.Get(serverId));
+            routingSources.Add(serverNodes.Get(serverId));
+            statisticsRouteDestinations.Add(serverNodes.Get(serverId));
+        }
         routingDestinations.Add(ueNodes.Get(ueId));
-        routingSources.Add(serverNodes.Get(serverId));
         routingSources.Add(ueNodes.Get(ueId));
         statisticsRouteSources.Add(ueNodes.Get(ueId));
-        statisticsRouteDestinations.Add(serverNodes.Get(serverId));
     }
     if (enableUePing && !allToAllTraffic)
     {
-        std::set<uint32_t> addedNodeIds = {serverNodes.Get(serverId)->GetId(),
-                                           ueNodes.Get(ueId)->GetId()};
+        std::set<uint32_t> addedNodeIds;
+        if (numServers > 0)
+        {
+            addedNodeIds.insert(serverNodes.Get(serverId)->GetId());
+        }
+        addedNodeIds.insert(ueNodes.Get(ueId)->GetId());
         for (const auto& [sourceIndex, destinationIndex] : uePingPairIndices)
         {
             for (uint32_t ueIndex : {sourceIndex, destinationIndex})
@@ -1965,8 +2246,12 @@ main(int argc, char* argv[])
                                                combinedCriticalUtilization);
     if (!allToAllTraffic)
     {
-        std::set<uint32_t> routableIds = {serverNodes.Get(serverId)->GetId(),
-                                         ueNodes.Get(ueId)->GetId()};
+        std::set<uint32_t> routableIds;
+        if (numServers > 0)
+        {
+            routableIds.insert(serverNodes.Get(serverId)->GetId());
+        }
+        routableIds.insert(ueNodes.Get(ueId)->GetId());
         for (const auto& [sourceIndex, destinationIndex] : uePingPairIndices)
         {
             routableIds.insert(ueNodes.Get(sourceIndex)->GetId());
@@ -2043,7 +2328,11 @@ main(int argc, char* argv[])
     Ptr<LeoSimBeamManager> beamManager =
         beamHelper.Install(allGroundNodes, satelliteNodes, Seconds(simTime));
     beamManager->SetOperatorModel(operatorModel);
-    if (allToAllTraffic)
+    // Handover success should validate the paths used by installed data flows.
+    // With ping-only traffic to the serving satellite there is no remote ground
+    // peer, so leaving this map empty deliberately selects the beam manager's
+    // access-link validation path.
+    if (enableDataTraffic && allToAllTraffic)
     {
         for (uint32_t i = 0; i < ueNodes.GetN(); ++i)
         {
@@ -2054,7 +2343,7 @@ main(int argc, char* argv[])
             beamManager->SetHandoverValidationPeers(serverNodes.Get(i)->GetId(), ueNodes);
         }
     }
-    else
+    else if (enableDataTraffic && numServers > 0)
     {
         NodeContainer selectedServer;
         selectedServer.Add(serverNodes.Get(serverId));
@@ -2070,10 +2359,13 @@ main(int argc, char* argv[])
     }
     timer.Log("beam manager installation");
 
-    // Optional: every UE except the UE-0 GS traffic endpoint continuously pings
-    // whichever satellite it is currently connected to, retargeted on handover.
+    // Optional: every UE in the configured index range continuously pings its
+    // currently connected satellite, retargeted on handover.
     // Declared here (outside the gate) so the beam-state callback and the
     // scheduled initial pings stay valid for the whole Simulator::Run below.
+    const std::string satellitePingCsvFile = outputPrefix + "-satellite-ping.csv";
+    const std::string satellitePingTimeSeriesCsvFile =
+        outputPrefix + "-satellite-ping-timeseries.csv";
     SatellitePinger satellitePinger(beamManager,
                                     &accessInstaller,
                                     ueNodes,
@@ -2168,6 +2460,7 @@ main(int argc, char* argv[])
         if (enableBeamCapacityLogging)
         {
             const std::string beamCapacityFile = outputPrefix + "-beam-capacity.csv";
+            beamCapacityManager->SetCsvOutputInterval(MilliSeconds(beamCapacityLogIntervalMs));
             beamCapacityManager->EnableCsvOutput(beamCapacityFile);
             std::cout << "Beam capacity data: " << beamCapacityFile << std::endl;
         }
@@ -2311,7 +2604,13 @@ main(int argc, char* argv[])
 
     timer.Begin("traffic application installation");
     ApplicationContainer trafficApps;
-    if (allToAllTraffic)
+    if (!enableDataTraffic)
+    {
+        std::cout << "TCP/UDP data traffic disabled; only explicitly enabled ping applications "
+                     "will run"
+                  << std::endl;
+    }
+    else if (allToAllTraffic)
     {
         trafficApps = InstallAllTcpFlows(ueNodes,
                                          serverNodes,
@@ -2325,6 +2624,11 @@ main(int argc, char* argv[])
     }
     else
     {
+        if (numServers == 0)
+        {
+            NS_FATAL_ERROR("Single-flow UDP data traffic requires a ground station (server); "
+                           "enable ground stations or disable data traffic");
+        }
         const double selectedUeStart =
             std::max(appStart, ueActivationTimes.at(ueId));
         if (selectedUeStart >= appStop)
@@ -2457,6 +2761,13 @@ main(int argc, char* argv[])
     if (enableHandoverLogging)
     {
         std::cout << "Handover data: " << handoverFile << std::endl;
+    }
+    if (enableSatellitePing)
+    {
+        satellitePinger.WriteCsvOutputs(satellitePingCsvFile,
+                                        satellitePingTimeSeriesCsvFile);
+        std::cout << "Satellite ping data: " << satellitePingCsvFile << ", "
+                  << satellitePingTimeSeriesCsvFile << std::endl;
     }
 
     if (enableVisualization || enableHandoverLogging)

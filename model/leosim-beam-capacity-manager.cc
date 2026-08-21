@@ -45,6 +45,9 @@ LeoSimBeamCapacityManager::LeoSimBeamCapacityManager()
       m_satelliteDownlinkCapacity(std::numeric_limits<uint64_t>::max()),
       m_updateInterval(MilliSeconds(100)),
       m_activeUserTimeout(MilliSeconds(200)),
+      m_csvOutputInterval(Time(0)),
+      m_lastCsvWrite(Time(0)),
+      m_hasCsvWrite(false),
       m_scheduler(LEOSIM_BEAM_SCHEDULER_PROPORTIONAL_FAIR),
       m_alphaFairness(1.0),
       m_queueDelayWeight(1.0),
@@ -166,6 +169,13 @@ LeoSimBeamCapacityManager::SetUpdateInterval(Time interval)
 {
     NS_ABORT_MSG_IF(interval <= Time(0), "Beam capacity update interval must be positive");
     m_updateInterval = interval;
+}
+
+void
+LeoSimBeamCapacityManager::SetCsvOutputInterval(Time interval)
+{
+    NS_ABORT_MSG_IF(interval < Time(0), "Beam capacity CSV interval cannot be negative");
+    m_csvOutputInterval = interval;
 }
 
 void
@@ -798,6 +808,7 @@ LeoSimBeamCapacityManager::EnableCsvOutput(const std::string& filename)
     }
     m_csv.open(filename, std::ios::out | std::ios::trunc);
     NS_ABORT_MSG_IF(!m_csv.is_open(), "Cannot open beam capacity CSV: " << filename);
+    m_hasCsvWrite = false;
     m_csv << "time_s,satellite_id,beam_id,ground_id,associated_nodes,active_uplink_nodes,"
              "active_downlink_nodes,uplink_beam_capacity_bps,downlink_beam_capacity_bps,"
              "uplink_package_cap_bps,downlink_package_cap_bps,uplink_minimum_bps,"
@@ -834,7 +845,13 @@ LeoSimBeamCapacityManager::RestoreLink(const LinkKey& key)
 void
 LeoSimBeamCapacityManager::WriteCsvRows()
 {
-    if (!m_csv.is_open())
+    if (!m_csv.is_open() || m_allocations.empty())
+    {
+        return;
+    }
+    const Time now = Simulator::Now();
+    if (m_hasCsvWrite && m_csvOutputInterval > Time(0) &&
+        now - m_lastCsvWrite < m_csvOutputInterval)
     {
         return;
     }
@@ -853,6 +870,8 @@ LeoSimBeamCapacityManager::WriteCsvRows()
               << allocation.downlinkLimitReason << '\n';
     }
     m_csv.flush();
+    m_lastCsvWrite = now;
+    m_hasCsvWrite = true;
 }
 
 } // namespace ns3
