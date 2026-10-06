@@ -156,7 +156,7 @@ class LeoSimLoader : public Object
                              bool clearExisting = false);
 
     /**
-     * \brief Load ground stations and UEs from contrib/leosim/data layout.
+     * \brief Load ground stations and UEs from caller-supplied data-directory layout.
      *
      * Scans:
      *   files under <dataDir>/gss with .txt suffix as ground stations
@@ -171,7 +171,7 @@ class LeoSimLoader : public Object
     uint32_t LoadGroundDevicesFromDataDirectory(const std::string& dataDir);
 
     /**
-     * \brief Load ground stations and UEs from contrib/leosim/data layout.
+     * \brief Load ground stations and UEs from caller-supplied data-directory layout.
      *
      * If operators is empty, this behaves like LoadGroundDevicesFromDataDirectory(dataDir)
      * and discovers operators from file names. Otherwise, for each operator token, this loads:
@@ -186,7 +186,7 @@ class LeoSimLoader : public Object
                                                 const std::vector<LeoSimOperatorId>& operators);
 
     /**
-     * \brief Assign satellite operators from contrib/leosim/data/tles file names.
+     * \brief Assign satellite operators from the supplied data directory's tles file names.
      *
      * Scans .txt and .csv files under <dataDir>/tles in lexical order. Each valid TLE triplet
      * in a text file or CelesTrak-style CSV row assigns the next zero-based satellite index

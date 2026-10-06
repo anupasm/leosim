@@ -1,10 +1,14 @@
 # Build artifacts
 build/
+/CMakeFiles/
+/Makefile
+/cmake_install.cmake
 *.o
 *.a
 *.so
 *.pyc
 __pycache__/
+.pytest_cache/
 
 # IDE
 .vscode/
@@ -15,11 +19,15 @@ __pycache__/
 # Temp files
 .DS_Store
 *.tmp
-CMakeFiles/*
 data-*/
 
 data/prepro/*
+data-b/prepro/*
+data-b/prepro-all-*/*
 logs/*
 handover_logs/*
+/results/
+/tmp-*/
+/utils/rengine/leosim-rengine
 
 !data-b/

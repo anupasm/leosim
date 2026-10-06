@@ -1,7 +1,0 @@
-beta_ue_Singapore,1.3521,103.8198,15.0
-beta_ue_Jakarta,-6.2088,106.8456,8.0
-beta_ue_Delhi,28.6139,77.2090,216.0
-beta_ue_Sydney,-33.8688,151.2093,58.0
-beta_ue_Bangkok,13.7563,100.5018,2.0
-beta_ue_Manila,14.5995,120.9842,16.0
-beta_ue_Perth,-31.9505,115.8605,32.0

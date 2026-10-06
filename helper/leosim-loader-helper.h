@@ -69,7 +69,7 @@ class LeoSimLoaderHelper
     bool LoadGroundDevicesFromCsv(const std::string& filename);
 
     /**
-     * \brief Load ground stations and UEs from contrib/leosim/data layout.
+     * \brief Load ground stations and UEs from caller-supplied data-directory layout.
      *
      * Operator IDs are inferred from .txt file names under gss and ues.
      *
@@ -79,7 +79,7 @@ class LeoSimLoaderHelper
     bool LoadGroundDevicesFromDataDirectory(const std::string& dataDir);
 
     /**
-     * \brief Load ground stations and UEs from contrib/leosim/data layout.
+     * \brief Load ground stations and UEs from caller-supplied data-directory layout.
      *
      * \param dataDir LeoSim data directory
      * \param operators Operator identifiers to load; empty means discover from file names

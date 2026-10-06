@@ -1,99 +1,17 @@
-# LeoSim routing and handover experiments
+# LeoSim example
 
-`leosim-experiments.cc` is the single LeoSim example executable. It combines the
-shared topology, satellite mobility, access links, dynamic ISL routing, TCP
-traffic, FlowMonitor, statistics, beam management, and BHO/CHO handover logic so
-routing and handover treatments use the same scenario implementation.
+`leosim-experiments.cc` demonstrates how to compose LeoSim mobility, channel,
+beam, routing, handover, traffic, and statistics components in an ns-3
+simulation.
 
-Run all commands below from the `ns3` directory.
-
-## Build
+Build and inspect its options from the ns-3 root:
 
 ```bash
-CCACHE_DISABLE=1 ./ns3 build leosim-experiments
-```
-
-List every available option:
-
-```bash
+./ns3 configure --enable-examples
+./ns3 build leosim-experiments
 ./ns3 run "leosim-experiments --PrintHelp" --no-build
 ```
 
-## Routing experiment
-
-Select a routing metric with `--routingMetric`. Supported values are `hop`,
-`distance`, `path-loss`, `snr`, `signal-strength`, `lifetime`, and `load`.
-
-```bash
-./ns3 run "leosim-experiments \
-  --simTime=1200 --numSatellites=1000 \
-  --enableDynamicRouting=1 --routingUpdateInterval=30 \
-  --routingMetric=distance --maxIslNeighbors=4 \
-  --tcpRate=1Mbps --outputPrefix=results/routing-distance"
-```
-
-The SONIC routing sweep is submitted from the repository root after building the
-container image:
-
-```bash
-sbatch ns3/contrib/leosim/utils/sonic/run_leosim_routing.sbatch
-```
-
-## Handover experiment
-
-The executable supports reactive BHO and predictive CHO. `--choPrep` and
-`--choExec` are milliseconds; `--ttt`, `--t310`, and `--tteTrigger` are seconds.
-Use a unique `--outputPrefix` for each run.
-
-BHO baseline:
-
-```bash
-./ns3 run "leosim-experiments \
-  --simTime=300 --numUes=20 --numServers=4 \
-  --hoMode=BHO --maxCandidates=1 --enableHoBuffering=0 --hoBufferSize=1024 \
-  --tcpRate=1Mbps --enableHandoverLogging=1 \
-  --outputPrefix=results/handover-bho"
-```
-
-CHO with three candidates and buffering:
-
-```bash
-./ns3 run "leosim-experiments \
-  --simTime=300 --numUes=20 --numServers=4 \
-  --hoMode=CHO --maxCandidates=3 --enableHoBuffering=1 --hoBufferSize=1024 \
-  --ttt=1 --t310=1 --a3Offset=3 --a4Threshold=-110 \
-  --tteTrigger=30 --choPrep=100 --choExec=150 \
-  --beamUpdateIntervalMs=100 --tcpRate=1Mbps \
-  --enableHandoverLogging=1 --outputPrefix=results/handover-cho3"
-```
-
-Submit the full BHO/CHO SONIC factorial campaign from the repository root:
-
-```bash
-sbatch experiments/handover/sonic-handover-paper.sbatch
-```
-
-## Main outputs
-
-With `--outputPrefix=DIR/result`, the experiment writes files including:
-
-- `DIR/result-statistics.csv` and `DIR/result-statistics.json`
-- `DIR/result-handovers.csv`
-- `DIR/result-flowmon.xml`
-- optional route, beam, visualization, and ISL-load traces when enabled
-
-The statistics outputs distinguish IP-layer throughput from exact application
-goodput. `throughput_mbps` uses aggregate FlowMonitor received bytes over elapsed
-simulation time, while `application.goodput_mbps` in JSON uses payload bytes from
-all registered `PacketSink` applications over `[appStart, appStop]`. The
-application section also records `rx_bytes`, the measurement duration, sink
-counts, per-sink minimum/mean/maximum goodput, and Jain fairness. Periodic CSV
-snapshots include cumulative `app_rx_bytes` and `goodput_mbps`, plus
-`interval_goodput_mbps` for direct stall/outage visualization.
-
-For reproducible replications, set the ns-3 seed and run number:
-
-```bash
-NS_GLOBAL_VALUE="RngSeed=20260803;RngRun=1" \
-  ./ns3 run "leosim-experiments --simTime=300 --outputPrefix=results/run-1"
-```
+Research designs, Slurm runners, analysis scripts, and generated results are
+kept outside the reusable module under `experiments/leosim/` and
+`results/leosim/` in the development workspace.

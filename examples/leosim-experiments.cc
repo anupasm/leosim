@@ -1180,8 +1180,8 @@ PrintFlowMonitorSummary(Ptr<FlowMonitor> monitor, Ptr<Ipv4FlowClassifier> classi
 int
 main(int argc, char* argv[])
 {
-    std::string leosimDataDir = "contrib/leosim/data";
-    std::string satelliteFile = leosimDataDir + "/prepro/satellite_mobility.tcl";
+    std::string leosimDataDir = "datasets/leosim/default";
+    std::string satelliteFile = "../datasets/leosim/generated/default/prepro/satellite_mobility.tcl";
     std::string groundDeviceFile;
     std::string outputPrefix = "leosim-experiments";
     bool uniqueOutputPrefix = true;
@@ -2778,7 +2778,7 @@ main(int argc, char* argv[])
     {
         std::cout << "Visualization data: " << positionFile << ", " << linkFile << ", "
                   << packetFile << std::endl;
-        std::cout << "Render with: python3 contrib/leosim/utils/visualize_3d.py"
+        std::cout << "Render with: python3 ../experiments/leosim/visualization/visualize_3d.py"
                   << " --position_file " << positionFile << " --links " << linkFile
                   << " --packets " << packetFile
                   << " --output " << outputPrefix << "-visualization.html" << std::endl;

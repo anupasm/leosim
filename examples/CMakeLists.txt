@@ -7,6 +7,7 @@ build_lib_example(
     ${libcore}
     ${libflow-monitor}
     ${libinternet}
+    ${libinternet-apps}
     ${libmobility}
     ${libnetwork}
     ${libpoint-to-point}
