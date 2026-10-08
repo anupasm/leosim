@@ -7,6 +7,7 @@
 #include "ns3/data-rate.h"
 #include "ns3/event-id.h"
 #include "ns3/ptr.h"
+#include "ns3/traced-callback.h"
 
 namespace ns3
 {
@@ -14,6 +15,8 @@ namespace ns3
 class Socket;
 class Packet;
 class LeoSimBeamManager;
+class TcpHeader;
+class TcpSocketBase;
 
 /**
  * Rate-controlled LeoSim TCP source that treats transient no-route connection
@@ -45,6 +48,12 @@ class LeoSimTcpTrafficApplication : public Application
     void SendReady(Ptr<Socket> socket, uint32_t availableBytes);
     void ScheduleNextPacket();
     void ScheduleRetry();
+    void CongestionWindowChanged(uint32_t oldValue, uint32_t newValue);
+    void PacketRetransmitted(Ptr<const Packet> packet,
+                             const TcpHeader& header,
+                             const Address& localAddress,
+                             const Address& peerAddress,
+                             Ptr<const TcpSocketBase> socket);
 
     Address m_remote;
     DataRate m_dataRate{0};
@@ -57,6 +66,8 @@ class LeoSimTcpTrafficApplication : public Application
     EventId m_retryEvent;
     bool m_running{false};
     bool m_connected{false};
+    TracedCallback<uint32_t, uint32_t> m_congestionWindowTrace;
+    TracedCallback<Ptr<const Packet>> m_retransmissionTrace;
 };
 
 } // namespace ns3

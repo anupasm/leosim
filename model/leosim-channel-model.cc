@@ -585,6 +585,7 @@ LeoSimChannelModel::UpdateLink(uint32_t linkId)
     if (!isIsl)
     {
         bool elevationComputed = false;
+        uint32_t groundNodeId = std::numeric_limits<uint32_t>::max();
 
         Ptr<LeoSimMobilityModel> leoMob1 = node1->GetObject<LeoSimMobilityModel>();
         Ptr<LeoSimMobilityModel> leoMob2 = node2->GetObject<LeoSimMobilityModel>();
@@ -601,12 +602,14 @@ LeoSimChannelModel::UpdateLink(uint32_t linkId)
             if (type1 == LEOSIM_SATELLITE && (type2 == LEOSIM_GATEWAY || type2 == LEOSIM_UE))
             {
                 elevationAngle = CalculateElevationAngle(pos2, pos1);
+                groundNodeId = node2->GetId();
                 elevationComputed = true;
                 NS_LOG_DEBUG("Computed elevation angle (ground->sat): " << elevationAngle << "°");
             }
             else if (type2 == LEOSIM_SATELLITE && (type1 == LEOSIM_GATEWAY || type1 == LEOSIM_UE))
             {
                 elevationAngle = CalculateElevationAngle(pos1, pos2);
+                groundNodeId = node1->GetId();
                 elevationComputed = true;
                 NS_LOG_DEBUG("Computed elevation angle (sat->ground): " << elevationAngle << "°");
             }
@@ -618,16 +621,20 @@ LeoSimChannelModel::UpdateLink(uint32_t linkId)
             NS_LOG_DEBUG("Computed default elevation angle: " << elevationAngle << "°");
         }
         info.quality.elevationAngle = elevationAngle;
+        const auto thresholdIt = m_groundNodeMinElevationAngles.find(groundNodeId);
+        const double minElevation = thresholdIt == m_groundNodeMinElevationAngles.end()
+                                        ? m_minElevationAngle
+                                        : thresholdIt->second;
 
         // Check elevation angle constraint (only for ground links)
-        if (elevationAngle < m_minElevationAngle)
+        if (elevationAngle < minElevation)
         {
             LeoSimLinkState oldState = info.quality.linkState;
             info.quality.linkState = LEOSIM_LINK_DOWN;
             info.quality.signalStrength = -200.0;
             info.quality.snr = -100.0;
 
-            NS_LOG_DEBUG("Elevation angle below minimum: " << elevationAngle << "° < " << m_minElevationAngle << "°");
+            NS_LOG_DEBUG("Elevation angle below minimum: " << elevationAngle << "° < " << minElevation << "°");
 
             if (oldState != LEOSIM_LINK_DOWN)
             {
@@ -635,7 +642,7 @@ LeoSimChannelModel::UpdateLink(uint32_t linkId)
                 if (m_verbose)
                 {
                     NS_LOG_DEBUG("Ground link " << linkId << " DOWN: elevation angle " << elevationAngle 
-                               << "° below minimum " << m_minElevationAngle << "°");
+                               << "° below minimum " << minElevation << "°");
                 }
             }
             return;
@@ -1075,6 +1082,14 @@ LeoSimChannelModel::SetMinElevationAngle(double angle)
 {
     NS_LOG_FUNCTION(this << angle);
     m_minElevationAngle = angle;
+}
+
+void
+LeoSimChannelModel::SetGroundNodeMinElevationAngle(uint32_t groundNodeId, double angle)
+{
+    NS_ABORT_MSG_IF(angle < -90.0 || angle > 90.0,
+                    "Ground-node elevation angle must be in [-90, 90] degrees");
+    m_groundNodeMinElevationAngles[groundNodeId] = angle;
 }
 
 double

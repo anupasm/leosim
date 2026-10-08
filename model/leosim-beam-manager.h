@@ -383,6 +383,9 @@ class LeoSimBeamManager : public Object
      */
     void SetElevationThreshold(double threshold);
 
+    /** Set a per-ground-node obstruction mask; other nodes use the global threshold. */
+    void SetGroundNodeElevationThreshold(uint32_t groundNodeId, double threshold);
+
     /**
      * \brief Set the minimum Time-To-Exit threshold for handover triggering
      * \param threshold TTE threshold
@@ -747,6 +750,7 @@ class LeoSimBeamManager : public Object
     double m_a3Offset = 3.0;                             //!< A3 offset (dB)
     double m_a4Threshold = -110.0;                       //!< A4 threshold (dBm)
     double m_elevationThreshold = 10.0;                  //!< Min elevation angle (degrees)
+    std::map<uint32_t, double> m_groundNodeElevationThresholds; //!< Per-node masks
     Time m_tteThreshold = Seconds(30.0);                 //!< Min TTE before HO (seconds)
     double m_weatherFadeThresholdDb = 15.0;              //!< Weather fade HO threshold (dB)
 

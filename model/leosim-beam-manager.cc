@@ -511,6 +511,14 @@ LeoSimBeamManager::SetElevationThreshold(double threshold)
 }
 
 void
+LeoSimBeamManager::SetGroundNodeElevationThreshold(uint32_t groundNodeId, double threshold)
+{
+    NS_ABORT_MSG_IF(threshold < -90.0 || threshold > 90.0,
+                    "Ground-node elevation threshold must be in [-90, 90] degrees");
+    m_groundNodeElevationThresholds[groundNodeId] = threshold;
+}
+
+void
 LeoSimBeamManager::SetTteThreshold(Time threshold)
 {
     NS_LOG_FUNCTION(this << threshold);
@@ -1008,11 +1016,16 @@ LeoSimBeamManager::ComputeTte(uint32_t ueNodeId, uint32_t satNodeId) const
                                                           << ueNodeId << ": " << currentElevation
                                                           << "°");
 
+    const auto thresholdIt = m_groundNodeElevationThresholds.find(ueNodeId);
+    const double elevationThreshold = thresholdIt == m_groundNodeElevationThresholds.end()
+                                          ? m_elevationThreshold
+                                          : thresholdIt->second;
+
     // If already below threshold, return 0
-    if (currentElevation < m_elevationThreshold)
+    if (currentElevation < elevationThreshold)
     {
         NS_LOG_DEBUG("Satellite " << satNodeId << " already below elevation threshold "
-                                  << m_elevationThreshold << "°");
+                                  << elevationThreshold << "°");
         return 0.0;
     }
 
@@ -1051,16 +1064,16 @@ LeoSimBeamManager::ComputeTte(uint32_t ueNodeId, uint32_t satNodeId) const
         }
 
         // Check if elevation just dropped below threshold
-        if (wasAboveThreshold && futureElevation < m_elevationThreshold)
+        if (wasAboveThreshold && futureElevation < elevationThreshold)
         {
             NS_LOG_DEBUG("Satellite " << satNodeId << " will drop below elevation threshold "
-                                      << m_elevationThreshold << "° at TTE=" << lastValidTime
+                                      << elevationThreshold << "° at TTE=" << lastValidTime
                                       << "s");
             return lastValidTime;
         }
 
         // Update tracking
-        if (futureElevation >= m_elevationThreshold)
+        if (futureElevation >= elevationThreshold)
         {
             lastValidTime = dt;
             wasAboveThreshold = true;
@@ -1093,6 +1106,11 @@ LeoSimBeamManager::ScanVisibleSatellites(uint32_t ueNodeId)
     }
 
     std::vector<LeoSimBeamRecord> visibleBeams;
+
+    const auto thresholdIt = m_groundNodeElevationThresholds.find(ueNodeId);
+    const double elevationThreshold = thresholdIt == m_groundNodeElevationThresholds.end()
+                                          ? m_elevationThreshold
+                                          : thresholdIt->second;
 
     if (!m_loader || !m_channelModel || !m_multiBeamModel || !m_sinrEngine)
     {
@@ -1131,7 +1149,7 @@ LeoSimBeamManager::ScanVisibleSatellites(uint32_t ueNodeId)
 
         if ((state != LEOSIM_LINK_UP && state != LEOSIM_LINK_DEGRADED) ||
             linkQuality.signalStrength < m_a4Threshold ||
-            linkQuality.elevationAngle < m_elevationThreshold)
+            linkQuality.elevationAngle < elevationThreshold)
         {
             continue;
         }

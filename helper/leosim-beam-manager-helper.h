@@ -170,6 +170,9 @@ class LeoSimBeamManagerHelper
      */
     void SetElevationThreshold(double elevationDeg);
 
+    /** Configure per-ground-node elevation masks before Install(). */
+    void SetGroundNodeElevationThresholds(const std::map<uint32_t, double>& thresholds);
+
     /**
      * \brief Set the Time-To-Exit threshold for handover trigger
      * \param tte TTE threshold (default: 30 seconds)
@@ -205,7 +208,8 @@ class LeoSimBeamManagerHelper
              double w5,
              double w6,
               double w7,
-              double w8 = 0.12);
+              double w8 = 0.12,
+              double w9 = 0.14);
 
     /**
      * \brief Set the maximum number of CHO candidates
@@ -420,10 +424,11 @@ class LeoSimBeamManagerHelper
     double m_a3Offset;
     double m_a4Threshold;
     double m_elevationThreshold;
+    std::map<uint32_t, double> m_groundNodeElevationThresholds;
     Time m_tteThreshold;
 
     // TOPSIS weights
-    std::array<double, 8> m_topsisWeights;
+    std::array<double, 9> m_topsisWeights;
     uint32_t m_maxCandidates;
 
     // CHO timing

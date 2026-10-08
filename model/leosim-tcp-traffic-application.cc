@@ -9,6 +9,7 @@
 #include "ns3/simulator.h"
 #include "ns3/socket.h"
 #include "ns3/tcp-socket-factory.h"
+#include "ns3/tcp-socket-base.h"
 
 namespace ns3
 {
@@ -22,7 +23,17 @@ LeoSimTcpTrafficApplication::GetTypeId()
     static TypeId tid = TypeId("ns3::LeoSimTcpTrafficApplication")
                             .SetParent<Application>()
                             .SetGroupName("LeoSim")
-                            .AddConstructor<LeoSimTcpTrafficApplication>();
+                            .AddConstructor<LeoSimTcpTrafficApplication>()
+                            .AddTraceSource("CongestionWindow",
+                                            "TCP congestion window in bytes",
+                                            MakeTraceSourceAccessor(
+                                                &LeoSimTcpTrafficApplication::m_congestionWindowTrace),
+                                            "ns3::TracedValueCallback::Uint32")
+                            .AddTraceSource("Retransmission",
+                                            "A TCP data packet was retransmitted",
+                                            MakeTraceSourceAccessor(
+                                                &LeoSimTcpTrafficApplication::m_retransmissionTrace),
+                                            "ns3::Packet::TracedCallback");
     return tid;
 }
 
@@ -82,6 +93,16 @@ LeoSimTcpTrafficApplication::Connect()
         return;
     }
     m_socket = Socket::CreateSocket(GetNode(), TcpSocketFactory::GetTypeId());
+    Ptr<TcpSocketBase> tcpSocket = DynamicCast<TcpSocketBase>(m_socket);
+    if (tcpSocket)
+    {
+        tcpSocket->TraceConnectWithoutContext(
+            "CongestionWindow",
+            MakeCallback(&LeoSimTcpTrafficApplication::CongestionWindowChanged, this));
+        tcpSocket->TraceConnectWithoutContext(
+            "Retransmission",
+            MakeCallback(&LeoSimTcpTrafficApplication::PacketRetransmitted, this));
+    }
     m_socket->Bind();
     m_socket->SetConnectCallback(
         MakeCallback(&LeoSimTcpTrafficApplication::ConnectionSucceeded, this),
@@ -92,6 +113,22 @@ LeoSimTcpTrafficApplication::Connect()
     m_socket->SetSendCallback(MakeCallback(&LeoSimTcpTrafficApplication::SendReady, this));
     m_socket->Connect(m_remote);
     m_socket->ShutdownRecv();
+}
+
+void
+LeoSimTcpTrafficApplication::CongestionWindowChanged(uint32_t oldValue, uint32_t newValue)
+{
+    m_congestionWindowTrace(oldValue, newValue);
+}
+
+void
+LeoSimTcpTrafficApplication::PacketRetransmitted(Ptr<const Packet> packet,
+                                                  const TcpHeader&,
+                                                  const Address&,
+                                                  const Address&,
+                                                  Ptr<const TcpSocketBase>)
+{
+    m_retransmissionTrace(packet);
 }
 
 void

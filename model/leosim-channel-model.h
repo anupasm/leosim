@@ -208,6 +208,9 @@ class LeoSimChannelModel : public Object
      */
     void SetMinElevationAngle(double angle);
 
+    /** Set a ground-node-specific elevation mask; other nodes use the global mask. */
+    void SetGroundNodeMinElevationAngle(uint32_t groundNodeId, double angle);
+
     /**
      * \brief Set ISL maximum distance
      * \param distance Maximum ISL distance in meters
@@ -563,6 +566,7 @@ class LeoSimChannelModel : public Object
 
     // Channel parameters
     double m_minElevationAngle;     //!< Minimum elevation angle (degrees)
+    std::map<uint32_t, double> m_groundNodeMinElevationAngles; //!< Per-ground obstruction masks
     double m_maxLinkDistance;       //!< Maximum link distance (meters)
     double m_frequency;             //!< Carrier frequency (Hz)
     double m_transmitPower;         //!< Transmit power (dBm)

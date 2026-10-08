@@ -34,12 +34,15 @@
 #include "ns3/network-module.h"
 #include "ns3/point-to-point-module.h"
 #include "ns3/rng-seed-manager.h"
+#include "ns3/seq-ts-header.h"
+#include "ns3/udp-socket-factory.h"
 
 #include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <iomanip>
@@ -51,6 +54,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <vector>
 
 #include <fcntl.h>
@@ -61,6 +65,382 @@ using namespace ns3;
 
 namespace
 {
+
+int64_t
+CsvId(uint32_t id)
+{
+    return id == std::numeric_limits<uint32_t>::max() ? -1 : static_cast<int64_t>(id);
+}
+
+class ExperimentRecorder
+{
+  public:
+    ExperimentRecorder(const std::string& prefix,
+                       std::string policy,
+                       Ptr<LeoSimBeamManager> beamManager,
+                       Ptr<LeoSimChannelModel> channel,
+                       const NodeContainer& terminals,
+                       const NodeContainer& satellites,
+                       std::vector<double> masks,
+                       double stopTime)
+        : m_policy(std::move(policy)),
+          m_beamManager(beamManager),
+          m_channel(channel),
+          m_terminals(terminals),
+          m_satellites(satellites),
+          m_masks(std::move(masks)),
+          m_stopTime(stopTime)
+    {
+        for (uint32_t i = 0; i < terminals.GetN(); ++i)
+        {
+            m_terminalIndex[terminals.Get(i)->GetId()] = i;
+        }
+        m_handovers.open(prefix + "-handover_events.csv", std::ios::trunc);
+        m_probes.open(prefix + "-probes.csv", std::ios::trunc);
+        m_tcp.open(prefix + "-tcp.csv", std::ios::trunc);
+        m_load.open(prefix + "-load.csv", std::ios::trunc);
+        m_serving.open(prefix + "-serving.csv", std::ios::trunc);
+        m_handovers << "time,terminal_id,old_sat,new_sat,elevation_old,elevation_new,policy,outcome,execution_time\n";
+        m_probes << "time,terminal_id,seq,rtt,lost,serving_sat\n";
+        m_tcp << "time,terminal_id,throughput,cwnd,retransmits\n";
+        m_load << "time,sat_id,number_of_attached_terminals\n";
+        m_serving << "time,terminal_id,serving_sat,elevation,mask\n";
+    }
+
+    void Start()
+    {
+        m_beamManager->SetHandoverStartCallback(
+            MakeCallback(&ExperimentRecorder::OnHandoverStart, this));
+        m_beamManager->SetHandoverCallback(
+            MakeCallback(&ExperimentRecorder::OnHandoverComplete, this));
+        Simulator::ScheduleNow(&ExperimentRecorder::Sample, this);
+    }
+
+    void RecordProbe(uint32_t terminalId, uint32_t seq, Time sent, double rttMs, bool lost)
+    {
+        const uint32_t sat = CurrentSatellite(terminalId);
+        m_probes << std::fixed << std::setprecision(6) << sent.GetSeconds() << ',' << terminalId
+                 << ',' << seq << ',';
+        if (!lost)
+        {
+            m_probes << rttMs;
+            ++m_probeReceived;
+        }
+        else
+        {
+            ++m_probeLost;
+        }
+        m_probes << ',' << (lost ? "true" : "false") << ',' << CsvId(sat) << '\n';
+    }
+
+    void CountProbeSent()
+    {
+        ++m_probeSent;
+    }
+
+    void RegisterTcpSink(uint32_t terminalId, Ptr<PacketSink> sink)
+    {
+        m_tcpSinks[terminalId] = sink;
+    }
+
+    void RegisterTcpSource(uint32_t terminalId, Ptr<LeoSimTcpTrafficApplication> source)
+    {
+        source->TraceConnect("CongestionWindow",
+                             std::to_string(terminalId),
+                             MakeCallback(&ExperimentRecorder::OnCwnd, this));
+        source->TraceConnect("Retransmission",
+                             std::to_string(terminalId),
+                             MakeCallback(&ExperimentRecorder::OnRetransmission, this));
+    }
+
+    uint64_t GetProbeSent() const { return m_probeSent; }
+    uint64_t GetProbeReceived() const { return m_probeReceived; }
+    uint64_t GetProbeLost() const { return m_probeLost; }
+
+  private:
+    struct Elevations
+    {
+        double oldElevation{0.0};
+        double newElevation{0.0};
+    };
+
+    static uint32_t ParseTerminalContext(const std::string& context)
+    {
+        return static_cast<uint32_t>(std::stoul(context));
+    }
+
+    uint32_t CurrentSatellite(uint32_t terminalId) const
+    {
+        if (terminalId >= m_terminals.GetN())
+        {
+            return std::numeric_limits<uint32_t>::max();
+        }
+        const LeoSimBeamRecord beam =
+            m_beamManager->GetCurrentBeam(m_terminals.Get(terminalId)->GetId());
+        return beam.state == LEOSIM_BEAM_SEARCHING ? std::numeric_limits<uint32_t>::max()
+                                                   : beam.satelliteNodeId;
+    }
+
+    void OnHandoverStart(LeoSimHandoverEvent event)
+    {
+        const auto terminal = m_terminalIndex.find(event.ueNodeId);
+        if (terminal == m_terminalIndex.end())
+        {
+            return;
+        }
+        Elevations elevations;
+        elevations.oldElevation =
+            m_channel->GetLinkQuality(event.ueNodeId, event.sourceSatId).elevationAngle;
+        elevations.newElevation =
+            m_channel->GetLinkQuality(event.ueNodeId, event.targetSatId).elevationAngle;
+        m_handoverElevations[event.ueNodeId] = elevations;
+    }
+
+    void OnHandoverComplete(LeoSimHandoverEvent event)
+    {
+        const auto terminal = m_terminalIndex.find(event.ueNodeId);
+        if (terminal == m_terminalIndex.end())
+        {
+            return;
+        }
+        Elevations elevations;
+        const auto saved = m_handoverElevations.find(event.ueNodeId);
+        if (saved != m_handoverElevations.end())
+        {
+            elevations = saved->second;
+            m_handoverElevations.erase(saved);
+        }
+        else
+        {
+            elevations.oldElevation =
+                m_channel->GetLinkQuality(event.ueNodeId, event.sourceSatId).elevationAngle;
+            elevations.newElevation =
+                m_channel->GetLinkQuality(event.ueNodeId, event.targetSatId).elevationAngle;
+        }
+        m_handovers << std::fixed << std::setprecision(6) << event.initiatedAt.GetSeconds() << ','
+                    << terminal->second << ',' << CsvId(event.sourceSatId) << ','
+                    << CsvId(event.targetSatId) << ',' << elevations.oldElevation << ','
+                    << elevations.newElevation << ',' << m_policy << ','
+                    << (event.success ? "success" : "fail") << ','
+                    << event.handoverLatencyMs / 1000.0 << '\n';
+    }
+
+    void OnCwnd(std::string context, uint32_t, uint32_t newValue)
+    {
+        m_cwnd[ParseTerminalContext(context)] = newValue;
+    }
+
+    void OnRetransmission(std::string context, Ptr<const Packet>)
+    {
+        ++m_retransmissions[ParseTerminalContext(context)];
+    }
+
+    void Sample()
+    {
+        const double now = Simulator::Now().GetSeconds();
+        std::map<uint32_t, uint32_t> attached;
+        for (uint32_t terminal = 0; terminal < m_terminals.GetN(); ++terminal)
+        {
+            const uint32_t sat = CurrentSatellite(terminal);
+            if (sat != std::numeric_limits<uint32_t>::max())
+            {
+                ++attached[sat];
+            }
+            double elevation = 0.0;
+            if (sat != std::numeric_limits<uint32_t>::max())
+            {
+                elevation = m_channel
+                                ->GetLinkQuality(m_terminals.Get(terminal)->GetId(), sat)
+                                .elevationAngle;
+            }
+            m_serving << std::fixed << std::setprecision(6) << now << ',' << terminal << ','
+                      << CsvId(sat) << ',' << elevation << ',' << m_masks.at(terminal) << '\n';
+        }
+        for (uint32_t i = 0; i < m_satellites.GetN(); ++i)
+        {
+            const uint32_t sat = m_satellites.Get(i)->GetId();
+            m_load << std::fixed << std::setprecision(6) << now << ',' << sat << ','
+                   << attached[sat] << '\n';
+        }
+        for (const auto& [terminal, sink] : m_tcpSinks)
+        {
+            const uint64_t total = sink->GetTotalRx();
+            const uint64_t previous = m_lastTcpBytes[terminal];
+            m_tcp << std::fixed << std::setprecision(6) << now << ',' << terminal << ','
+                  << static_cast<double>(total - previous) * 8.0 / 1e6 << ','
+                  << m_cwnd[terminal] << ',' << m_retransmissions[terminal] << '\n';
+            m_lastTcpBytes[terminal] = total;
+        }
+        if (now + 1.0 <= m_stopTime)
+        {
+            Simulator::Schedule(Seconds(1.0), &ExperimentRecorder::Sample, this);
+        }
+    }
+
+    std::string m_policy;
+    Ptr<LeoSimBeamManager> m_beamManager;
+    Ptr<LeoSimChannelModel> m_channel;
+    NodeContainer m_terminals;
+    NodeContainer m_satellites;
+    std::vector<double> m_masks;
+    double m_stopTime;
+    std::map<uint32_t, uint32_t> m_terminalIndex;
+    std::map<uint32_t, Elevations> m_handoverElevations;
+    std::map<uint32_t, Ptr<PacketSink>> m_tcpSinks;
+    std::map<uint32_t, uint64_t> m_lastTcpBytes;
+    std::map<uint32_t, uint32_t> m_cwnd;
+    std::map<uint32_t, uint64_t> m_retransmissions;
+    std::ofstream m_handovers;
+    std::ofstream m_probes;
+    std::ofstream m_tcp;
+    std::ofstream m_load;
+    std::ofstream m_serving;
+    uint64_t m_probeSent{0};
+    uint64_t m_probeReceived{0};
+    uint64_t m_probeLost{0};
+};
+
+class ProbeEchoServer : public Application
+{
+  public:
+    void Configure(uint16_t port) { m_port = port; }
+
+  private:
+    void StartApplication() override
+    {
+        m_socket = Socket::CreateSocket(GetNode(), UdpSocketFactory::GetTypeId());
+        m_socket->Bind(InetSocketAddress(Ipv4Address::GetAny(), m_port));
+        m_socket->SetRecvCallback(MakeCallback(&ProbeEchoServer::Receive, this));
+    }
+    void StopApplication() override
+    {
+        if (m_socket)
+        {
+            m_socket->Close();
+            m_socket = nullptr;
+        }
+    }
+    void Receive(Ptr<Socket> socket)
+    {
+        Address from;
+        while (Ptr<Packet> packet = socket->RecvFrom(from))
+        {
+            socket->SendTo(packet, 0, from);
+        }
+    }
+    Ptr<Socket> m_socket;
+    uint16_t m_port{0};
+};
+
+class ProbeClient : public Application
+{
+  public:
+    void Configure(Address remote,
+                   uint32_t terminalId,
+                   Time interval,
+                   uint32_t packetSize,
+                   Time timeout,
+                   ExperimentRecorder* recorder)
+    {
+        m_remote = remote;
+        m_terminalId = terminalId;
+        m_interval = interval;
+        m_packetSize = packetSize;
+        m_timeout = timeout;
+        m_recorder = recorder;
+    }
+
+  private:
+    void StartApplication() override
+    {
+        m_running = true;
+        m_socket = Socket::CreateSocket(GetNode(), UdpSocketFactory::GetTypeId());
+        m_socket->Bind();
+        m_socket->Connect(m_remote);
+        m_socket->SetRecvCallback(MakeCallback(&ProbeClient::Receive, this));
+        Send();
+    }
+    void StopApplication() override
+    {
+        m_running = false;
+        Simulator::Cancel(m_sendEvent);
+        for (const auto& [seq, sent] : m_pending)
+        {
+            m_recorder->RecordProbe(m_terminalId, seq, sent, 0.0, true);
+        }
+        m_pending.clear();
+        if (m_socket)
+        {
+            m_socket->Close();
+            m_socket = nullptr;
+        }
+    }
+    void Send()
+    {
+        if (!m_running)
+        {
+            return;
+        }
+        SeqTsHeader header;
+        header.SetSeq(m_nextSeq);
+        const uint32_t headerSize = header.GetSerializedSize();
+        Ptr<Packet> packet = Create<Packet>(m_packetSize > headerSize ? m_packetSize - headerSize : 0);
+        packet->AddHeader(header);
+        m_pending[m_nextSeq] = Simulator::Now();
+        m_recorder->CountProbeSent();
+        m_socket->Send(packet);
+        Simulator::Schedule(m_timeout, &ProbeClient::Timeout, this, m_nextSeq);
+        ++m_nextSeq;
+        m_sendEvent = Simulator::Schedule(m_interval, &ProbeClient::Send, this);
+    }
+    void Receive(Ptr<Socket> socket)
+    {
+        while (Ptr<Packet> packet = socket->Recv())
+        {
+            SeqTsHeader header;
+            if (packet->PeekHeader(header) == 0)
+            {
+                continue;
+            }
+            const uint32_t seq = header.GetSeq();
+            const auto found = m_pending.find(seq);
+            if (found == m_pending.end())
+            {
+                continue;
+            }
+            const Time sent = found->second;
+            m_pending.erase(found);
+            m_recorder->RecordProbe(m_terminalId,
+                                    seq,
+                                    sent,
+                                    (Simulator::Now() - sent).GetSeconds() * 1000.0,
+                                    false);
+        }
+    }
+    void Timeout(uint32_t seq)
+    {
+        const auto found = m_pending.find(seq);
+        if (found == m_pending.end())
+        {
+            return;
+        }
+        const Time sent = found->second;
+        m_pending.erase(found);
+        m_recorder->RecordProbe(m_terminalId, seq, sent, 0.0, true);
+    }
+
+    Address m_remote;
+    uint32_t m_terminalId{0};
+    Time m_interval;
+    uint32_t m_packetSize{200};
+    Time m_timeout{Seconds(2)};
+    ExperimentRecorder* m_recorder{nullptr};
+    Ptr<Socket> m_socket;
+    EventId m_sendEvent;
+    std::map<uint32_t, Time> m_pending;
+    uint32_t m_nextSeq{0};
+    bool m_running{false};
+};
 
 std::vector<uint32_t>
 LoadSatelliteSelection(const std::string& filename)
@@ -120,6 +500,25 @@ BuildRunSuffix(const std::string& handoverMode, uint32_t rngSeed, uint64_t rngRu
     }
     suffix << "-t" << micros << "-pid" << getpid();
     return suffix.str();
+}
+
+void
+EnsureOutputDirectory(const std::string& outputPrefix)
+{
+    const std::filesystem::path directory =
+        std::filesystem::path(outputPrefix).parent_path();
+    if (directory.empty())
+    {
+        return;
+    }
+
+    std::error_code error;
+    std::filesystem::create_directories(directory, error);
+    if (error)
+    {
+        throw std::runtime_error("Cannot create output directory " + directory.string() +
+                                 ": " + error.message());
+    }
 }
 
 class OutputPrefixLock
@@ -1181,9 +1580,10 @@ int
 main(int argc, char* argv[])
 {
     std::string leosimDataDir = "datasets/leosim/default";
-    std::string satelliteFile = "../datasets/leosim/generated/default/prepro/satellite_mobility.tcl";
+    std::string satelliteFile =
+        "../datasets/leosim/generated/default/prepro/satellite_mobility.tcl";
     std::string groundDeviceFile;
-    std::string outputPrefix = "leosim-experiments";
+    std::string outputPrefix = "../results/leosim/examples/leosim-experiments";
     bool uniqueOutputPrefix = true;
     double simTime = 200.0;
     bool useTrace = true;
@@ -1317,6 +1717,14 @@ main(int argc, char* argv[])
     double choPrepMs = 100.0;
     double choExecMs = 150.0;
     double beamUpdateIntervalMs = 1000.0;
+    std::string experimentTraffic = "legacy";
+    std::string handoverPolicy = "default";
+    uint32_t highMaskTerminals = 2;
+    double highMaskDelta = 10.0;
+    double elevationGuard = 1.0;
+    double probeRateHz = 20.0;
+    uint32_t probePacketSize = 200;
+    double probeTimeout = 2.0;
     uint32_t rngSeed = 1;
     uint64_t rngRun = 1;
 
@@ -1581,6 +1989,24 @@ main(int argc, char* argv[])
     cmd.AddValue("choPrep", "CHO preparation delay in milliseconds", choPrepMs);
     cmd.AddValue("choExec", "CHO execution delay in milliseconds", choExecMs);
     cmd.AddValue("beamUpdateIntervalMs", "Beam manager update interval in milliseconds", beamUpdateIntervalMs);
+    cmd.AddValue("trafficMode",
+                 "Traffic workload: legacy, handover-only, udp-probe, or tcp",
+                 experimentTraffic);
+    cmd.AddValue("handoverPolicy",
+                 "Candidate policy: default, highest-elevation, strongest-signal, or load-aware",
+                 handoverPolicy);
+    cmd.AddValue("highMaskTerminals",
+                 "Number of final terminals assigned an elevated obstruction mask",
+                 highMaskTerminals);
+    cmd.AddValue("highMaskDelta",
+                 "Degrees added to the base mask for obstructed terminals",
+                 highMaskDelta);
+    cmd.AddValue("elevationGuard",
+                 "Operational margin above each configured elevation mask in degrees",
+                 elevationGuard);
+    cmd.AddValue("probeRateHz", "UDP probe rate per terminal", probeRateHz);
+    cmd.AddValue("probePacketSize", "UDP probe packet size including sequence header", probePacketSize);
+    cmd.AddValue("probeTimeout", "Seconds before an unanswered UDP probe is declared lost", probeTimeout);
     cmd.Parse(argc, argv);
 
     if (accessCandidateSampleInterval <= 0.0)
@@ -1605,6 +2031,38 @@ main(int argc, char* argv[])
     if (hoModeName != "BHO" && hoModeName != "CHO")
     {
         NS_FATAL_ERROR("hoMode must be BHO or CHO");
+    }
+    if (experimentTraffic != "legacy" && experimentTraffic != "handover-only" &&
+        experimentTraffic != "udp-probe" && experimentTraffic != "tcp")
+    {
+        NS_FATAL_ERROR("trafficMode must be legacy, handover-only, udp-probe, or tcp");
+    }
+    if (handoverPolicy != "default" && handoverPolicy != "highest-elevation" &&
+        handoverPolicy != "strongest-signal" && handoverPolicy != "load-aware")
+    {
+        NS_FATAL_ERROR("handoverPolicy must be default, highest-elevation, strongest-signal, or load-aware");
+    }
+    if (highMaskDelta < 0.0 || elevationGuard < 0.0 || probeRateHz <= 0.0 || probePacketSize < 16 ||
+        probeTimeout <= 0.0)
+    {
+        NS_FATAL_ERROR("Invalid elevated-mask or UDP-probe configuration");
+    }
+    if (experimentTraffic == "handover-only")
+    {
+        enableDataTraffic = false;
+        allToAllTraffic = false;
+        enableHandoverLogging = false;
+    }
+    else if (experimentTraffic == "udp-probe")
+    {
+        enableDataTraffic = false;
+        enableHandoverLogging = false;
+    }
+    else if (experimentTraffic == "tcp")
+    {
+        enableDataTraffic = true;
+        allToAllTraffic = true;
+        enableHandoverLogging = false;
     }
     if (maxCandidates == 0 || hoBufferSize == 0 || ttt < 0.0 || t310 < 0.0 || tteTrigger < 0.0 ||
         choPrepMs < 0.0 || choExecMs < 0.0 || beamUpdateIntervalMs <= 0.0)
@@ -1655,6 +2113,7 @@ main(int argc, char* argv[])
     {
         outputPrefix += BuildRunSuffix(hoModeName, rngSeed, rngRun);
     }
+    EnsureOutputDirectory(outputPrefix);
     OutputPrefixLock outputPrefixLock(outputPrefix);
     std::cout << "Output prefix: " << outputPrefix << std::endl;
     const auto routingMetric = ParseRoutingMetric(routingMetricName);
@@ -1851,6 +2310,19 @@ main(int argc, char* argv[])
     ueNodes.Create(numUes);
     timer.Log("node creation");
 
+    highMaskTerminals = std::min(highMaskTerminals, numUes);
+    std::vector<double> terminalMasks(numUes, minElevation);
+    std::map<uint32_t, double> terminalMaskOverrides;
+    for (uint32_t i = 0; i < numUes; ++i)
+    {
+        terminalMaskOverrides[ueNodes.Get(i)->GetId()] = minElevation + elevationGuard;
+    }
+    for (uint32_t i = numUes - highMaskTerminals; i < numUes; ++i)
+    {
+        terminalMasks[i] = minElevation + highMaskDelta;
+        terminalMaskOverrides[ueNodes.Get(i)->GetId()] = terminalMasks[i] + elevationGuard;
+    }
+
     std::vector<double> ueActivationTimes(numUes, 0.0);
     std::map<uint32_t, Time> groundNodeActivationTimes;
     if (enableDynamicGroundNodes)
@@ -1975,6 +2447,10 @@ main(int argc, char* argv[])
     accessChannelHelper.SetVerbose(verbose);
     Ptr<LeoSimChannelModel> accessChannel =
         accessChannelHelper.CreateChannels(satelliteNodes, allGroundNodes);
+    for (const auto& [groundNodeId, threshold] : terminalMaskOverrides)
+    {
+        accessChannel->SetGroundNodeMinElevationAngle(groundNodeId, threshold);
+    }
     accessChannel->SetOperatorModel(operatorModel);
     timer.Log("access channel creation");
 
@@ -2278,11 +2754,27 @@ main(int argc, char* argv[])
     beamHelper.SetN311(n311);
     beamHelper.SetA3Offset(a3Offset);
     beamHelper.SetA4Threshold(a4Threshold);
+    beamHelper.SetElevationThreshold(minElevation + elevationGuard);
+    beamHelper.SetGroundNodeElevationThresholds(terminalMaskOverrides);
     beamHelper.SetTteThreshold(Seconds(tteTrigger));
     beamHelper.SetSinrThreshold(-10.0);
     beamHelper.SetChoPreparationDelay(MilliSeconds(choPrepMs));
     beamHelper.SetChoExecutionDelay(MilliSeconds(choExecMs));
-    beamHelper.SetTopsisWeights(0.30, 0.25, 0.20, 0.15, 0.10, 0.05, 0.05);
+    if (handoverPolicy == "highest-elevation")
+    {
+        beamHelper.SetTopsisWeights(0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0);
+        beamHelper.EnableLoadBalancing(false);
+    }
+    else if (handoverPolicy == "strongest-signal")
+    {
+        beamHelper.SetTopsisWeights(1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        beamHelper.EnableLoadBalancing(false);
+    }
+    else
+    {
+        beamHelper.SetTopsisWeights(0.18, 0.22, 0.14, 0.10, 0.08, 0.14, 0.00, 0.10, 0.14);
+        beamHelper.EnableLoadBalancing(handoverPolicy == "load-aware" || enableLoadBalancing);
+    }
     beamHelper.SetMaxCandidates(maxCandidates);
     beamHelper.SetUpdateInterval(MilliSeconds(beamUpdateIntervalMs));
     if (enableDynamicGroundNodes)
@@ -2295,7 +2787,6 @@ main(int argc, char* argv[])
             std::cout << "Ground-node lifecycle data: " << lifecycleFile << std::endl;
         }
     }
-    beamHelper.EnableLoadBalancing(enableLoadBalancing);
     beamHelper.EnableHandoverBuffering(enableHoBuffering);
     beamHelper.SetMaxHandoverBufferSize(hoBufferSize);
 
@@ -2475,7 +2966,12 @@ main(int argc, char* argv[])
     // cached next hop for every graph node, so forwarding tables remain complete.
     LeoSimExternalRoutingHelper routeTreeHelper;
 
-    if (useTrees)
+    if (experimentTraffic == "handover-only")
+    {
+        std::cout << "[routing] Skipping route installation for handover-only workload"
+                  << std::endl;
+    }
+    else if (useTrees)
     {
         routeTreeHelper.SetEnginePath(routeTreeEngine);
         routeTreeHelper.SetWorkingDirectory(routeTreeWorkDir);
@@ -2583,7 +3079,7 @@ main(int argc, char* argv[])
                                       routingMetric);
     }
 
-    if (!useTrees)
+    if (experimentTraffic != "handover-only" && !useTrees)
     {
         // Reactive routing: update routes when links change or handover occurs
         // Match the destination-tree event coalescing above for in-process routing.
@@ -2601,6 +3097,19 @@ main(int argc, char* argv[])
                          &routingHelper));
     }
     timer.Log("routing setup");
+
+    std::unique_ptr<ExperimentRecorder> experimentRecorder;
+    if (experimentTraffic != "legacy")
+    {
+        experimentRecorder = std::make_unique<ExperimentRecorder>(outputPrefix,
+                                                                   handoverPolicy,
+                                                                   beamManager,
+                                                                   accessChannel,
+                                                                   ueNodes,
+                                                                   satelliteNodes,
+                                                                   terminalMasks,
+                                                                   simTime);
+    }
 
     timer.Begin("traffic application installation");
     ApplicationContainer trafficApps;
@@ -2646,6 +3155,61 @@ main(int argc, char* argv[])
                                                    appStop,
                                                    udpRate,
                                                    udpPacketSize);
+    }
+    if (experimentTraffic == "udp-probe")
+    {
+        if (serverNodes.GetN() != 1)
+        {
+            NS_FATAL_ERROR("udp-probe traffic requires exactly one server/gateway node");
+        }
+        const Ipv4Address serverAddress = GetFirstNonLoopbackAddress(serverNodes.Get(0));
+        Ptr<ProbeEchoServer> server = CreateObject<ProbeEchoServer>();
+        server->Configure(port);
+        serverNodes.Get(0)->AddApplication(server);
+        server->SetStartTime(Seconds(appStart > 0.1 ? appStart - 0.1 : 0.0));
+        server->SetStopTime(Seconds(appStop));
+        trafficApps.Add(server);
+        for (uint32_t terminal = 0; terminal < ueNodes.GetN(); ++terminal)
+        {
+            Ptr<ProbeClient> client = CreateObject<ProbeClient>();
+            client->Configure(InetSocketAddress(serverAddress, port),
+                              terminal,
+                              Seconds(1.0 / probeRateHz),
+                              probePacketSize,
+                              Seconds(probeTimeout),
+                              experimentRecorder.get());
+            ueNodes.Get(terminal)->AddApplication(client);
+            client->SetStartTime(Seconds(appStart));
+            client->SetStopTime(Seconds(appStop));
+            trafficApps.Add(client);
+        }
+    }
+
+    if (experimentRecorder)
+    {
+        uint32_t sinkTerminal = 0;
+        for (uint32_t i = 0; i < trafficApps.GetN(); ++i)
+        {
+            Ptr<PacketSink> sink = DynamicCast<PacketSink>(trafficApps.Get(i));
+            if (sink && experimentTraffic == "tcp" && sinkTerminal < numUes)
+            {
+                experimentRecorder->RegisterTcpSink(sinkTerminal++, sink);
+            }
+            Ptr<LeoSimTcpTrafficApplication> source =
+                DynamicCast<LeoSimTcpTrafficApplication>(trafficApps.Get(i));
+            if (source && experimentTraffic == "tcp")
+            {
+                for (uint32_t terminal = 0; terminal < ueNodes.GetN(); ++terminal)
+                {
+                    if (source->GetNode() == ueNodes.Get(terminal))
+                    {
+                        experimentRecorder->RegisterTcpSource(terminal, source);
+                        break;
+                    }
+                }
+            }
+        }
+        experimentRecorder->Start();
     }
     ApplicationContainer uePingApps;
     if (enableUePing)
@@ -2773,6 +3337,18 @@ main(int argc, char* argv[])
     if (enableVisualization || enableHandoverLogging)
     {
         visualizationHelper.Finalize();
+    }
+    if (experimentRecorder)
+    {
+        const uint64_t sent = experimentRecorder->GetProbeSent();
+        const uint64_t received = experimentRecorder->GetProbeReceived();
+        const uint64_t lost = experimentRecorder->GetProbeLost();
+        std::cout << "Probe accounting: sent=" << sent << ", received=" << received
+                  << ", lost=" << lost << std::endl;
+        if (experimentTraffic == "udp-probe" && sent != received + lost)
+        {
+            NS_FATAL_ERROR("Probe accounting invariant failed");
+        }
     }
     if (enableVisualization)
     {
